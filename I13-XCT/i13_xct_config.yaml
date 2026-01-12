@@ -1,0 +1,32 @@
+# This is a config.yaml file for cli_demo to define the params
+# for the model, and dataset
+
+seed_everything: 42
+
+trainer:
+  precision: "16-mixed"
+  max_epochs: 1000
+  devices: 1
+  accelerator: "gpu"
+  check_val_every_n_epoch: 10
+  log_every_n_steps: 1000
+
+model:
+
+  learning_rate: 0.00001
+  adaptive_size: 40
+  accumulate_n_batches: 1
+
+
+data:
+  low_file: '/PATH/TO/LOW-RES_DATA/'
+  high_file: '/PATH/TO/HIGH-RES_DATA/'
+  dataset_size: 1000
+  train_size: 0.8
+  valid_size: 0.1
+  test_size: 0.1
+  batch_size: 1
+  num_workers: 0
+  pin_memory: True
+  persistent_workers: False
+  testing: True

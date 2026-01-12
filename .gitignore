@@ -1,0 +1,8 @@
+
+.DS_Store
+__pycache__
+lightning_logs
+*_loss.txt
+SRGAN-XCT.code-workspace
+*.ipynb
+.vscode*

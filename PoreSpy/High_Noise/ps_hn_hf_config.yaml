@@ -1,0 +1,34 @@
+# this is the config file for the high-feature porespy data
+
+seed_everything: 42
+
+trainer:
+  precision: "16-mixed"
+  max_epochs: 4001
+  devices: 1
+  accelerator: "gpu"
+  check_val_every_n_epoch: 200
+  log_every_n_steps: 200
+  # callbacks: [TQDMProgressBar(refresh_rate=int(max_epochs/10))]
+
+model:
+  learning_rate: 0.00001
+  adaptive_size: 6
+  accumulate_n_batches: 1
+  super_res_factor: 2
+  num_blocks: 16
+
+data:
+  high_file: "High_Noise/ps_3d_high_hf.tif"
+  low_xy_file: "High_Noise/ps_3d_low_hf_xy.tif"
+  low_xz_file: "High_Noise/ps_3d_low_hf_xz.tif"
+  low_yz_file: "High_Noise/ps_3d_low_hf_yz.tif"
+  dataset_size: 250
+  train_size: 0.8
+  valid_size: 0.1
+  test_size: 0.1
+  test_axis: "perpendicular"
+  batch_size: 1
+  num_workers: 0
+  pin_memory: True
+  persistent_workers: False

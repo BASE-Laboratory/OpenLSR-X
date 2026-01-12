@@ -1,0 +1,40 @@
+# This is a config.yaml file for cli_demo to define the params
+# for the model, and dataset
+
+seed_everything: 42
+
+trainer:
+  precision: "16-mixed"
+  max_epochs: 1001
+  devices: 1
+  accelerator: "gpu"
+  check_val_every_n_epoch: 200
+  log_every_n_steps: 200
+
+ckpt_path: "/PATH/TO/CHECKPOINTS/FOR/RESUMING"
+
+model:
+  # gen: Generator
+  # disc: Discriminator
+  learning_rate: 0.00001
+  adaptive_size: 40
+  accumulate_n_batches: 1
+  super_res_factor: 2
+  num_blocks: 10
+  sampled_id: "Zn13X"
+  strict_loading: False
+
+data:
+  low_file: '/PATH/TO/LOW-RES_DATA/'
+  high_file: '/PATH/TO/HIGH-RES_DATA/'
+  dataset_size: 10
+  train_size: 0.8
+  valid_size: 0.1
+  test_size: 0.1
+  batch_size: 1
+  num_workers: 0
+  pin_memory: True
+  persistent_workers: False
+  predict_axis: "xy"
+  testing: False
+  predict: True
