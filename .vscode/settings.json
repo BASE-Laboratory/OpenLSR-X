@@ -1,0 +1,11 @@
+{
+    "python.terminal.activateEnvironment": true,
+    "python.formatting.provider": "black",
+    "editor.formatOnSave": true,
+    "python.analysis.typeCheckingMode": "basic",
+    "jupyter.interactiveWindow.creationMode": "perFile",
+    "python.venvPath": "${workspaceFolder}",
+    "python.venvFolders": [
+        ".venv"
+    ]
+}
