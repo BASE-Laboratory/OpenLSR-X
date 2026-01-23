@@ -30,31 +30,45 @@ OpenLSR-X implements a Learnable Super-Resolution Generative Adversarial Network
    git clone <repo-url>
    cd OpenLSR-X
    ```
-2. Create the environment:
+2. Create the environment with uv:
    ```bash
-   conda create --name openlsr-x_env --file requirements.txt
-   conda activate openlsr-x_env
+   uv venv
+   uv pip install -r requirements.txt
+   uv pip install -e .
    ```
+3. (Optional) Reproduce the exact environment:
+   ```bash
+   uv pip install -r requirements.lock
+   ```
+
+### Developer Setup
+
+- Run the CLI from source:
+  ```bash
+  python3 -m openlsrx.cli --help
+  ```
+- Run tests:
+  ```bash
+  python3 -m unittest discover -s tests
+  ```
 
 ### Usage Example
 
 Train a model using the provided config:
 ```bash
-python3 main.py fit -c config.yaml
+python3 -m openlsrx.cli fit -c configs/base/config.yaml
 ```
 Override parameters from the command line:
 ```bash
-python3 main.py fit -c config.yaml --model.learning_rate 0.0001 --data.batch_size 16
+python3 -m openlsrx.cli fit -c configs/base/config.yaml --model.learning_rate 0.0001 --data.batch_size 16
 ```
 For dataset-specific training or prediction, use the corresponding entry points, e.g.:
 ```bash
-python3 LabXCT/bentsand.py fit -c LabXCT/bs_config.yaml
-python3 PoreSpy/porespy_xct.py fit -c PoreSpy/High_Noise/ps_hn_hf_config.yaml
+python3 -m openlsrx.entrypoints.bentsand fit -c configs/labxct/bs_config.yaml
+python3 -m openlsrx.entrypoints.porespy_xct fit -c configs/porespy/High_Noise/ps_hn_hf_config.yaml
 ```
 
----
-
-## DataLoaders Summary
+---## DataLoaders Summary
 
 The project provides several PyTorch Lightning DataModules for handling different XCT datasets:
 
@@ -70,18 +84,16 @@ Each DataModule supports configuration of batch size, patch size, and augmentati
 
 ## Project Structure
 
-- `main.py` — CLI entry point for training
-- `srgan.py` — SRGAN LightningModule implementation
-- `submodels.py` — Generator and Discriminator architectures
-- `dataset.py` — Data processing and LightningDataModules
-- `LabXCT/`, `PoreSpy/`, `I13-XCT/` — Dataset-specific modules and configs
-- `blocks.py` — Model building blocks
-- `loss.py` — Loss functions
-- `*.sh` — Batch job scripts for cluster environments
+- `src/openlsrx/` - Package code
+- `src/openlsrx/models/` - SRGAN, generator/discriminator, and blocks
+- `src/openlsrx/data/` - Data processing and LightningDataModules
+- `src/openlsrx/entrypoints/` - Dataset-specific CLI modules
+- `src/openlsrx/losses/` - Loss functions
+- `configs/` - YAML config files
+- `scripts/` - Batch job scripts for cluster environments
+- `tests/` - Unit tests
 
----
-
-## Support & Documentation
+---## Support & Documentation
 
 - For issues, use the repository's [GitHub Issues](../../issues) page.
 - For advanced usage and API details, see code comments and docstrings.
@@ -105,3 +117,4 @@ See [LICENSE](LICENSE) for details.
 ---
 
 This README was generated using AI.
+

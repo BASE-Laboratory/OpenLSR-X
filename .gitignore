@@ -1,8 +1,10 @@
 
 .DS_Store
 __pycache__
+.venv/
+data/
+*.egg-info/
 lightning_logs
 *_loss.txt
 SRGAN-XCT.code-workspace
 *.ipynb
-.vscode*
