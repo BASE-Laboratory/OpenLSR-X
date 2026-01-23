@@ -12,7 +12,7 @@ trainer:
   num_sanity_val_steps: 0
   # callbacks: [TQDMProgressBar(refresh_rate=int(max_epochs/10))]
 
-ckpt_path: "/dls/science/groups/imaging/infuse/Calum_SuperRes/LabXCT/IndLime/lightning_logs/version_1/checkpoints/epoch=7999-step=1280000.ckpt"
+ckpt_path: "PATH/TO/CHECKPOINTS/FOR/RESUMING"
 
 model:
   learning_rate: 0.00001
@@ -26,8 +26,8 @@ model:
 
 
 data:
-  low_folder: "/dls/science/groups/imaging/infuse/Calum_SuperRes/LabXCT/SampleA_FastScan_18um_Limestone/"
-  high_folder: "/dls/science/groups/imaging/infuse/Calum_SuperRes/LabXCT/SampleA_Full_10um_Limestone/"
+  low_folder: "/PATH/TO/LOW-RES/DATA/"
+  high_folder: "/PATH/TO/HIGH-RES/DATA/"
   dataset_size: 100
   train_size: 0.8
   valid_size: 0.1
@@ -36,5 +36,5 @@ data:
   num_workers: 0
   pin_memory: True
   persistent_workers: False
-  predict_stack: "/dls/science/groups/imaging/infuse/Calum_SuperRes/LabXCT/SampleA_FastScan_18um_Limestone/SampleA_FastScan_18um_Limestone_stack.tiff"
+  predict_stack: "/PATH/TO/PREDICT/STACK/"
   predict_axis: "xy"
