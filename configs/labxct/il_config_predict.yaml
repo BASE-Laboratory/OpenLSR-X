@@ -1,40 +1,26 @@
-# this is the config file for the indiana limestone dataset
-
+# Indiana Limestone orthogonal prediction configuration
+# Pass --ckpt_path path/to/indlime.ckpt
 seed_everything: 42
 
 trainer:
-  precision: "16-mixed"
-  max_epochs: 8001
+  accelerator: auto
   devices: 1
-  accelerator: "gpu"
-  check_val_every_n_epoch: 200
-  log_every_n_steps: 200
-  num_sanity_val_steps: 0
-  # callbacks: [TQDMProgressBar(refresh_rate=int(max_epochs/10))]
-
-ckpt_path: "PATH/TO/CHECKPOINTS/FOR/RESUMING"
+  precision: 32-true
 
 model:
-  learning_rate: 0.00001
-  adaptive_size: 40
-  accumulate_n_batches: 1
+  learning_rate: 5.0e-5
+  adaptive_size: 16
   super_res_factor: 2
-  num_blocks: 10
-  use_vgg_loss: False
-  sample_id: "indlime"
-  strict_loading: False
-
+  num_blocks: 12
+  sample_id: indlime
 
 data:
-  low_folder: "/PATH/TO/LOW-RES/DATA/"
-  high_folder: "/PATH/TO/HIGH-RES/DATA/"
-  dataset_size: 100
-  train_size: 0.8
-  valid_size: 0.1
-  test_size: 0.1
-  batch_size: 1
-  num_workers: 0
-  pin_memory: True
-  persistent_workers: False
-  predict_stack: "/PATH/TO/PREDICT/STACK/"
-  predict_axis: "xy"
+  class_path: openlsrx.data.PairedVolumeDataModule
+  init_args:
+    high_path: data/benchmarks/indiana_limestone_hr.tif
+    degrade_from_hr: true
+    scale_factor: 2
+    predict_axis: xz
+    eval_batch_size: 4
+    num_workers: 0
+    seed: 42

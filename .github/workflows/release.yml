@@ -1,0 +1,91 @@
+name: Release & JOSS Paper CD
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  pull_request:
+    paths:
+      - "paper/**"
+      - ".github/workflows/release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  joss-paper:
+    name: Compile JOSS Paper PDF (Inara)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build JOSS PDF via openjournals/inara
+        uses: openjournals/inara@main
+        with:
+          args: -o pdf paper/paper.md
+
+      - name: Upload compiled JOSS PDF
+        uses: actions/upload-artifact@v4
+        with:
+          name: joss-paper-pdf
+          path: paper/paper.pdf
+
+  build-dist:
+    name: Build & Smoke-Test Python Distributions
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Build wheel and sdist
+        run: |
+          uv build
+          sha256sum dist/* > dist/SHA256SUMS.txt
+
+      - name: Smoke-test built wheel in isolated environment
+        run: |
+          uv python install 3.11
+          uv venv /tmp/wheel-smoke --python 3.11
+          uv pip install --python /tmp/wheel-smoke/bin/python --index-url https://download.pytorch.org/whl/cpu torch torchvision
+          uv pip install --python /tmp/wheel-smoke/bin/python dist/*.whl
+          /tmp/wheel-smoke/bin/openlsrx --help
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*
+
+  github-release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [joss-paper, build-dist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: python-dist
+          path: dist
+
+      - name: Download JOSS PDF
+        uses: actions/download-artifact@v4
+        with:
+          name: joss-paper-pdf
+          path: dist
+
+      - name: Create GitHub Release with wheel, sdist, checksums, and JOSS PDF
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* \
+            --repo "${GITHUB_REPOSITORY}" \
+            --generate-notes \
+            --title "OpenLSR-X ${GITHUB_REF_NAME}"

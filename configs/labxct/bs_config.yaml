@@ -1,33 +1,47 @@
-# this is the config file for the bentheimer sandstone dataset
-
+# Bentheimer Sandstone XCT configuration
+# Prepare public benchmark data via: openlsrx download-benchmarks
+# For paired real LabXCT folders/TIFFs, set low_path and degrade_from_hr: false
 seed_everything: 42
 
 trainer:
-  precision: "16-mixed"
-  max_epochs: 8001
+  accelerator: auto
   devices: 1
-  accelerator: "gpu"
-  check_val_every_n_epoch: 200
-  log_every_n_steps: 200
-  # callbacks: [TQDMProgressBar(refresh_rate=int(max_epochs/10))]
-  
-ckpt_path: "PATH/TO/CHECKPOINTS/FOR/RESUMING"
+  precision: 16-mixed
+  max_epochs: 500
+  check_val_every_n_epoch: 25
+  log_every_n_steps: 25
 
 model:
-  learning_rate: 0.00001
-  adaptive_size: 40
+  learning_rate: 5.0e-5
+  adaptive_size: 16
   accumulate_n_batches: 1
   super_res_factor: 2
   num_blocks: 10
+  pretrain_epochs: 10
+  use_adversarial_loss: true
+  use_vgg_loss: false
+  sample_id: bentsand
 
 data:
-  low_folder: '/PATH/TO/LOW-RES_DATA/'
-  high_folder: "/PATH/TO/HIGH-RES_DATA/"
-  dataset_size: 100
-  train_size: 0.8
-  valid_size: 0.1
-  test_size: 0.1
-  batch_size: 1
-  num_workers: 0
-  pin_memory: True
-  persistent_workers: False
+  class_path: openlsrx.data.PairedVolumeDataModule
+  init_args:
+    high_path: data/benchmarks/bentheimer_sandstone_hr.tif
+    degrade_from_hr: true
+    scale_factor: 2
+    psf_sigma: 0.85
+    degrade_noise_std: 0.025
+    norm_mode: percentile
+    lower_pct: 0.5
+    upper_pct: 99.5
+    train_frac: 0.70
+    val_frac: 0.15
+    guard_slices_lr: 1
+    train_axes: ["yz"]
+    test_axis: perpendicular
+    predict_axis: xz
+    patch_size_lr: 32
+    augment: true
+    batch_size: 4
+    eval_batch_size: 4
+    num_workers: 0
+    seed: 42

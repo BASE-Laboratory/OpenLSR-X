@@ -1,120 +1,107 @@
 # OpenLSR-X
 
-![](https://img.shields.io/badge/day%20📅-22-blue)
-![Python](https://img.shields.io/badge/python-3.10-blue.svg)
-[![Lightning](https://img.shields.io/badge/-Lightning-792ee5?logo=pytorchlightning&logoColor=white)](https://github.com/Lightning-AI/lightning)
-[![License](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
+[![CI](https://github.com/BASE-Laboratory/OpenLSR-X/actions/workflows/ci.yml/badge.svg)](https://github.com/BASE-Laboratory/OpenLSR-X/actions/workflows/ci.yml)
+[![Docs](https://github.com/BASE-Laboratory/OpenLSR-X/actions/workflows/docs.yml/badge.svg)](https://base-laboratory.github.io/OpenLSR-X/)
+[![JOSS Paper](https://github.com/BASE-Laboratory/OpenLSR-X/actions/workflows/release.yml/badge.svg)](https://github.com/BASE-Laboratory/OpenLSR-X/actions/workflows/release.yml)
+![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+[![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
+
+**OpenLSR-X** is a reproducible Python framework and benchmark suite for **2D-to-3D Super-Resolution of X-Ray Computed Tomography (XCT)** porous-media scans using Generative Adversarial Networks (SRGAN) and multi-axis 3D Fourier fusion. Originally developed during the PhD research of **Calum Green** (Imperial College London & Diamond Light Source) and maintained by **BASE Laboratory**, OpenLSR-X bridges deep-learning super-resolution with quantitative **petrophysical and topological validation**.
 
 ---
 
-## What is OpenLSR-X?
+## Highlights
 
-OpenLSR-X implements a Learnable Super-Resolution Generative Adversarial Network (SRGAN) for X-Ray Computed Tomography (XCT) data using PyTorch and PyTorch Lightning. It is based on [Ledig et al. (CVPR 2017)](https://doi.org/10.1109/CVPR.2017.19) and adapted from [Aladdin Persson's implementation](https://github.com/aladdinpersson/Machine-Learning-Collection/tree/master/ML/Pytorch/GANs/SRGAN).
-
-### Key Features & Benefits
-
-- **Stable Training:** Uses a mixture of MSE loss and VGG loss for improved stability.
-- **High-Quality Results:** Employs 'reflect' padding in convolutional layers to reduce border artifacts.
-- **Modular Design:** Easily extendable for new XCT datasets and tasks.
-- **Batch Job Support:** Includes scripts for HPC environments.
-- **Configurable:** All hyperparameters and data paths are set via YAML config files.
+- **2D Training → Isotropic 3D Reconstruction:** Train memory-efficient 2D slice models (with reflect padding, `PixelNorm`, generator warmup, and optional VGG-19 perceptual loss) and reconstruct artifact-free 3D volumes via **3-Axis Orthogonal Fourier Fusion** (`yz + xz + xy`).
+- **Leakage-Free 3D Spatial Splitting:** Enforces strictly disjoint 3D sub-volume slabs (with configurable guard margins) across `train`, `val`, and `test` so orthogonal evaluation slices never share voxels with training slices.
+- **Petrophysical & Topological Metrics:** Evaluates not only 2D/3D PSNR and tri-planar SSIM, but also segmented **porosity error** ($|\Delta\phi|$), **pore Dice/IoU**, **specific surface area** ($S_v$), **3D Euler characteristic density** ($\chi_V$), **inscribed pore-radius Wasserstein-1 distance**, **two-point correlation** $S_2(r)$, and **through-plane gradient anisotropy**.
+- **Out-of-the-Box Benchmarks & Open Synchrotron Profiles:** Ships with deterministic **Factorial PoreSpy** benchmarks, an **Open Rock Micro-CT** runner (Bentheimer Sandstone & Indiana Limestone), and NeXus/HDF5 profiles for the open Diamond Light Source I13-2 multi-resolution `Zn-13X` dataset ([*Scientific Data*, 2025](https://doi.org/10.1038/s41597-025-04605-9)).
 
 ---
 
-## Getting Started
+## Quickstart
 
-### Installation
+### 1. Installation (`uv`)
 
-1. Clone the repository:
-   ```bash
-   git clone <repo-url>
-   cd OpenLSR-X
-   ```
-2. Create the environment with uv:
-   ```bash
-   uv venv
-   uv pip install -r requirements.txt
-   uv pip install -e .
-   ```
-3. (Optional) Reproduce the exact environment:
-   ```bash
-   uv pip install -r requirements.lock
-   ```
-
-### Developer Setup
-
-- Run the CLI from source:
-  ```bash
-  python3 -m openlsrx.cli --help
-  ```
-- Run tests:
-  ```bash
-  python3 -m unittest discover -s tests
-  ```
-
-### Usage Example
-
-Train a model using the provided config:
 ```bash
-python3 -m openlsrx.cli fit -c configs/base/config.yaml
-```
-Override parameters from the command line:
-```bash
-python3 -m openlsrx.cli fit -c configs/base/config.yaml --model.learning_rate 0.0001 --data.batch_size 16
-```
-For dataset-specific training or prediction, use the corresponding entry points, e.g.:
-```bash
-python3 -m openlsrx.entrypoints.bentsand fit -c configs/labxct/bs_config.yaml
-python3 -m openlsrx.entrypoints.porespy_xct fit -c configs/porespy/High_Noise/ps_hn_hf_config.yaml
+git clone https://github.com/BASE-Laboratory/OpenLSR-X.git
+cd OpenLSR-X
+uv venv --python 3.11
+uv pip install -e ".[dev,docs]"
 ```
 
----## DataLoaders Summary
+### 2. Train, Test, and Predict via Unified CLI
 
-The project provides several PyTorch Lightning DataModules for handling different XCT datasets:
+Run training out of the box on a synthetic 3D PoreSpy porous-media volume:
 
-- **PoreSpy3D_Volume:** Loads 3D PoreSpy volumes, processes orthogonal slices, and creates train/validation/test splits.
-- **I13XCTDataModule:** Handles Diamond Light Source I13 XCT datasets, including normalization, alignment, and manual axis selection.
-- **IndLimeDataModule:** For Indiana Limestone data, loads and aligns 2D images, supports orthogonal predictions.
-- **BentSandDataModule:** For Bentheimer Sandstone, processes and aligns images, supports orthogonal predictions.
-- **PoreSpyDataModule:** Loads PoreSpy data for all three axes, supports parallel and perpendicular test splits.
+```bash
+openlsrx fit -c configs/base/config.yaml
+```
 
-Each DataModule supports configuration of batch size, patch size, and augmentation via YAML files. All modules use the core `DatasetObject` class for paired data.
+Prepare open rock micro-CT benchmark stacks and train on Bentheimer Sandstone:
 
----
+```bash
+openlsrx download-benchmarks
+openlsrx fit -c configs/labxct/bs_config.yaml
+```
 
-## Project Structure
+Predict an orthogonal super-resolved 3D BigTIFF stack from a trained checkpoint:
 
-- `src/openlsrx/` - Package code
-- `src/openlsrx/models/` - SRGAN, generator/discriminator, and blocks
-- `src/openlsrx/data/` - Data processing and LightningDataModules
-- `src/openlsrx/entrypoints/` - Dataset-specific CLI modules
-- `src/openlsrx/losses/` - Loss functions
-- `configs/` - YAML config files
-- `scripts/` - Batch job scripts for cluster environments
-- `tests/` - Unit tests
+```bash
+openlsrx predict -c configs/labxct/bs_config_predict.yaml --ckpt_path path/to/checkpoint.ckpt
+```
 
----## Support & Documentation
+Evaluate image-fidelity and petrophysical XCT metrics on any pair of 3D TIFF/HDF5 volumes:
 
-- For issues, use the repository's [GitHub Issues](../../issues) page.
-- For advanced usage and API details, see code comments and docstrings.
+```bash
+openlsrx evaluate --pred predicted_stack.tiff --target high_res_stack.tiff --output metrics.json
+```
 
 ---
 
-## Maintainers & Contributing
+## Reproducing Manuscript Benchmarks
 
-Maintained by Calum Green.
+Run the Factorial PoreSpy and Open Rock Micro-CT studies and generate publication-ready LaTeX `booktabs` tables and 300-DPI comparison figures:
 
-- Contributions are welcome! Please see the repository's CONTRIBUTING guidelines (if available) or open an issue to discuss your ideas.
+```bash
+# Rapid CPU smoke verification (< 2 minutes)
+python scripts/benchmarks/porespy_study.py --fast
+python scripts/benchmarks/public_rock_xct.py --fast
+python scripts/benchmarks/make_paper_outputs.py
+
+# Full multi-seed GPU benchmark
+python scripts/benchmarks/porespy_study.py --volume-size 256 --epochs 300 --use-vgg
+python scripts/benchmarks/public_rock_xct.py --volume-size 256 --epochs 300
+python scripts/benchmarks/make_paper_outputs.py
+```
 
 ---
 
-## License
+## Repository Structure
 
-BSD 3-Clause License  
-See [LICENSE](LICENSE) for details.
-
+```text
+OpenLSR-X/
+├── configs/                  # Validated LightningCLI YAML configs (base, porespy, labxct, i13-xct)
+├── docs/                     # MkDocs user, dataset, benchmark, and API documentation
+├── paper/                    # JOSS manuscript (paper.md) and bibliography (paper.bib)
+├── scripts/
+│   ├── benchmarks/           # End-to-end PoreSpy & Rock XCT study runners + LaTeX/figure builder
+│   └── hpc/                  # SLURM and SGE ('Young') GPU batch templates
+├── src/openlsrx/
+│   ├── baselines/            # 2D & 3D classical interpolation baselines (Nearest, Trilinear, Tricubic, Lanczos)
+│   ├── data/                 # Synthetic PoreSpy, TIFF/HDF5 volume loaders, and leakage-free 3D splitting
+│   ├── inference/            # 2D-to-3D single-axis and 3-axis orthogonal Fourier stack fusion
+│   ├── losses/               # PixelNorm, FP16-safe custom sigmoid, and checkpoint-clean VGGLoss
+│   ├── metrics/              # 2D/3D PSNR/SSIM and porous-media petrophysical metrics
+│   ├── models/               # ConvBlock, ResidualBlock, Generator, Discriminator, and SRGAN/SRResNet
+│   └── cli.py                # Unified `openlsrx` CLI entrypoint
+└── tests/                    # Unit, analytical phantom, end-to-end Lightning, and YAML schema tests
+```
 
 ---
 
-This README was generated using AI.
+## Citation & License
 
+OpenLSR-X is released under the [BSD 3-Clause License](LICENSE). If you use OpenLSR-X in academic work, please cite the software via [`CITATION.cff`](CITATION.cff) and Ledig et al. (CVPR 2017).
+
+Maintained by **BASE Laboratory**, building on the PhD work of **Calum Green**. Contributions are welcome—see [`CONTRIBUTING.md`](CONTRIBUTING.md).

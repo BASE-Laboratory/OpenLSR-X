@@ -1,108 +1,74 @@
-"""
-This file test the blocks.py file
+"""Unit tests for neural network blocks, normalizations, activations, and VGGLoss."""
 
-To check:
-1) ConvBlock() -> class
-2) UpsampleBlock() -> class
-3) ResidualBlock() -> class
+from __future__ import annotations
 
-I will test each class by checking on a random input tensor
-
-"""
-
-import unittest
+import pytest
 import torch
-from openlsrx.models.blocks import ConvBlock, UpsampleBlock, ResidualBlock
+
+from openlsrx.losses import PixelNorm, VGGLoss, custom_sigmoid
+from openlsrx.models.blocks import ConvBlock, ResidualBlock, UpsampleBlock
 
 
-class Test_ConvBlock(unittest.TestCase):
-    """
-    Test the ConvBlock class
-    1) Check output size
-    2) Check output type
-    """
-
-    def setUp(self):
-        self.in_channels = 1
-        self.out_channels = 64
-        self.kernel_size = 3
-        self.stride = 1
-        self.padding = 1
-        self.padding_mode = "reflect"
-
-        self.conv_block = ConvBlock(
-            in_channels=self.in_channels,
-            out_channels=self.out_channels,
-            kernel_size=self.kernel_size,
-            stride=self.stride,
-            padding=self.padding,
-            padding_mode=self.padding_mode,
-        )
-
-        self.input_tensor = torch.randn(1, self.in_channels, 100, 100)
-
-    def test_output_size(self):
-
-        output = self.conv_block(self.input_tensor)
-        assert output.shape == torch.Size([1, self.out_channels, 100, 100])
-
-    def test_output_type(self):
-
-        output = self.conv_block(self.input_tensor)
-        assert isinstance(output, torch.Tensor)
+@pytest.mark.parametrize("norm_type", ["pixel", "batch", "instance", "none"])
+def test_conv_block_norms_and_shapes(norm_type: str) -> None:
+    block = ConvBlock(
+        in_channels=1,
+        out_channels=16,
+        kernel_size=3,
+        stride=1,
+        padding=1,
+        padding_mode="reflect",
+        norm_type=norm_type,  # type: ignore[arg-type]
+    )
+    x = torch.randn(2, 1, 32, 32)
+    out = block(x)
+    assert out.shape == (2, 16, 32, 32)
+    assert torch.isfinite(out).all()
 
 
-class Test_UpsampleBlock(unittest.TestCase):
-    """
-    Test the UpsampleBlock class
-    1) Check output size
-    2) Check output type
-    """
-
-    def setUp(self):
-        self.in_channels = 1
-        self.scale_factor = 2
-
-        self.upsample_block = UpsampleBlock(
-            in_channels=self.in_channels,
-            scale_factor=self.scale_factor,
-        )
-
-        self.input_tensor = torch.randn(1, self.in_channels, 100, 100)
-
-    def test_output_size(self):
-
-        output = self.upsample_block(self.input_tensor)
-        assert output.shape == torch.Size([1, self.in_channels, 200, 200])
-
-    def test_output_type(self):
-
-        output = self.upsample_block(self.input_tensor)
-        assert isinstance(output, torch.Tensor)
+def test_conv_block_invalid_norm_raises() -> None:
+    with pytest.raises(ValueError, match="Unsupported norm_type"):
+        ConvBlock(1, 8, kernel_size=3, padding=1, norm_type="invalid")  # type: ignore[arg-type]
 
 
-class Test_ResidualBlock(unittest.TestCase):
-    """
-    Test the ResidualBlock class
-    1) Check output size
-    2) Check output type
-    """
+@pytest.mark.parametrize("scale_factor", [2, 4])
+def test_upsample_block(scale_factor: int) -> None:
+    block = UpsampleBlock(in_channels=16, scale_factor=scale_factor)
+    x = torch.randn(2, 16, 12, 12)
+    out = block(x)
+    assert out.shape == (2, 16, 12 * scale_factor, 12 * scale_factor)
 
-    def setUp(self):
-        self.in_channels = 1
 
-        self.residual_block = ResidualBlock(
-            in_channels=self.in_channels,
-        )
+def test_residual_block_preserves_shape() -> None:
+    block = ResidualBlock(in_channels=16, norm_type="pixel")
+    x = torch.randn(2, 16, 24, 24)
+    out = block(x)
+    assert out.shape == x.shape
 
-        self.input_tensor = torch.randn(1, self.in_channels, 100, 100)
 
-    def test_output_size(self):
+def test_custom_sigmoid_fp16_stability() -> None:
+    # Large negative values overflow naive exp(-k*x) in float16, but torch.sigmoid(k*x) stays finite
+    x = torch.tensor([-100.0, 0.0, 100.0], dtype=torch.float16)
+    y = custom_sigmoid(x, k=2.0)
+    assert torch.isfinite(y).all()
+    assert float(y[1]) == pytest.approx(0.5, abs=1e-3)
 
-        output = self.residual_block(self.input_tensor)
-        assert output.shape == torch.Size([1, self.in_channels, 100, 100])
 
-    def test_output_type(self):
+def test_pixel_norm_unit_rms() -> None:
+    norm = PixelNorm()
+    x = torch.randn(2, 32, 8, 8) * 5.0
+    y = norm(x)
+    rms = torch.sqrt(torch.mean(y.square(), dim=1))
+    assert torch.allclose(rms, torch.ones_like(rms), atol=1e-4)
 
-        output = self.residual_block(self.input_tensor)
-        assert isinstance(output, torch.Tensor)
+
+def test_vgg_loss_offline_and_clean_state_dict() -> None:
+    loss_fn = VGGLoss(vgg_layers=8, pretrained=False)
+    gen = torch.rand(2, 1, 32, 32, requires_grad=True)
+    tgt = torch.rand(2, 1, 32, 32)
+    val = loss_fn(gen, tgt)
+    val.backward()
+    assert val.ndim == 0 and float(val.item()) >= 0.0
+    assert gen.grad is not None
+    # Frozen VGG19 weights must NOT pollute model checkpoints
+    assert loss_fn.state_dict() == {}

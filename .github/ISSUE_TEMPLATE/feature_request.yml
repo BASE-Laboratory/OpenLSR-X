@@ -1,0 +1,19 @@
+name: Feature / Dataset / Metric Request
+description: Propose a new super-resolution architecture, XCT dataset loader, or petrophysical metric
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Scientific Motivation
+      description: What porous-media imaging problem, dataset format, or evaluation metric does this address?
+    validations:
+      required: true
+
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed Interface / Design
+      description: Suggested Python API, CLI flags, or YAML configuration fields, plus relevant literature references.
+    validations:
+      required: true

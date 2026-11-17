@@ -1,72 +1,39 @@
-"""
-This file tests the submodels.py file
+"""Unit tests for Generator and Discriminator submodels."""
 
-To check:
-1) Generator() -> class
-2) Discriminator() -> class
+from __future__ import annotations
 
-"""
-
-import unittest
+import pytest
 import torch
-from openlsrx.models.submodels import Generator, Discriminator
+
+from openlsrx.models.submodels import Discriminator, Generator
 
 
-class Test_Generator(unittest.TestCase):
-    """
-    Test the Generator class
-    1) Check output size
-    2) Check output type
-    """
-
-    def setUp(self):
-        self.batch_size = 2
-        self.in_channels = 1
-        self.out_channels = 64
-        self.num_blocks = 10
-
-        self.generator = Generator(
-            in_channels=self.in_channels,
-            out_channels=self.out_channels,
-            num_blocks=self.num_blocks,
-        )
-
-        self.input_tensor = torch.randn(self.batch_size, self.in_channels, 100, 100)
-
-    def test_output_size(self):
-
-        output = self.generator(self.input_tensor)
-        assert output.shape == torch.Size([self.batch_size, self.in_channels, 400, 400])
-
-    def test_output_type(self):
-
-        output = self.generator(self.input_tensor)
-        assert isinstance(output, torch.Tensor)
+@pytest.mark.parametrize("scale_factor", [1, 2, 4])
+@pytest.mark.parametrize("activation", ["custom_sigmoid", "sigmoid", "clamp", "identity"])
+def test_generator_scales_and_activations(scale_factor: int, activation: str) -> None:
+    gen = Generator(
+        in_channels=1,
+        out_channels=16,
+        num_blocks=2,
+        super_res_factor=scale_factor,
+        output_activation=activation,  # type: ignore[arg-type]
+    )
+    x = torch.randn(2, 1, 16, 16)
+    out = gen(x)
+    assert out.shape == (2, 1, 16 * scale_factor, 16 * scale_factor)
+    if activation in ("custom_sigmoid", "sigmoid", "clamp"):
+        assert float(out.detach().min()) >= 0.0
+        assert float(out.detach().max()) <= 1.0
 
 
-class Test_Discriminator(unittest.TestCase):
-    """
-    This tests the Discriminator class
+def test_generator_rejects_non_power_of_two() -> None:
+    with pytest.raises(ValueError, match="power of 2"):
+        Generator(super_res_factor=3)
 
-    1) Check output size
-    2) Check output type
-    """
 
-    def setUp(self):
-
-        self.in_channels = 1
-        self.features = [64, 64, 128, 128, 256, 256, 512, 512]
-
-        self.input_data = torch.randn(1, self.in_channels, 100, 100)
-
-        self.discriminator = Discriminator(self.in_channels, self.features)
-
-    def test_output_size(self):
-
-        output = self.discriminator(self.input_data)
-        assert output.shape == torch.Size([1, 1])
-
-    def test_output_type(self):
-
-        output = self.discriminator(self.input_data)
-        assert isinstance(output, torch.Tensor)
+def test_discriminator_logits_shape() -> None:
+    disc = Discriminator(in_channels=1, features=[8, 16, 32], adaptive_size=4)
+    x = torch.randn(3, 1, 32, 32)
+    out = disc(x)
+    assert out.shape == (3, 1)
+    assert torch.isfinite(out).all()

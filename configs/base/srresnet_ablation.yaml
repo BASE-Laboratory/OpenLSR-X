@@ -1,0 +1,50 @@
+# SRResNet non-adversarial ablation configuration (isolates generator MSE/L1 performance)
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: 32-true
+  max_epochs: 100
+  check_val_every_n_epoch: 10
+  log_every_n_steps: 10
+
+model:
+  learning_rate: 1.0e-4
+  adaptive_size: 16
+  accumulate_n_batches: 1
+  super_res_factor: 2
+  num_blocks: 10
+  out_channels: 64
+  norm_type: pixel
+  output_activation: custom_sigmoid
+  pixel_loss_type: l1
+  use_adversarial_loss: false
+  use_vgg_loss: false
+  lr_scheduler_type: CAWR
+  lr_scheduler_args:
+    T_0: 25
+    T_mult: 1
+    eta_min: 1.0e-6
+
+data:
+  class_path: openlsrx.data.SyntheticPoreSpyDataModule
+  init_args:
+    volume_size: 128
+    feature_regime: high_feature
+    noise_regime: low_noise
+    representation: attenuation
+    scale_factor: 2
+    train_frac: 0.70
+    val_frac: 0.15
+    guard_slices_lr: 1
+    train_axes: ["yz"]
+    test_axis: perpendicular
+    predict_axis: xy
+    patch_size_lr: 32
+    augment: true
+    batch_size: 4
+    eval_batch_size: 4
+    num_workers: 0
+    seed: 42
+    cache_dir: data/cache

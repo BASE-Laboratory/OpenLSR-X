@@ -1,32 +1,55 @@
-# This is a config.yaml file for cli_demo to define the params
-# for the model, and dataset
-
+# Diamond Light Source I13 Synchrotron XCT configuration (e.g., Zn13X zeolite NeXus/HDF5)
+# Preserves Calum Green's calibrated TomopyRecon attenuation bounds and spatial ROI alignment
 seed_everything: 42
 
 trainer:
-  precision: "16-mixed"
-  max_epochs: 1000
+  accelerator: auto
   devices: 1
-  accelerator: "gpu"
-  check_val_every_n_epoch: 10
-  log_every_n_steps: 1000
+  precision: 16-mixed
+  max_epochs: 1000
+  check_val_every_n_epoch: 20
+  log_every_n_steps: 50
 
 model:
-
-  learning_rate: 0.00001
+  learning_rate: 1.0e-5
   adaptive_size: 40
   accumulate_n_batches: 1
-
+  super_res_factor: 2
+  num_blocks: 10
+  pretrain_epochs: 10
+  use_adversarial_loss: true
+  use_vgg_loss: false
+  sample_id: Zn13X
 
 data:
-  low_file: '/PATH/TO/LOW-RES_DATA/'
-  high_file: '/PATH/TO/HIGH-RES_DATA/'
-  dataset_size: 1000
-  train_size: 0.8
-  valid_size: 0.1
-  test_size: 0.1
-  batch_size: 1
-  num_workers: 0
-  pin_memory: True
-  persistent_workers: False
-  testing: True
+  class_path: openlsrx.data.PairedVolumeDataModule
+  init_args:
+    low_path: data/i13/low_res_recon.nxs
+    high_path: data/i13/high_res_recon.nxs
+    h5_dataset_key: 4-TomopyRecon-tomo/data
+    transpose_axes: [1, 2, 0]
+    scale_factor: 2
+    norm_mode: fixed
+    low_vmin: -5.23e-4
+    low_vmax: 1.11e-3
+    high_vmin: -2.50e-4
+    high_vmax: 6.79e-4
+    low_z_range: [845, 1485]
+    low_y_range: [1010, 1650]
+    low_x_range: [858, 1498]
+    high_z_range: [701, 1981]
+    high_y_range: [763, 2043]
+    high_x_range: [466, 1746]
+    train_frac: 0.75
+    val_frac: 0.125
+    guard_slices_lr: 2
+    train_axes: ["yz"]
+    test_axis: perpendicular
+    predict_axis: xy
+    patch_size_lr: 64
+    augment: true
+    batch_size: 2
+    eval_batch_size: 2
+    num_workers: 2
+    pin_memory: true
+    seed: 42

@@ -1,17 +1,103 @@
 [build-system]
-requires = ["setuptools>=61.0"]
+requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "openlsrx"
-version = "0.1.0"
-description = "OpenLSR-X SRGAN for XCT data."
+version = "0.2.0"
+description = "Learnable 2D-to-3D Super-Resolution GAN and Petrophysical Benchmark Suite for X-Ray Computed Tomography (XCT)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
+authors = [
+    { name = "Calum Green" },
+    { name = "BASE Laboratory" },
+]
+maintainers = [
+    { name = "BASE Laboratory" },
+]
+keywords = [
+    "super-resolution",
+    "x-ray-computed-tomography",
+    "micro-ct",
+    "porous-media",
+    "srgan",
+    "pytorch-lightning",
+    "petrophysics",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Processing",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "h5py>=3.9.0",
+    "imageio>=2.31.0",
+    "jsonargparse[signatures]>=4.27.7",
+    "matplotlib>=3.7.0",
+    "numpy>=1.24.0,<2.3.0",
+    "opencv-python-headless>=4.8.0",
+    "porespy>=2.4.0",
+    "pytorch-lightning>=2.2.0",
+    "pyyaml>=6.0",
+    "scikit-image>=0.21.0",
+    "scipy>=1.10.0",
+    "tifffile>=2023.7.10",
+    "torch>=2.1.0",
+    "torchmetrics>=1.2.0",
+    "torchvision>=0.16.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.8.0",
+    "pytest>=7.4.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.4.0",
+]
+docs = [
+    "mkdocs>=1.5.3",
+    "mkdocs-material>=9.5.0",
+    "mkdocstrings[python]>=0.24.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/BASE-Laboratory/OpenLSR-X"
+Repository = "https://github.com/BASE-Laboratory/OpenLSR-X"
+Issues = "https://github.com/BASE-Laboratory/OpenLSR-X/issues"
+
+[project.scripts]
+openlsrx = "openlsrx.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q"
+filterwarnings = [
+    "ignore::DeprecationWarning:pkg_resources.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+check_untyped_defs = true

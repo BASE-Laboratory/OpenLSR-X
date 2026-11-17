@@ -1,10 +1,40 @@
-
-.DS_Store
-__pycache__
-.venv/
-data/
+# Byte-compiled / caches
+__pycache__/
+*.py[cod]
+*$py.class
 *.egg-info/
-lightning_logs
+.eggs/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Environments
+.venv/
+venv/
+env/
+
+# Documentation build
+site/
+
+# Data, checkpoints, and run artifacts (anchored or specific)
+/data/
+/outputs/
+/results/
+/saved/
+/sanity/
+/test_saved/
+/predicted/
+/predicted_*/
+lightning_logs/
+*.ckpt
 *_loss.txt
+
+# OS / Editor
+.DS_Store
 SRGAN-XCT.code-workspace
 *.ipynb
