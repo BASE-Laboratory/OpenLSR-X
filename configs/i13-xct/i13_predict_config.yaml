@@ -1,40 +1,33 @@
-# This is a config.yaml file for cli_demo to define the params
-# for the model, and dataset
-
+# Diamond Light Source I13 Synchrotron XCT orthogonal prediction configuration
+# Pass --ckpt_path path/to/zn13x.ckpt and --data.init_args.predict_path path/to/low_res_recon.nxs
 seed_everything: 42
 
 trainer:
-  precision: "16-mixed"
-  max_epochs: 1001
+  accelerator: auto
   devices: 1
-  accelerator: "gpu"
-  check_val_every_n_epoch: 200
-  log_every_n_steps: 200
-
-ckpt_path: "/PATH/TO/CHECKPOINTS/FOR/RESUMING"
+  precision: 32-true
 
 model:
-  # gen: Generator
-  # disc: Discriminator
-  learning_rate: 0.00001
+  learning_rate: 1.0e-5
   adaptive_size: 40
-  accumulate_n_batches: 1
   super_res_factor: 2
   num_blocks: 10
-  sampled_id: "Zn13X"
-  strict_loading: False
+  sample_id: Zn13X
 
 data:
-  low_file: '/PATH/TO/LOW-RES_DATA/'
-  high_file: '/PATH/TO/HIGH-RES_DATA/'
-  dataset_size: 10
-  train_size: 0.8
-  valid_size: 0.1
-  test_size: 0.1
-  batch_size: 1
-  num_workers: 0
-  pin_memory: True
-  persistent_workers: False
-  predict_axis: "xy"
-  testing: False
-  predict: True
+  class_path: openlsrx.data.PairedVolumeDataModule
+  init_args:
+    predict_path: data/i13/low_res_recon.nxs
+    h5_dataset_key: 4-TomopyRecon-tomo/data
+    transpose_axes: [1, 2, 0]
+    scale_factor: 2
+    norm_mode: fixed
+    low_vmin: -5.23e-4
+    low_vmax: 1.11e-3
+    low_z_range: [845, 1485]
+    low_y_range: [1010, 1650]
+    low_x_range: [858, 1498]
+    predict_axis: xy
+    eval_batch_size: 2
+    num_workers: 0
+    seed: 42

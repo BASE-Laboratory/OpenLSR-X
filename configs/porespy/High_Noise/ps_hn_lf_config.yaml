@@ -1,34 +1,45 @@
-# this is the config file for the high-feature porespy data
-
+# Synthetic PoreSpy Study: High Noise + Low Feature Frequency (2x SR)
 seed_everything: 42
 
 trainer:
-  precision: "16-mixed"
-  max_epochs: 4001
+  accelerator: auto
   devices: 1
-  accelerator: "gpu"
-  check_val_every_n_epoch: 200
-  log_every_n_steps: 200
-  # callbacks: [TQDMProgressBar(refresh_rate=int(max_epochs/10))]
+  precision: 16-mixed
+  max_epochs: 400
+  check_val_every_n_epoch: 20
+  log_every_n_steps: 20
 
 model:
-  learning_rate: 0.00001
-  adaptive_size: 6
+  learning_rate: 1.0e-4
+  adaptive_size: 8
   accumulate_n_batches: 1
   super_res_factor: 2
   num_blocks: 16
+  pretrain_epochs: 10
+  use_adversarial_loss: true
+  use_vgg_loss: true
+  vgg_loss_weight: 0.006
+  sample_id: ps_hn_lf
 
 data:
-  high_file: "High_Noise/ps_3d_high_lf.tif"
-  low_xy_file: "High_Noise/ps_3d_low_lf_xy.tif"
-  low_xz_file: "High_Noise/ps_3d_low_lf_xz.tif"
-  low_yz_file: "High_Noise/ps_3d_low_lf_yz.tif"
-  dataset_size: 250
-  train_size: 0.8
-  valid_size: 0.1
-  test_size: 0.1
-  test_axis: "perpendicular"
-  batch_size: 1
-  num_workers: 0
-  pin_memory: True
-  persistent_workers: False
+  class_path: openlsrx.data.SyntheticPoreSpyDataModule
+  init_args:
+    volume_size: 256
+    feature_regime: low_feature
+    noise_regime: high_noise
+    representation: attenuation
+    scale_factor: 2
+    train_frac: 0.70
+    val_frac: 0.15
+    guard_slices_lr: 1
+    train_axes: ["yz"]
+    test_axis: perpendicular
+    predict_axis: xy
+    patch_size_lr: 64
+    augment: true
+    batch_size: 4
+    eval_batch_size: 4
+    num_workers: 2
+    pin_memory: true
+    seed: 42
+    cache_dir: data/cache

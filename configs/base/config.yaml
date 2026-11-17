@@ -1,33 +1,51 @@
+# Base OpenLSR-X training configuration (runs out-of-the-box on synthetic PoreSpy 3D XCT)
 seed_everything: 42
 
 trainer:
-  precision: "16-mixed"
-  max_epochs: 2001
+  accelerator: auto
   devices: 1
-  accelerator: "gpu"
-  check_val_every_n_epoch: 200
-  log_every_n_steps: 200
-
-# ckpt_path: '/PATH/TO/CHECKPOINTS/FOR/RESUMING'
+  precision: 32-true
+  max_epochs: 100
+  check_val_every_n_epoch: 10
+  log_every_n_steps: 10
 
 model:
-  learning_rate: 0.0003
-  adaptive_size: 40
+  learning_rate: 1.0e-4
+  adaptive_size: 16
   accumulate_n_batches: 1
   super_res_factor: 2
-  use_vgg_loss: True
+  num_blocks: 10
+  out_channels: 64
+  norm_type: pixel
+  output_activation: custom_sigmoid
+  sigmoid_k: 1.0
+  pixel_loss_type: mse
+  use_adversarial_loss: true
+  adversarial_weight: 1.0e-3
+  pretrain_epochs: 5
+  use_vgg_loss: false
   vgg_loss_weight: 0.006
-  vgg_layers: 18
-  lr_scheduler_type: "CosineAnnealingWarmRestarts"
+  lr_scheduler_type: constant
 
 data:
-  low_file: '/PATH/TO/LOW-RES_DATA/'
-  high_file: '/PATH/TO/HIGH-RES_DATA/'
-  dataset_size: 1000
-  train_size: 0.8
-  valid_size: 0.1
-  test_size: 0.1
-  batch_size: 1
-  num_workers: 0
-  pin_memory: True
-  persistent_workers: False
+  class_path: openlsrx.data.SyntheticPoreSpyDataModule
+  init_args:
+    volume_size: 128
+    feature_regime: high_feature
+    noise_regime: low_noise
+    representation: attenuation
+    scale_factor: 2
+    train_frac: 0.70
+    val_frac: 0.15
+    guard_slices_lr: 1
+    train_axes: ["yz"]
+    test_axis: perpendicular
+    predict_axis: xy
+    patch_size_lr: 32
+    augment: true
+    batch_size: 4
+    eval_batch_size: 4
+    num_workers: 0
+    pin_memory: false
+    seed: 42
+    cache_dir: data/cache

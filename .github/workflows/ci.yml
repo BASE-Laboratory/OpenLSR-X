@@ -1,0 +1,47 @@
+name: CI
+
+on:
+  push:
+    branches: ["main", "modernize-publication-ready"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python ${{ matrix.python-version }}
+        run: uv python install ${{ matrix.python-version }}
+
+      - name: Install dependencies (CPU PyTorch for CI speed)
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          uv pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+          uv pip install -e ".[dev,docs]"
+
+      - name: Lint and format check with Ruff
+        run: |
+          uv run --no-sync ruff check src tests scripts
+          uv run --no-sync ruff format --check src tests scripts
+
+      - name: Run unit & config schema tests with coverage
+        run: |
+          uv run --no-sync pytest --cov=openlsrx --cov-report=term-missing
+
+      - name: Build documentation strictly
+        if: matrix.python-version == '3.11'
+        run: |
+          uv run --no-sync mkdocs build --strict

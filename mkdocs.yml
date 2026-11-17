@@ -1,0 +1,36 @@
+site_name: OpenLSR-X Documentation
+site_description: Learnable 2D-to-3D Super-Resolution and Petrophysical Benchmark Suite for X-Ray Computed Tomography
+site_url: https://base-laboratory.github.io/OpenLSR-X/
+repo_url: https://github.com/BASE-Laboratory/OpenLSR-X
+repo_name: BASE-Laboratory/OpenLSR-X
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - content.code.copy
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [src]
+          options:
+            show_source: false
+            heading_level: 2
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Datasets & Configuration: datasets-and-configs.md
+  - Benchmarks & Metrics: benchmarks-and-metrics.md
+  - API Reference: api.md

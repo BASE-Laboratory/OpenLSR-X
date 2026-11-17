@@ -1,160 +1,130 @@
-"""
-This file defines the unit tests for the dataset.py file
+"""Unit tests for synthetic PoreSpy generation, file/HDF5 loading, and leakage-free 3D splitting."""
 
-To check:
+from __future__ import annotations
 
-data_processor() -> function
-DatasetObject() -> class
-MyDataModule() -> class
-PoreSpy_3DVolume() -> class (later)
-"""
+from pathlib import Path
 
-import unittest
-from openlsrx.data.dataset import data_processor, DatasetObject, MyDataModule
+import h5py
+import numpy as np
+import tifffile
 
-# from openlsrx.data.dataset import PoreSpy3D_Volume
-import torch
+from openlsrx.data import (
+    PairedVolumeDataModule,
+    SyntheticPoreSpyDataModule,
+    fetch_or_generate_rock_sample,
+    generate_porespy_volume,
+    normalize_volume,
+    split_volume_spatially,
+)
 
 
-class Test_data_processor(unittest.TestCase):
-    """
-    Test the data_processor function
-    1) Check types of output -> torch.Tensor
-    2) Check size of output -> [C,H,W]
-    """
+def test_spatial_3d_split_has_zero_voxel_overlap() -> None:
+    # Tag every HR slice along axis 0 with a unique integer ID so any leakage is immediately caught
+    hr = np.broadcast_to(np.arange(40, dtype=np.float32)[:, None, None], (40, 20, 20)).copy()
+    lr = np.broadcast_to(np.arange(20, dtype=np.float32)[:, None, None], (20, 10, 10)).copy()
 
-    def setUp(self):
-        self.dataset_size = 10
-        self.image_size = 100
-        self.lf = False
-        self.valid = self.test = False
+    splits = split_volume_spatially(
+        hr_volume=hr,
+        lr_volume=lr,
+        scale_factor=2,
+        train_frac=0.6,
+        val_frac=0.2,
+        split_axis=0,
+        guard_slices_lr=1,
+    )
+    tr_ids = set(np.unique(splits["train"][1]).tolist())
+    va_ids = set(np.unique(splits["val"][1]).tolist())
+    te_ids = set(np.unique(splits["test"][1]).tolist())
 
-        self.low_test_data, self.high_test_data = data_processor(
-            self.dataset_size, self.image_size, self.lf, self.valid, self.test
+    assert tr_ids.isdisjoint(va_ids)
+    assert tr_ids.isdisjoint(te_ids)
+    assert va_ids.isdisjoint(te_ids)
+    # Guard margin of 1 LR slice (= 2 HR slices) separates adjacent splits
+    assert min(va_ids) - max(tr_ids) == 3
+    assert min(te_ids) - max(va_ids) == 3
+
+
+def test_generate_porespy_and_datamodule_caching(tmp_path: Path) -> None:
+    lr, hr, mask = generate_porespy_volume(
+        shape=32,
+        feature_regime="high_feature",
+        noise_regime="high_noise",
+        representation="attenuation",
+        scale_factor=2,
+        seed=7,
+    )
+    assert hr.shape == (32, 32, 32)
+    assert lr.shape == (16, 16, 16)
+    assert mask.dtype == bool
+    assert 0.0 <= float(hr.min()) <= float(hr.max()) <= 1.0
+
+    cache_dir = tmp_path / "ps_cache"
+    dm = SyntheticPoreSpyDataModule(
+        volume_size=32,
+        scale_factor=2,
+        patch_size_lr=8,
+        batch_size=2,
+        eval_batch_size=2,
+        test_axis="perpendicular",
+        cache_dir=str(cache_dir),
+    )
+    dm.setup("fit")
+    dm.setup("test")
+    batch_lr, batch_hr = next(iter(dm.train_dataloader()))
+    assert batch_lr.shape == (2, 8, 8)
+    assert batch_hr.shape == (2, 16, 16)
+    assert len(list(cache_dir.glob("*.tif"))) == 2
+
+
+def test_paired_volume_datamodule_hdf5_and_predict_only(tmp_path: Path) -> None:
+    h5_hr = tmp_path / "i13_high.nxs"
+    h5_lr = tmp_path / "i13_low.nxs"
+    rng = np.random.default_rng(0)
+    # Raw (Y, X, Z) layout before transpose_axes=(2, 0, 1) -> (Z, Y, X)
+    with h5py.File(h5_hr, "w") as f:
+        f.create_dataset(
+            "4-TomopyRecon-tomo/data",
+            data=rng.normal(0.0, 1e-4, size=(32, 32, 40)).astype(np.float32),
+        )
+    with h5py.File(h5_lr, "w") as f:
+        f.create_dataset(
+            "4-TomopyRecon-tomo/data",
+            data=rng.normal(0.0, 1e-4, size=(16, 16, 20)).astype(np.float32),
         )
 
-    def test_assert_is_type(self):
+    dm = PairedVolumeDataModule(
+        low_path=str(h5_lr),
+        high_path=str(h5_hr),
+        h5_dataset_key="4-TomopyRecon-tomo/data",
+        transpose_axes=(2, 0, 1),
+        scale_factor=2,
+        norm_mode="percentile",
+        batch_size=2,
+        eval_batch_size=2,
+    )
+    dm.setup("fit")
+    lr_b, hr_b = next(iter(dm.train_dataloader()))
+    assert lr_b.shape == (2, 16, 16)
+    assert hr_b.shape == (2, 32, 32)
 
-        assert isinstance(self.low_test_data, torch.Tensor)
-        assert isinstance(self.high_test_data, torch.Tensor)
-
-    def test_high_res_size(self):
-
-        assert self.high_test_data.shape == torch.Size(
-            [self.dataset_size, self.image_size, self.image_size]
-        )
-
-    def test_low_res_size(self):
-
-        assert self.low_test_data.shape == torch.Size(
-            [self.dataset_size, self.image_size // 4, self.image_size // 4]
-        )
-
-
-class Test_DatasetObject(unittest.TestCase):
-    """
-    Test the DatasetObject class
-    1) Check length of datasets via __len__ method
-    2) Check __getitem__ method returns tuple of high/low res images
-    """
-
-    def setUp(self):
-        self.dataset_size = 10
-        self.image_size = 100
-        self.lf = False
-        self.valid = self.test = False
-
-        self.low_test_data, self.high_test_data = data_processor(
-            self.dataset_size, self.image_size, self.lf, self.valid, self.test
-        )
-
-        self.dataset = DatasetObject(self.low_test_data, self.high_test_data)
-
-    def test_len(self):
-        assert (
-            self.dataset.__len__()
-            == self.dataset_size
-            == self.low_test_data.shape[0]
-            == self.high_test_data.shape[0]
-        )
-
-    def test_getitem(self):
-        low = self.dataset.__getitem__(0)[0]
-        high = self.dataset.__getitem__(0)[1]
-
-        assert low.shape == torch.Size([self.image_size // 4, self.image_size // 4])
-        assert high.shape == torch.Size([self.image_size, self.image_size])
+    # Standalone predict stage should NOT require high_path
+    pred_tif = tmp_path / "standalone_lr.tif"
+    tifffile.imwrite(pred_tif, normalize_volume(rng.random((16, 16, 16), dtype=np.float32)))
+    pred_dm = PairedVolumeDataModule(predict_path=str(pred_tif), scale_factor=2, predict_axis="xz")
+    pred_dm.setup("predict")
+    p_lr, _ = next(iter(pred_dm.predict_dataloader()))
+    assert p_lr.shape[-2:] == (16, 16)
 
 
-class Test_MyDataModule(unittest.TestCase):
-    """
-    I want to test the MyDataModule class from openlsrx.data.dataset
-
-    This module builds upon the DatasetObject, and data_processor above
-    """
-
-    def setUp(self):
-        self.dataset_size = 10
-        self.valid_size = 2
-        self.test_size = 3
-        self.image_size = 100
-        self.lf = True
-        # self.valid = self.test = True
-        self.batch_size = 1
-        self.num_workers = 1
-        self.pin_memory = False
-        self.persistent_workers = 1
-
-        self.data_module = MyDataModule(
-            self.dataset_size,
-            self.valid_size,
-            self.test_size,
-            self.image_size,
-            self.lf,
-            # self.valid,
-            # self.test,
-            self.batch_size,
-            self.num_workers,
-            self.pin_memory,
-            self.persistent_workers,
-        )
-
-    def test_fit(self, stage="fit"):
-        self.data_module.setup(stage)
-
-        train_loader = self.data_module.train_dataloader()
-        val_loader = self.data_module.val_dataloader()
-
-        # check the dataloaders exist
-        assert train_loader is not None
-        assert val_loader is not None
-
-        # check the outputs are tensors
-        assert isinstance(train_loader.dataset.__getitem__(0)[0], torch.Tensor)
-        assert isinstance(train_loader.dataset.__getitem__(0)[1], torch.Tensor)
-
-        assert isinstance(val_loader.dataset.__getitem__(0)[0], torch.Tensor)
-        assert isinstance(val_loader.dataset.__getitem__(0)[1], torch.Tensor)
-
-    def test_test(self, stage="test"):
-
-        self.data_module.setup(stage)
-        test_loader = self.data_module.test_dataloader()
-
-        assert test_loader is not None
-        assert isinstance(test_loader.dataset.__getitem__(0)[0], torch.Tensor)
-        assert isinstance(test_loader.dataset.__getitem__(0)[1], torch.Tensor)
-
-    def test_predict(self, stage="predict"):
-
-        self.data_module.setup(stage)
-        predict_loader = self.data_module.predict_dataloader()
-
-        assert predict_loader is not None
-        assert isinstance(predict_loader.dataset.__getitem__(0)[0], torch.Tensor)
-        assert isinstance(predict_loader.dataset.__getitem__(0)[1], torch.Tensor)
-
-
-class Test_PoreSpy3D_Volume(unittest.TestCase):
-
-    pass
+def test_public_rock_offline_fallback(tmp_path: Path) -> None:
+    tif_path, manifest = fetch_or_generate_rock_sample(
+        "bentheimer_sandstone",
+        dest_dir=tmp_path / "rocks",
+        shape=(32, 32, 32),
+        allow_offline_fallback=True,
+        seed=11,
+    )
+    assert tif_path.is_file()
+    vol = tifffile.imread(tif_path)
+    assert vol.shape == (32, 32, 32)
+    assert manifest["lithology"] == "Sandstone"

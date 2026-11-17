@@ -1,531 +1,482 @@
-"""
-This is a file to describe the creation of the SRGAN model I am using
-"""
+"""PyTorch Lightning SRGAN / SRResNet module for 2D-to-3D XCT super-resolution."""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any, Literal
 
 import pytorch_lightning as pl
-import torch
-from torch import nn, optim
-import imageio
-import os
-from .submodels import Generator, Discriminator
-from ..losses import VGGLoss
 import tifffile
-import re
+import torch
+from torch import Tensor, nn, optim
+
+from ..losses import VGGLoss
+from ..metrics.image import compute_mae, compute_psnr, compute_rmse, compute_ssim
+from .blocks import NormType
+from .submodels import Discriminator, Generator, OutputActivation
+
+
+def _ensure_4d(x: Tensor) -> Tensor:
+    """Convert ``(B, H, W)`` or ``(B, 1, H, W)`` tensors to ``(B, 1, H, W)``."""
+    if x.ndim == 3:
+        return x.unsqueeze(1)
+    if x.ndim == 4:
+        return x
+    raise ValueError(
+        f"Expected 3D (B, H, W) or 4D (B, C, H, W) tensor, got shape {tuple(x.shape)}."
+    )
 
 
 class SRGAN(pl.LightningModule):
+    """Learnable Super-Resolution GAN (and SRResNet ablation) for XCT data.
+
+    Supports:
+    - Adversarial + perceptual + pixelwise training (SRGAN)
+    - Generator-only MSE/L1 pretraining or full ablation (``use_adversarial_loss=False``)
+    - Optional generator warmup epochs (``pretrain_epochs > 0``) prior to GAN updates
+    - Built-in PSNR, SSIM, MAE, and RMSE logging on validation and test splits
+    - Safe ``pathlib``-based slice and 3D BigTIFF stack export without mutating ``os.getcwd()``
+    """
 
     def __init__(
         self,
-        learning_rate,
-        adaptive_size=40,
-        accumulate_n_batches=1,
-        super_res_factor=2,
-        num_blocks=10,
-        use_vgg_loss=False,
-        vgg_loss_weight=0.006,
-        vgg_layers=18,
-        disc_features=None,
-        sample_id=str(),
-        strict_loading=True,
-        sigmoid_k=1.0,
-        lr_scheduler_type="constant",
-        lr_scheduler_args=None,
-    ):
+        learning_rate: float = 1e-4,
+        adaptive_size: int = 40,
+        accumulate_n_batches: int = 1,
+        super_res_factor: int = 2,
+        num_blocks: int = 10,
+        out_channels: int = 64,
+        norm_type: NormType = "pixel",
+        output_activation: OutputActivation = "custom_sigmoid",
+        sigmoid_k: float = 1.0,
+        pixel_loss_type: Literal["mse", "l1"] = "mse",
+        use_adversarial_loss: bool = True,
+        adversarial_weight: float = 1e-3,
+        pretrain_epochs: int = 0,
+        use_vgg_loss: bool = False,
+        vgg_loss_weight: float = 0.006,
+        vgg_layers: int = 18,
+        vgg_pretrained: bool = True,
+        disc_features: Sequence[int] | None = None,
+        sample_id: str = "",
+        strict_loading: bool = True,
+        lr_scheduler_type: Literal["constant", "CAWR"] = "constant",
+        lr_scheduler_args: dict[str, Any] | None = None,
+        output_dir: str | None = None,
+        save_val_images: bool = True,
+        max_val_images_saved: int = 4,
+    ) -> None:
         super().__init__()
+        self.save_hyperparameters()
 
-        # sample name
-        self.sample_id = sample_id
-
-        # hyperparameters
-        self.learning_rate = learning_rate
-        self.adaptive_size = adaptive_size
-        self.accumulate_n_batches = accumulate_n_batches
-        self.sigmoid_k = float(sigmoid_k)
-
-        # dictionary of accepted LR schedulers
-        lr_scheduler_dict = dict(
-            {"constant": {"lr": float(learning_rate)}, "CAWR": lr_scheduler_args}
-        )
-        self.lr_scheduler_type = lr_scheduler_type
-        self.lr_scheduler = lr_scheduler_dict[str(lr_scheduler_type)]
-
-        # Generator hyperparameters
-        self.super_res_factor = super_res_factor
-        self.use_vgg_loss = use_vgg_loss
-        self.num_blocks = num_blocks
-        self.vgg_loss_weight = float(vgg_loss_weight)
-        self.vgg_layers = vgg_layers
-
-        # networks
-
-        self.gen = Generator(
-            num_blocks=num_blocks,
-            super_res_factor=super_res_factor,
-            sigmoid_k=sigmoid_k,
-        )
-        if disc_features is None:
-            self.disc = Discriminator(adaptive_size=adaptive_size)
-        else:
-            self.disc = Discriminator(
-                adaptive_size=adaptive_size, features=disc_features
+        if accumulate_n_batches < 1:
+            raise ValueError(f"accumulate_n_batches must be >= 1, got {accumulate_n_batches}.")
+        if lr_scheduler_type not in ("constant", "CAWR"):
+            raise ValueError(
+                f"Unsupported lr_scheduler_type={lr_scheduler_type!r}. Expected 'constant' or 'CAWR'."
             )
 
-        # losses
+        self.sample_id = str(sample_id)
+        self.learning_rate = float(learning_rate)
+        self.adaptive_size = int(adaptive_size)
+        self.accumulate_n_batches = int(accumulate_n_batches)
+        self.super_res_factor = int(super_res_factor)
+        self.num_blocks = int(num_blocks)
+        self.out_channels = int(out_channels)
+        self.norm_type: NormType = norm_type
+        self.output_activation: OutputActivation = output_activation
+        self.sigmoid_k = float(sigmoid_k)
+        self.pixel_loss_type = pixel_loss_type
+        self.use_adversarial_loss = bool(use_adversarial_loss)
+        self.adversarial_weight = float(adversarial_weight)
+        self.pretrain_epochs = int(pretrain_epochs)
+        self.use_vgg_loss = bool(use_vgg_loss)
+        self.vgg_loss_weight = float(vgg_loss_weight)
+        self.vgg_layers = int(vgg_layers)
+        self.vgg_pretrained = bool(vgg_pretrained)
+        self.lr_scheduler_type = lr_scheduler_type
+        self.lr_scheduler_args = dict(
+            lr_scheduler_args or {"T_0": 50, "T_mult": 1, "eta_min": 1e-6}
+        )
+        self.output_dir = output_dir
+        self.save_val_images = bool(save_val_images)
+        self.max_val_images_saved = int(max_val_images_saved)
+        self.strict_loading = bool(strict_loading)
+
+        self.gen = Generator(
+            in_channels=1,
+            out_channels=self.out_channels,
+            num_blocks=self.num_blocks,
+            super_res_factor=self.super_res_factor,
+            sigmoid_k=self.sigmoid_k,
+            norm_type=self.norm_type,
+            output_activation=self.output_activation,
+        )
+        self.disc = Discriminator(
+            in_channels=1,
+            features=disc_features,
+            adaptive_size=self.adaptive_size,
+            norm_type=self.norm_type,
+        )
 
         self.bce = nn.BCEWithLogitsLoss()
-        self.mse = nn.MSELoss()
-        self.l1 = nn.L1Loss()
-        self.vgg = VGGLoss(self.vgg_layers) if self.use_vgg_loss else None
-
-        # optimizers
+        self.pixel_criterion: nn.Module = (
+            nn.MSELoss() if self.pixel_loss_type == "mse" else nn.L1Loss()
+        )
+        self.vgg = (
+            VGGLoss(vgg_layers=self.vgg_layers, pretrained=self.vgg_pretrained)
+            if self.use_vgg_loss
+            else None
+        )
 
         self.automatic_optimization = False
+        self._predict_slice_counter = 0
+        self._test_slice_counter = 0
 
-        # loss lists
+    def forward(self, x: Tensor) -> Tensor:
+        return self.gen(_ensure_4d(x))
 
-        self.gen_losses = torch.Tensor([])
-        self.disc_losses = torch.Tensor([])
+    def _resolve_root_dir(self) -> Path:
+        if self.output_dir:
+            root = Path(self.output_dir)
+        elif self._trainer is not None and self.trainer.log_dir:
+            root = Path(self.trainer.log_dir)
+        else:
+            root = Path("outputs")
+        root.mkdir(parents=True, exist_ok=True)
+        return root
 
-        # strict loading
-        self.strict_loading = strict_loading
+    def _is_adversarial_active(self) -> bool:
+        return self.use_adversarial_loss and (self.current_epoch >= self.pretrain_epochs)
 
-    def training_step(self, train_batch, batch_idx):
-        """
-        Loads training batch and batch index
-
-        training batch -> torch.Tensor([B,H,W])
-        unsqueeze(1) -> torch.Tensor([B,C,H,W])
-
-        Gradient Accumulation is used every accumulate_n_batches:
-        1) Gen/Disc Weights are initialised
-        2) Gen gradients/weights not update in Disc Training
-        3) Disc weights updated, gradients not zeroed here
-        4) Disc gradients not re-calculated in Gen Training
-            - gradients at end of disc training, same for input on next training step
-            - necessary for accurate grad acc
-        5) Gen gradients/weights updated
-            - gradient at end of gen training, same for input on next training step
-            - necessary for accurate grad acc
-        6) Gen gradients zeroed if multiple of accumulate_n_batches
-        7) Disc gradients zeroed if multiple of accumulate_n_batches
-        """
+    def training_step(self, train_batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
         low_res, high_res = train_batch
-        low_res = low_res.unsqueeze(1)
-        high_res = high_res.unsqueeze(1)
+        low_res = _ensure_4d(low_res)
+        high_res = _ensure_4d(high_res)
 
-        opt_gen, opt_disc = self.optimizers()
-        gen_scheduler, disc_scheduler = self.lr_schedulers()
+        optimizers = self.optimizers()
+        opt_gen, opt_disc = optimizers  # type: ignore[misc]
+        schedulers = self.lr_schedulers()
+        gen_scheduler, disc_scheduler = schedulers  # type: ignore[misc]
 
-        gen = self.gen
-        disc = self.disc
-        mse = self.mse
-        bce = self.bce
-        vgg = self.vgg
-        # l1 = self.l1
+        should_step = (
+            (batch_idx + 1) % self.accumulate_n_batches == 0
+        ) or self.trainer.is_last_batch
+        adv_active = self._is_adversarial_active()
 
-        # train discriminator
+        # 1) Discriminator update (only when adversarial loss is active)
+        disc_loss_val = torch.zeros((), device=self.device)
+        if adv_active:
+            self.toggle_optimizer(opt_disc)
+            with torch.no_grad():
+                fake_detached = self.gen(low_res)
+            disc_real = self.disc(high_res)
+            disc_fake = self.disc(fake_detached)
 
-        self.toggle_optimizer(opt_disc)
-        fake = gen(low_res).detach()  # detach to prevent gradients being calculated
-        disc_real = disc(high_res)
-        disc_fake = disc(fake)
+            # One-sided label smoothing on real targets in [0.9, 1.0]
+            smooth_real = torch.ones_like(disc_real) - 0.1 * torch.rand_like(disc_real)
+            disc_loss_real = self.bce(disc_real, smooth_real)
+            disc_loss_fake = self.bce(disc_fake, torch.zeros_like(disc_fake))
+            disc_loss = disc_loss_real + disc_loss_fake
+            disc_loss_val = disc_loss.detach()
 
-        disc_loss_real = bce(
-            disc_real,
-            torch.ones_like(disc_real) - 0.1 * torch.rand_like(disc_real),
-        )
+            self.manual_backward(disc_loss / self.accumulate_n_batches)
+            if should_step:
+                opt_disc.step()
+                opt_disc.zero_grad(set_to_none=True)
+                disc_scheduler.step()
+            self.untoggle_optimizer(opt_disc)
 
-        disc_loss_fake = bce(disc_fake, torch.zeros_like(disc_fake))
-
-        disc_loss = (disc_loss_fake + disc_loss_real) / self.accumulate_n_batches
-
-        self.manual_backward(disc_loss)  # calculate gradients
-
-        # update weights & zero grad every accumulate_n_batches
-        if (batch_idx + 1) % self.accumulate_n_batches == 0:
-            opt_disc.step()  # update disc weights
-            opt_disc.zero_grad()  # zero gradients
-            disc_scheduler.step()
-        self.untoggle_optimizer(opt_disc)
-
-        # save disc gradients
-        disc_grads = [param.grad for param in disc.parameters()]
-
-        # train generator
-
+        # 2) Generator update
         self.toggle_optimizer(opt_gen)
-        fake = gen(low_res)
+        fake = self.gen(low_res)
+        pixel_loss = self.pixel_criterion(fake, high_res)
 
-        # call disc with grad as reset after gen training
-        disc_fake = disc(fake)
+        if adv_active:
+            disc_fake_for_gen = self.disc(fake)
+            adv_loss = self.adversarial_weight * self.bce(
+                disc_fake_for_gen, torch.ones_like(disc_fake_for_gen)
+            )
+        else:
+            adv_loss = torch.zeros((), device=self.device, dtype=pixel_loss.dtype)
 
-        adversarial_loss = 1e-3 * bce(disc_fake, torch.ones_like(disc_fake))
-        mse_loss = mse(fake, high_res)
-        # l1_loss = l1(fake, high_res)
+        if self.use_vgg_loss and self.vgg is not None:
+            vgg_loss = self.vgg_loss_weight * self.vgg(fake, high_res)
+        else:
+            vgg_loss = torch.zeros((), device=self.device, dtype=pixel_loss.dtype)
 
-        # only calculate vgg_loss if 'use_vgg_loss' is set to True
-        vgg_loss = (
-            vgg(fake, high_res) * self.vgg_loss_weight if self.use_vgg_loss else 0
-        )
-
-        gen_loss = (adversarial_loss + mse_loss + vgg_loss) / self.accumulate_n_batches
-
-        self.manual_backward(gen_loss)
-        # update weights every accumulate_n_batches
-        if (batch_idx + 1) % self.accumulate_n_batches == 0:
+        gen_loss = pixel_loss + adv_loss + vgg_loss
+        self.manual_backward(gen_loss / self.accumulate_n_batches)
+        if should_step:
             opt_gen.step()
-            opt_gen.zero_grad()
+            opt_gen.zero_grad(set_to_none=True)
             gen_scheduler.step()
         self.untoggle_optimizer(opt_gen)
 
-        # reset disc gradients to before gen training
-        for param, grad in zip(disc.parameters(), disc_grads):
-            param.grad = grad
-
-        # append loss after every desired batch passsed through
-        if self.global_rank == 0 and (batch_idx + 1) % self.accumulate_n_batches == 0:
-            disc_loss = torch.Tensor([disc_loss])
-            gen_loss = torch.Tensor([gen_loss])
-
-            self.disc_losses = torch.cat((self.disc_losses, disc_loss), axis=0)
-            self.gen_losses = torch.cat((self.gen_losses, gen_loss), axis=0)
-
-    def on_train_epoch_end(self):
-        """
-        Defines what occurs at end of training epoch
-        1) Take average of losses from each batch processed in epoch
-        2) Write disc_loss and gen_loss to files
-        3) Reset loss lists to empty/zero
-        """
-        # Input dim of loss lists is just length dataset_size/batch_size
-        avg_disc_loss = torch.mean(self.disc_losses).item()
-        avg_gen_loss = torch.mean(self.gen_losses).item()
-
-        if self.global_rank == 0:
-            with open("gen_loss.txt", "a") as f:
-                f.write(str(avg_gen_loss))
-                f.write("\n")
-
-            with open("disc_loss.txt", "a") as f:
-                f.write(str(avg_disc_loss))
-                f.write("\n")
-
-        self.disc_losses = torch.Tensor([])
-        self.gen_losses = torch.Tensor([])
-
-    @torch.no_grad()
-    def validation_step(self, val_batch, batch_idx):
-        """
-        Performs the validation step. Passes low-res input through
-        the partially trained model.
-        Validation performed on single GPU
-
-        val_batch -> torch.Tensor([B,H,W])
-        """
-
-        # disable training
-
-        if self.global_rank == 0:
-            low_res, high_res = val_batch
-
-            low_res = low_res.unsqueeze(1)
-            high_res = high_res.unsqueeze(1)
-            # BHW -> BCHW
-
-            upsampled = self.gen(low_res)
-
-            # want to save image as .tiff as floating points
-            up_tiff = "upsampled_" + str(batch_idx) + ".tiff"
-            high_tiff = "high_" + str(batch_idx) + ".tiff"
-            low_tiff = "low_" + str(batch_idx) + ".tiff"
-
-            # take 1st item from the batch and squeeze channel
-            # BCHW -> CHW -> HW
-            upsampled = upsampled[0].squeeze(0).cpu().to(torch.float32).numpy()
-            low_res = low_res[0].squeeze(0).cpu().numpy()
-            high_res = high_res[0].squeeze(0).cpu().numpy()
-
-            # make empty saved folder
-            if not os.path.isdir("saved"):
-                os.mkdir("saved")
-
-            epoch = self.current_epoch
-            sanity = self.trainer.sanity_checking
-
-            if sanity:
-                os.mkdir("sanity") if not os.path.isdir("sanity") else None
-                os.chdir("sanity")
-                (
-                    os.mkdir(f"epoch_{epoch}")
-                    if not os.path.isdir(f"epoch_{epoch}")
-                    else None
-                )
-                imageio.imwrite(f"epoch_{epoch}/{up_tiff}", upsampled)
-                imageio.imwrite(f"epoch_{epoch}/{high_tiff}", high_res)
-                imageio.imwrite(f"epoch_{epoch}/{low_tiff}", low_res)
-                os.chdir("../")
-
-            elif not sanity:
-                if not os.path.isdir(f"saved/epoch_{epoch}"):
-                    os.mkdir(f"saved/epoch_{epoch}")
-                imageio.imwrite(f"saved/epoch_{epoch}/{up_tiff}", upsampled)
-                imageio.imwrite(f"saved/epoch_{epoch}/{high_tiff}", high_res)
-                imageio.imwrite(f"saved/epoch_{epoch}/{low_tiff}", low_res)
+        batch_size = int(low_res.shape[0])
+        self.log(
+            "train/gen_loss",
+            gen_loss.detach(),
+            prog_bar=True,
+            on_step=False,
+            on_epoch=True,
+            batch_size=batch_size,
+        )
+        self.log(
+            "train/pixel_loss",
+            pixel_loss.detach(),
+            on_step=False,
+            on_epoch=True,
+            batch_size=batch_size,
+        )
+        self.log(
+            "train/adv_loss",
+            adv_loss.detach(),
+            on_step=False,
+            on_epoch=True,
+            batch_size=batch_size,
+        )
+        self.log(
+            "train/vgg_loss",
+            vgg_loss.detach(),
+            on_step=False,
+            on_epoch=True,
+            batch_size=batch_size,
+        )
+        self.log(
+            "train/disc_loss",
+            disc_loss_val,
+            prog_bar=self.use_adversarial_loss,
+            on_step=False,
+            on_epoch=True,
+            batch_size=batch_size,
+        )
 
     @torch.no_grad()
-    def test_step(self, test_batch, batch_idx):
-        """
-        Basic test step, saving the high-res, low-res and upsampled images
-        to a folder called 'test_saved' in the current directory.
+    def validation_step(self, val_batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
+        low_res, high_res = val_batch
+        low_4d = _ensure_4d(low_res)
+        high_4d = _ensure_4d(high_res)
+        upsampled = self.gen(low_4d)
 
-        Performs the test step. Passes low-res input through
-        the trained model from the testing dataset.
-        Test performed on single GPU
+        pred_f32 = upsampled.to(torch.float32)
+        high_f32 = high_4d.to(torch.float32)
 
-        test_batch -> torch.Tensor([B,H,W])
-        """
+        batch_size = int(low_4d.shape[0])
+        self.log(
+            "val/psnr",
+            compute_psnr(pred_f32, high_f32),
+            prog_bar=True,
+            on_epoch=True,
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+        self.log(
+            "val/ssim",
+            compute_ssim(pred_f32, high_f32),
+            prog_bar=True,
+            on_epoch=True,
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+        self.log(
+            "val/mae",
+            compute_mae(pred_f32, high_f32),
+            on_epoch=True,
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+        self.log(
+            "val/rmse",
+            compute_rmse(pred_f32, high_f32),
+            on_epoch=True,
+            batch_size=batch_size,
+            sync_dist=True,
+        )
+
+        if self.save_val_images and self.global_rank == 0 and batch_idx < self.max_val_images_saved:
+            stage_name = "sanity" if self.trainer.sanity_checking else "validation"
+            epoch_dir = self._resolve_root_dir() / stage_name / f"epoch_{self.current_epoch:04d}"
+            epoch_dir.mkdir(parents=True, exist_ok=True)
+
+            tifffile.imwrite(
+                epoch_dir / f"upsampled_{batch_idx:04d}.tiff",
+                pred_f32[0, 0].cpu().numpy(),
+            )
+            tifffile.imwrite(
+                epoch_dir / f"high_{batch_idx:04d}.tiff",
+                high_f32[0, 0].cpu().numpy(),
+            )
+            tifffile.imwrite(
+                epoch_dir / f"low_{batch_idx:04d}.tiff",
+                low_4d[0, 0].to(torch.float32).cpu().numpy(),
+            )
+
+    def on_test_epoch_start(self) -> None:
+        self._test_slice_counter = 0
+
+    @torch.no_grad()
+    def test_step(self, test_batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
         low_res, high_res = test_batch
-        low_res = low_res.unsqueeze(1)
-        high_res = high_res.unsqueeze(1)
+        low_4d = _ensure_4d(low_res)
+        high_4d = _ensure_4d(high_res)
+        upsampled = self.gen(low_4d)
 
-        upsampled = self.gen(low_res)
+        pred_f32 = upsampled.to(torch.float32)
+        high_f32 = high_4d.to(torch.float32)
+        low_f32 = low_4d.to(torch.float32)
+        batch_size = int(low_4d.shape[0])
 
-        # want to save image as .tiff as floating points
-        up_tiff = "upsampled_" + str(batch_idx) + ".tiff"
-        high_tiff = "high_" + str(batch_idx) + ".tiff"
-        low_tiff = "low_" + str(batch_idx) + ".tiff"
+        self.log(
+            "test/psnr", compute_psnr(pred_f32, high_f32), on_epoch=True, batch_size=batch_size
+        )
+        self.log(
+            "test/ssim", compute_ssim(pred_f32, high_f32), on_epoch=True, batch_size=batch_size
+        )
+        self.log("test/mae", compute_mae(pred_f32, high_f32), on_epoch=True, batch_size=batch_size)
+        self.log(
+            "test/rmse", compute_rmse(pred_f32, high_f32), on_epoch=True, batch_size=batch_size
+        )
 
-        # take 1st item from the batch and squeeze channel
-        # BCHW -> CHW -> HW
-        upsampled = upsampled[0].squeeze(0).cpu().to(torch.float32).numpy()
-        low_res = low_res[0].squeeze(0).cpu().numpy()
-        high_res = high_res[0].squeeze(0).cpu().numpy()
+        if self.global_rank == 0:
+            test_dir = self._resolve_root_dir() / "test_saved"
+            test_dir.mkdir(parents=True, exist_ok=True)
+            for i in range(batch_size):
+                idx = self._test_slice_counter
+                self._test_slice_counter += 1
+                tifffile.imwrite(
+                    test_dir / f"upsampled_{idx:05d}.tiff", pred_f32[i, 0].cpu().numpy()
+                )
+                tifffile.imwrite(test_dir / f"high_{idx:05d}.tiff", high_f32[i, 0].cpu().numpy())
+                tifffile.imwrite(test_dir / f"low_{idx:05d}.tiff", low_f32[i, 0].cpu().numpy())
 
-        if not os.path.isdir("test_saved"):
-            os.mkdir("test_saved")
-        os.chdir("test_saved")
+    def _predict_base_dir(self) -> Path:
+        dm = getattr(self.trainer, "datamodule", None) if self._trainer is not None else None
+        pred_axis = getattr(dm, "predict_axis", None)
+        folder_name = f"predicted_{pred_axis}" if pred_axis else "predicted"
+        return self._resolve_root_dir() / folder_name
 
-        # save the images in the test_saved folder
-        imageio.imwrite(f"{up_tiff}", upsampled)
-        imageio.imwrite(f"{high_tiff}", high_res)
-        imageio.imwrite(f"{low_tiff}", low_res)
-
-        os.chdir("../")  # back up to original folder
+    def on_predict_epoch_start(self) -> None:
+        self._predict_slice_counter = 0
 
     @torch.no_grad()
-    def predict_step(self, predict_batch, batch_idx):
-        """
-        Performs the prediction step. Passes low-res input through
-        the trained model.
-        Prediction performed on single GPU
-
-        batch -> torch.Tensor([B,H,W])
-        """
-        low_res, high_res = predict_batch  # Both BHW
-
-        low_res = low_res.unsqueeze(1)  # BHW -> BCHW to pass through model
-
-        predicted = self.gen(low_res)
-
-        # save the predicted image as a .tiff file in a 'predicted_' folder
-
-        pred_axis = getattr(self.trainer.datamodule, "predict_axis", "unknown")
-        pred_folder = (
-            f"predicted_{pred_axis}" if pred_axis != "unknown" else "predicted"
-        )
-
-        if not os.path.isdir(pred_folder):
-            os.mkdir(pred_folder)
-        os.chdir(pred_folder)
-
-        high_tiff = (
-            f"{self.sample_id}_high_{batch_idx}.tiff"
-            if self.sample_id
-            else f"high_{batch_idx}.tiff"
-        )
-        low_tiff = (
-            f"{self.sample_id}_low_{batch_idx}.tiff"
-            if self.sample_id
-            else f"low_{batch_idx}.tiff"
-        )
-        predicted_tiff = (
-            f"{self.sample_id}_predicted_{batch_idx}.tiff"
-            if self.sample_id
-            else f"predicted_{batch_idx}.tiff"
-        )
-
-        # Ensure all HW
-        high_res = high_res[0].cpu().numpy()  # BHW -> HW
-        low_res = low_res[0].squeeze(0).cpu().numpy()  # BCHW -> HW
-        predicted = (
-            predicted[0].squeeze(0).cpu().to(torch.float32).numpy()
-        )  # BCHW -> HW
-
-        imageio.imwrite(f"{high_tiff}", high_res)
-        imageio.imwrite(f"{low_tiff}", low_res)
-        imageio.imwrite(f"{predicted_tiff}", predicted)
-
-        if not os.path.isdir("predicted"):
-            os.mkdir("predicted")
-
-        if not os.path.isdir("low_res"):
-            os.mkdir("low_res")
-
-        if not os.path.isdir("high_res"):
-            os.mkdir("high_res")
-
-        # move all predicted_*.tiff files to the predicted folder
-        os.system(f"mv {predicted_tiff} ./predicted/")
-
-        # move all low_*.tiff files to the low_res folder
-        os.system(f"mv {low_tiff} ./low_res/")
-
-        # move all high_*.tiff files to the high_res folder
-        os.system(f"mv {high_tiff} ./high_res/")
-
-        os.chdir("../")  # back up to original folder
-
-    def on_predict_epoch_end(self):
-        """
-        Defines what occurs at end of prediction epoch
-
-        1a) Move into predicted folder
-        1b) Create a single stack of the predicted_*.tiff files
-
-        2a) Move into low_res folder
-        2b) Create a single stack of the low_*.tiff files
-
-        3a) Move into high_res folder
-        3b) Create a single stack of the high_*.tiff files
-
-        """
-
-        # Change into the predicted_{pred_axis} folder
-        pred_axis = getattr(self.trainer.datamodule, "predict_axis", "unknown")
-        pred_folder = (
-            f"predicted_{pred_axis}" if pred_axis != "unknown" else "predicted"
-        )
-
-        os.chdir(pred_folder)
-
-        # define the file formats depending on sample_id
-
-        if self.sample_id:
-            pred_stack_name = f"{self.sample_id}_predicted_stack.tiff"
-            pred_pattern = re.compile(rf"{self.sample_id}_predicted_(\d+)\.tiff")
-
-            low_stack_name = f"{self.sample_id}_low_res_stack.tiff"
-            low_pattern = re.compile(rf"{self.sample_id}_low_(\d+)\.tiff")
-
-            high_stack_name = f"{self.sample_id}_high_res_stack.tiff"
-            high_pattern = re.compile(rf"{self.sample_id}_high_(\d+)\.tiff")
-
+    def predict_step(
+        self,
+        predict_batch: tuple[Tensor, Tensor] | Tensor,
+        batch_idx: int,
+        dataloader_idx: int = 0,
+    ) -> Tensor:
+        if isinstance(predict_batch, (tuple, list)):
+            low_res, high_res = predict_batch[0], predict_batch[1]
         else:
-            pred_stack_name = "predicted_stack.tiff"
-            pred_pattern = re.compile(r"predicted_(\d+)\.tiff")
+            low_res, high_res = predict_batch, None
 
-            low_stack_name = "low_res_stack.tiff"
-            low_pattern = re.compile(r"low_(\d+)\.tiff")
-
-            high_stack_name = "high_res_stack.tiff"
-            high_pattern = re.compile(r"high_(\d+)\.tiff")
-
-        # predicted folder first
-        os.chdir("predicted")
-        pred_path = os.getcwd()
+        low_4d = _ensure_4d(low_res)
+        predicted_4d = self.gen(low_4d).to(torch.float32)
+        low_f32 = low_4d.to(torch.float32)
+        high_f32 = _ensure_4d(high_res).to(torch.float32) if high_res is not None else None
 
         if self.global_rank == 0:
-            # Get all predicted_*.tiff files and sort them numerically
-            tiff_files = sorted(
-                [f for f in os.listdir(pred_path) if re.match(pred_pattern, f)],
-                key=lambda x: int(re.search(pred_pattern, x).group(1)),
-            )
+            base_dir = self._predict_base_dir()
+            pred_dir = base_dir / "predicted"
+            low_dir = base_dir / "low_res"
+            pred_dir.mkdir(parents=True, exist_ok=True)
+            low_dir.mkdir(parents=True, exist_ok=True)
+            if high_f32 is not None:
+                high_dir = base_dir / "high_res"
+                high_dir.mkdir(parents=True, exist_ok=True)
 
-            # Output path for the stack
-            output_path = os.path.join(os.pardir, pred_stack_name)
+            prefix = f"{self.sample_id}_" if self.sample_id else ""
+            batch_size = int(low_4d.shape[0])
+            for i in range(batch_size):
+                idx = self._predict_slice_counter
+                self._predict_slice_counter += 1
+                tifffile.imwrite(
+                    pred_dir / f"{prefix}predicted_{idx:05d}.tiff",
+                    predicted_4d[i, 0].cpu().numpy(),
+                )
+                tifffile.imwrite(
+                    low_dir / f"{prefix}low_{idx:05d}.tiff",
+                    low_f32[i, 0].cpu().numpy(),
+                )
+                if high_f32 is not None:
+                    tifffile.imwrite(
+                        base_dir / "high_res" / f"{prefix}high_{idx:05d}.tiff",
+                        high_f32[i, 0].cpu().numpy(),
+                    )
 
-            # Write the stack incrementally (memory-efficient)
-            with tifffile.TiffWriter(output_path) as tiff:
-                for f in tiff_files:
-                    img_path = os.path.join(pred_path, f)
-                    img = tifffile.imread(img_path)
-                    tiff.write(img)
+        return predicted_4d.squeeze(1)
 
-        os.chdir("../")  # back up to original folder
+    def on_predict_epoch_end(self) -> None:
+        if self.global_rank != 0:
+            return
 
-        # low_res folder next
-        os.chdir("low_res")
-        low_res_path = os.getcwd()
+        base_dir = self._predict_base_dir()
+        if not base_dir.is_dir():
+            return
 
-        if self.global_rank == 0:
-            # Get all low_*.tiff files and sort them numerically
-            tiff_files = sorted(
-                [f for f in os.listdir(low_res_path) if re.match(low_pattern, f)],
-                key=lambda x: int(re.search(low_pattern, x).group(1)),
-            )
+        prefix = f"{self.sample_id}_" if self.sample_id else ""
+        escaped_prefix = re.escape(prefix)
+        stack_specs = [
+            (
+                "predicted",
+                f"{prefix}predicted_stack.tiff",
+                re.compile(rf"^{escaped_prefix}predicted_(\d+)\.tiff$"),
+            ),
+            (
+                "low_res",
+                f"{prefix}low_res_stack.tiff",
+                re.compile(rf"^{escaped_prefix}low_(\d+)\.tiff$"),
+            ),
+            (
+                "high_res",
+                f"{prefix}high_res_stack.tiff",
+                re.compile(rf"^{escaped_prefix}high_(\d+)\.tiff$"),
+            ),
+        ]
 
-            # Output path for the stack
-            output_path = os.path.join(os.pardir, low_stack_name)
+        for subdir_name, stack_filename, pattern in stack_specs:
+            slice_dir = base_dir / subdir_name
+            if not slice_dir.is_dir():
+                continue
 
-            # Write the stack incrementally (memory-efficient)
-            with tifffile.TiffWriter(output_path) as tiff:
-                for f in tiff_files:
-                    img_path = os.path.join(low_res_path, f)
-                    img = tifffile.imread(img_path)
-                    tiff.write(img)
-        os.chdir("../")
+            matched: list[tuple[int, Path]] = []
+            for p in slice_dir.iterdir():
+                m = pattern.match(p.name)
+                if m is not None:
+                    matched.append((int(m.group(1)), p))
+            if not matched:
+                continue
 
-        # high_res folder last
-        os.chdir("high_res")
-        high_res_path = os.getcwd()
-
-        if self.global_rank == 0:
-            # Get all high_*.tiff files and sort them numerically
-            tiff_files = sorted(
-                [f for f in os.listdir(high_res_path) if re.match(high_pattern, f)],
-                key=lambda x: int(re.search(high_pattern, x).group(1)),
-            )
-
-            # Output path for the stack in folder above
-            output_path = os.path.join(os.pardir, high_stack_name)
-
-            # Write the stack incrementally (memory-efficient)
-            with tifffile.TiffWriter(output_path) as tiff:
-                for f in tiff_files:
-                    img_path = os.path.join(high_res_path, f)
-                    img = tifffile.imread(img_path)
-                    tiff.write(img)
-        os.chdir("../")
+            matched.sort(key=lambda item: item[0])
+            output_stack = base_dir / stack_filename
+            with tifffile.TiffWriter(output_stack, bigtiff=True) as writer:
+                for _, img_path in matched:
+                    writer.write(
+                        tifffile.imread(img_path),
+                        photometric="minisblack",
+                        contiguous=True,
+                    )
 
     def configure_optimizers(self):
-        self.automatic_optimization = False
-        gen = self.gen
-        disc = self.disc
-
-        opt_gen = optim.Adam(
-            gen.parameters(), lr=self.learning_rate, betas=(0.9, 0.999)
-        )
-        opt_disc = optim.Adam(
-            disc.parameters(), lr=self.learning_rate, betas=(0.9, 0.999)
-        )
+        opt_gen = optim.Adam(self.gen.parameters(), lr=self.learning_rate, betas=(0.9, 0.999))
+        opt_disc = optim.Adam(self.disc.parameters(), lr=self.learning_rate, betas=(0.9, 0.999))
 
         if self.lr_scheduler_type == "constant":
-            gen_scheduler = optim.lr_scheduler.LambdaLR(
+            gen_scheduler: optim.lr_scheduler.LRScheduler = optim.lr_scheduler.LambdaLR(
                 opt_gen, lr_lambda=lambda _step: 1.0
             )
-            disc_scheduler = optim.lr_scheduler.LambdaLR(
+            disc_scheduler: optim.lr_scheduler.LRScheduler = optim.lr_scheduler.LambdaLR(
                 opt_disc, lr_lambda=lambda _step: 1.0
             )
-
-        elif self.lr_scheduler_type == "CAWR":
+        else:
             gen_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                opt_gen,
-                **self.lr_scheduler,
+                opt_gen, **self.lr_scheduler_args
             )
             disc_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
-                opt_disc,
-                **self.lr_scheduler,
+                opt_disc, **self.lr_scheduler_args
             )
 
         return [
