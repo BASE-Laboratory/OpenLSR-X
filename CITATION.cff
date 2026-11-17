@@ -5,15 +5,23 @@ type: software
 version: 0.2.0
 license: BSD-3-Clause
 repository-code: "https://github.com/BASE-Laboratory/OpenLSR-X"
-url: "https://github.com/BASE-Laboratory/OpenLSR-X"
+url: "https://base-laboratory.github.io/OpenLSR-X/"
 authors:
   - family-names: Green
     given-names: Calum
-  - name: "BASE Laboratory"
+    affiliation: "Department of Mechanical Engineering, Imperial College London; Diamond Light Source"
+  - family-names: Ahmed
+    given-names: Sharif
+    affiliation: "Diamond Light Source, Rutherford Appleton Laboratory"
+  - family-names: Le Houx
+    given-names: James
+    orcid: "https://orcid.org/0000-0002-1576-0673"
+    affiliation: "BASE Laboratory, University of Greenwich; ISIS Neutron and Muon Source; The Faraday Institution"
 keywords:
   - super-resolution
   - x-ray computed tomography
   - micro-CT
+  - synchrotron
   - porous media
   - petrophysics
   - generative adversarial networks

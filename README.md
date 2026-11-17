@@ -1,11 +1,12 @@
 # OpenLSR-X
 
 [![CI](https://github.com/BASE-Laboratory/OpenLSR-X/actions/workflows/ci.yml/badge.svg)](https://github.com/BASE-Laboratory/OpenLSR-X/actions/workflows/ci.yml)
+[![Docs](https://github.com/BASE-Laboratory/OpenLSR-X/actions/workflows/docs.yml/badge.svg)](https://base-laboratory.github.io/OpenLSR-X/)
+[![JOSS Paper](https://github.com/BASE-Laboratory/OpenLSR-X/actions/workflows/release.yml/badge.svg)](https://github.com/BASE-Laboratory/OpenLSR-X/actions/workflows/release.yml)
 ![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)
-[![Lightning](https://img.shields.io/badge/-PyTorch_Lightning-792ee5?logo=pytorchlightning&logoColor=white)](https://github.com/Lightning-AI/pytorch-lightning)
 [![License: BSD-3-Clause](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 
-**OpenLSR-X** is a reproducible Python framework and benchmark suite for **2D-to-3D Super-Resolution of X-Ray Computed Tomography (XCT)** porous-media scans using Generative Adversarial Networks (SRGAN) and multi-axis 3D Fourier fusion. Originally developed during the PhD research of **Calum Green** and maintained by **BASE Laboratory**, OpenLSR-X bridges deep-learning super-resolution with quantitative **petrophysical and topological validation**.
+**OpenLSR-X** is a reproducible Python framework and benchmark suite for **2D-to-3D Super-Resolution of X-Ray Computed Tomography (XCT)** porous-media scans using Generative Adversarial Networks (SRGAN) and multi-axis 3D Fourier fusion. Originally developed during the PhD research of **Calum Green** (Imperial College London & Diamond Light Source) and maintained by **BASE Laboratory**, OpenLSR-X bridges deep-learning super-resolution with quantitative **petrophysical and topological validation**.
 
 ---
 
@@ -14,7 +15,7 @@
 - **2D Training → Isotropic 3D Reconstruction:** Train memory-efficient 2D slice models (with reflect padding, `PixelNorm`, generator warmup, and optional VGG-19 perceptual loss) and reconstruct artifact-free 3D volumes via **3-Axis Orthogonal Fourier Fusion** (`yz + xz + xy`).
 - **Leakage-Free 3D Spatial Splitting:** Enforces strictly disjoint 3D sub-volume slabs (with configurable guard margins) across `train`, `val`, and `test` so orthogonal evaluation slices never share voxels with training slices.
 - **Petrophysical & Topological Metrics:** Evaluates not only 2D/3D PSNR and tri-planar SSIM, but also segmented **porosity error** ($|\Delta\phi|$), **pore Dice/IoU**, **specific surface area** ($S_v$), **3D Euler characteristic density** ($\chi_V$), **inscribed pore-radius Wasserstein-1 distance**, **two-point correlation** $S_2(r)$, and **through-plane gradient anisotropy**.
-- **Out-of-the-Box Benchmarks:** Ships with deterministic **Factorial PoreSpy** benchmarks and an **Open Rock Micro-CT** runner (Bentheimer Sandstone & Indiana Limestone), plus ready-to-use YAML profiles for laboratory micro-CT and Diamond Light Source I13 synchrotron NeXus/HDF5 reconstructions.
+- **Out-of-the-Box Benchmarks & Open Synchrotron Profiles:** Ships with deterministic **Factorial PoreSpy** benchmarks, an **Open Rock Micro-CT** runner (Bentheimer Sandstone & Indiana Limestone), and NeXus/HDF5 profiles for the open Diamond Light Source I13-2 multi-resolution `Zn-13X` dataset ([*Scientific Data*, 2025](https://doi.org/10.1038/s41597-025-04605-9)).
 
 ---
 

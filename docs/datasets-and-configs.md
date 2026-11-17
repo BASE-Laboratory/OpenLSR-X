@@ -66,3 +66,18 @@ data:
     high_y_range: [763, 2043]
     high_x_range: [466, 1746]
 ```
+
+---
+
+## Open Synchrotron Multi-Resolution Benchmark (`Zn-13X`, Diamond I13-2)
+
+The `configs/i13-xct/i13_xct_config.yaml` profile corresponds directly to the open multi-resolution synchrotron XCT dataset published in *Scientific Data* ([Green et al., 2025, `10.1038/s41597-025-04605-9`](https://doi.org/10.1038/s41597-025-04605-9)):
+
+| Magnification | Voxel Size ($\mu\text{m}$) | Field of View ($\text{mm}$) | Reconstructed `.h5` / `.nxs` Zenodo DOI |
+| :--- | :--- | :--- | :--- |
+| `2.5x` | `2.600` | $6.7 \times 5.6$ | [`10.5281/zenodo.12206815`](https://doi.org/10.5281/zenodo.12206815) |
+| `4x` | `1.625` | $4.2 \times 3.5$ | [`10.5281/zenodo.13327651`](https://doi.org/10.5281/zenodo.13327651) |
+| `8x` | `0.8125` | $2.1 \times 1.8$ | [`10.5281/zenodo.13327682`](https://doi.org/10.5281/zenodo.13327682) |
+| `20x` | `0.325` | $0.83 \times 0.70$ | [`10.5281/zenodo.13327692`](https://doi.org/10.5281/zenodo.13327692) |
+| *Preview* | *8-bit sub-volumes* | *Cropped ROI* | [`10.5281/zenodo.14245751`](https://doi.org/10.5281/zenodo.14245751) |
+
