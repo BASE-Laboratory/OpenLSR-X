@@ -529,6 +529,12 @@ def run_zn13x_study(
 
             if seed == seed_list[0]:
                 export_for_openimpala(
+                    rrdb_vols["fused"],
+                    output_dir=output_dir / "openimpala_ready",
+                    name=f"{dataset_name}_rrdb_ragan_s{seed}",
+                    pore_is_low=True,
+                )
+                export_for_openimpala(
                     swin_vols["fused"],
                     output_dir=output_dir / "openimpala_ready",
                     name=f"{dataset_name}_swinir_25d_phys_s{seed}",
