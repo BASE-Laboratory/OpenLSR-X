@@ -12,7 +12,7 @@ from scipy.ndimage import gaussian_filter, zoom
 from torch import Tensor
 from torch.utils.data import Dataset
 
-NormMode = Literal["minmax", "percentile", "fixed"]
+NormMode = Literal["minmax", "percentile", "fixed", "none"]
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,8 @@ def normalize_volume(
 ) -> np.ndarray:
     """Vectorized normalization of a 2D/3D XCT array into ``[0, 1]`` float32."""
     arr = np.asarray(volume, dtype=np.float32)
+    if mode == "none":
+        return np.clip(arr, 0.0, 1.0).astype(np.float32, copy=False)
     if mode == "minmax":
         lo = float(arr.min())
         hi = float(arr.max())

@@ -70,6 +70,7 @@ def compute_ssim(
     if kernel_size < 3:
         return 1.0 if torch.allclose(p, t) else 0.0
 
+    use_gaussian = kernel_size == 11
     scores: list[float] = []
     weights: list[int] = []
     for start in range(0, p.shape[0], chunk_size):
@@ -78,6 +79,7 @@ def compute_ssim(
         val = structural_similarity_index_measure(
             p_chunk,
             t_chunk,
+            gaussian_kernel=use_gaussian,
             data_range=data_range,
             kernel_size=kernel_size,
         )

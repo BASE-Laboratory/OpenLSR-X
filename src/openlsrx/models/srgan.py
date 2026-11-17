@@ -15,7 +15,11 @@ from torch import Tensor, nn, optim
 from ..losses import VGGLoss
 from ..metrics.image import compute_mae, compute_psnr, compute_rmse, compute_ssim
 from .blocks import NormType
+from .rrdb import RRDBGenerator
 from .submodels import Discriminator, Generator, OutputActivation
+
+BackboneType = Literal["srgan", "rrdb"]
+GANLossType = Literal["standard", "ragan"]
 
 
 def _ensure_4d(x: Tensor) -> Tensor:
@@ -30,10 +34,12 @@ def _ensure_4d(x: Tensor) -> Tensor:
 
 
 class SRGAN(pl.LightningModule):
-    """Learnable Super-Resolution GAN (and SRResNet ablation) for XCT data.
+    """Learnable Super-Resolution GAN (SRGAN / RRDB-ESRGAN / SRResNet) for XCT data.
 
     Supports:
-    - Adversarial + perceptual + pixelwise training (SRGAN)
+    - Classical ``Generator`` (``backbone='srgan'``) or normalization-free ``RRDBGenerator``
+      with arbitrary beamline magnification ratios (``backbone='rrdb'``)
+    - Standard BCE adversarial loss or Relativistic Average GAN (``gan_loss_type='ragan'``)
     - Generator-only MSE/L1 pretraining or full ablation (``use_adversarial_loss=False``)
     - Optional generator warmup epochs (``pretrain_epochs > 0``) prior to GAN updates
     - Built-in PSNR, SSIM, MAE, and RMSE logging on validation and test splits
@@ -45,9 +51,12 @@ class SRGAN(pl.LightningModule):
         learning_rate: float = 1e-4,
         adaptive_size: int = 40,
         accumulate_n_batches: int = 1,
-        super_res_factor: int = 2,
+        super_res_factor: int | float = 2,
         num_blocks: int = 10,
         out_channels: int = 64,
+        growth_channels: int = 32,
+        backbone: BackboneType = "srgan",
+        gan_loss_type: GANLossType = "standard",
         norm_type: NormType = "pixel",
         output_activation: OutputActivation = "custom_sigmoid",
         sigmoid_k: float = 1.0,
@@ -77,14 +86,27 @@ class SRGAN(pl.LightningModule):
             raise ValueError(
                 f"Unsupported lr_scheduler_type={lr_scheduler_type!r}. Expected 'constant' or 'CAWR'."
             )
+        if backbone not in ("srgan", "rrdb"):
+            raise ValueError(f"Unsupported backbone={backbone!r}. Expected 'srgan' or 'rrdb'.")
+        if gan_loss_type not in ("standard", "ragan"):
+            raise ValueError(
+                f"Unsupported gan_loss_type={gan_loss_type!r}. Expected 'standard' or 'ragan'."
+            )
 
         self.sample_id = str(sample_id)
         self.learning_rate = float(learning_rate)
         self.adaptive_size = int(adaptive_size)
         self.accumulate_n_batches = int(accumulate_n_batches)
-        self.super_res_factor = int(super_res_factor)
+        self.super_res_factor: int | float = (
+            int(super_res_factor)
+            if float(super_res_factor).is_integer()
+            else float(super_res_factor)
+        )
         self.num_blocks = int(num_blocks)
         self.out_channels = int(out_channels)
+        self.growth_channels = int(growth_channels)
+        self.backbone: BackboneType = backbone
+        self.gan_loss_type: GANLossType = gan_loss_type
         self.norm_type: NormType = norm_type
         self.output_activation: OutputActivation = output_activation
         self.sigmoid_k = float(sigmoid_k)
@@ -105,15 +127,31 @@ class SRGAN(pl.LightningModule):
         self.max_val_images_saved = int(max_val_images_saved)
         self.strict_loading = bool(strict_loading)
 
-        self.gen = Generator(
-            in_channels=1,
-            out_channels=self.out_channels,
-            num_blocks=self.num_blocks,
-            super_res_factor=self.super_res_factor,
-            sigmoid_k=self.sigmoid_k,
-            norm_type=self.norm_type,
-            output_activation=self.output_activation,
-        )
+        if self.backbone == "rrdb":
+            self.gen: nn.Module = RRDBGenerator(
+                in_channels=1,
+                out_channels=self.out_channels,
+                growth_channels=self.growth_channels,
+                num_blocks=self.num_blocks,
+                super_res_factor=self.super_res_factor,
+                sigmoid_k=self.sigmoid_k,
+                output_activation=self.output_activation,
+            )
+        else:
+            if not isinstance(self.super_res_factor, int):
+                raise ValueError(
+                    f"backbone='srgan' requires integer power-of-2 super_res_factor, "
+                    f"got {self.super_res_factor}. Use backbone='rrdb' for fractional scales."
+                )
+            self.gen = Generator(
+                in_channels=1,
+                out_channels=self.out_channels,
+                num_blocks=self.num_blocks,
+                super_res_factor=self.super_res_factor,
+                sigmoid_k=self.sigmoid_k,
+                norm_type=self.norm_type,
+                output_activation=self.output_activation,
+            )
         self.disc = Discriminator(
             in_channels=1,
             features=disc_features,
@@ -179,11 +217,18 @@ class SRGAN(pl.LightningModule):
             disc_real = self.disc(high_res)
             disc_fake = self.disc(fake_detached)
 
-            # One-sided label smoothing on real targets in [0.9, 1.0]
-            smooth_real = torch.ones_like(disc_real) - 0.1 * torch.rand_like(disc_real)
-            disc_loss_real = self.bce(disc_real, smooth_real)
-            disc_loss_fake = self.bce(disc_fake, torch.zeros_like(disc_fake))
-            disc_loss = disc_loss_real + disc_loss_fake
+            if self.gan_loss_type == "ragan":
+                rel_real = disc_real - disc_fake.mean(dim=0, keepdim=True)
+                rel_fake = disc_fake - disc_real.mean(dim=0, keepdim=True)
+                disc_loss_real = self.bce(rel_real, torch.ones_like(rel_real))
+                disc_loss_fake = self.bce(rel_fake, torch.zeros_like(rel_fake))
+                disc_loss = 0.5 * (disc_loss_real + disc_loss_fake)
+            else:
+                # One-sided label smoothing on real targets in [0.9, 1.0]
+                smooth_real = torch.ones_like(disc_real) - 0.1 * torch.rand_like(disc_real)
+                disc_loss_real = self.bce(disc_real, smooth_real)
+                disc_loss_fake = self.bce(disc_fake, torch.zeros_like(disc_fake))
+                disc_loss = disc_loss_real + disc_loss_fake
             disc_loss_val = disc_loss.detach()
 
             self.manual_backward(disc_loss / self.accumulate_n_batches)
@@ -200,9 +245,20 @@ class SRGAN(pl.LightningModule):
 
         if adv_active:
             disc_fake_for_gen = self.disc(fake)
-            adv_loss = self.adversarial_weight * self.bce(
-                disc_fake_for_gen, torch.ones_like(disc_fake_for_gen)
-            )
+            if self.gan_loss_type == "ragan":
+                with torch.no_grad():
+                    disc_real_for_gen = self.disc(high_res)
+                rel_fake_g = disc_fake_for_gen - disc_real_for_gen.mean(dim=0, keepdim=True)
+                rel_real_g = disc_real_for_gen - disc_fake_for_gen.mean(dim=0, keepdim=True)
+                raw_adv = 0.5 * (
+                    self.bce(rel_fake_g, torch.ones_like(rel_fake_g))
+                    + self.bce(rel_real_g, torch.zeros_like(rel_real_g))
+                )
+                adv_loss = self.adversarial_weight * raw_adv
+            else:
+                adv_loss = self.adversarial_weight * self.bce(
+                    disc_fake_for_gen, torch.ones_like(disc_fake_for_gen)
+                )
         else:
             adv_loss = torch.zeros((), device=self.device, dtype=pixel_loss.dtype)
 
