@@ -68,7 +68,7 @@ def super_resolve_slice_stack(
 def super_resolve_volume_single_axis(
     generator: nn.Module,
     low_volume: np.ndarray,
-    scale_factor: int = 2,
+    scale_factor: int | float = 2,
     axis: AxisName = "yz",
     interpolate_stack_axis: bool = True,
     batch_size: int = 8,
@@ -83,7 +83,7 @@ def super_resolve_volume_single_axis(
             by ``scale_factor`` before applying the 2D generator to each orthogonal plane.
             Set ``interpolate_stack_axis=False`` when ``low_volume`` is already high-resolution
             along ``axis`` (anisotropic slab input).
-        scale_factor: Spatial upsampling factor of ``generator``.
+        scale_factor: Spatial upsampling factor of ``generator`` (integer or fractional).
         axis: Orthogonal plane to super-resolve (``'yz'``, ``'xz'``, or ``'xy'``).
         interpolate_stack_axis: Whether to upsample the slicing axis by ``scale_factor``.
         batch_size: Number of 2D slices per forward pass.
@@ -94,10 +94,13 @@ def super_resolve_volume_single_axis(
         raise ValueError(f"Expected 3D volume, got shape {vol.shape}.")
 
     ordered = _move_slice_axis_first(vol, axis)  # (N_axis, h, w)
-    if interpolate_stack_axis and scale_factor > 1:
+    sf = float(scale_factor)
+    if interpolate_stack_axis and sf > 1.0:
+        target_n = int(round(ordered.shape[0] * sf))
+        zoom_n = target_n / float(ordered.shape[0])
         ordered = zoom(
             ordered,
-            zoom=(scale_factor, 1, 1),
+            zoom=(zoom_n, 1, 1),
             order=3,
             mode="reflect",
         ).astype(np.float32, copy=False)
@@ -178,7 +181,7 @@ def fuse_orthogonal_volumes(
 def super_resolve_volume_orthogonal(
     generator: nn.Module,
     low_volume: np.ndarray,
-    scale_factor: int = 2,
+    scale_factor: int | float = 2,
     axes: Sequence[AxisName] = ("yz", "xz", "xy"),
     fusion: FusionMode = "fourier",
     batch_size: int = 8,

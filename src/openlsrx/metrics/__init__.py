@@ -1,4 +1,4 @@
-"""Quantitative image-fidelity and porous-media petrophysical metrics."""
+"""Quantitative image-fidelity, petrophysical, and pore-scale transport XCT metrics."""
 
 from .image import (
     compute_mae,
@@ -22,9 +22,19 @@ from .petrophysics import (
     segment_pore_space,
     two_point_correlation_radial,
 )
+from .transport import (
+    compute_directional_tortuosity,
+    compute_drainage_curve,
+    compute_drainage_rmse,
+    evaluate_transport_metrics,
+    solve_steady_state_diffusion_axis,
+)
 
 __all__ = [
     "compute_dice_iou",
+    "compute_directional_tortuosity",
+    "compute_drainage_curve",
+    "compute_drainage_rmse",
     "compute_euler_density",
     "compute_mae",
     "compute_ms_ssim",
@@ -40,6 +50,8 @@ __all__ = [
     "compute_through_plane_anisotropy_error",
     "evaluate_image_metrics",
     "evaluate_petrophysical_metrics",
+    "evaluate_transport_metrics",
     "segment_pore_space",
+    "solve_steady_state_diffusion_axis",
     "two_point_correlation_radial",
 ]

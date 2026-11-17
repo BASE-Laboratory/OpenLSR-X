@@ -1,0 +1,366 @@
+"""3D pore-scale diffusive tortuosity and capillary drainage physics metrics for XCT."""
+
+from __future__ import annotations
+
+import numpy as np
+import porespy as ps
+from scipy import sparse
+from scipy.ndimage import distance_transform_edt, generate_binary_structure, label
+from scipy.sparse.linalg import LinearOperator, cg
+
+from .petrophysics import ThresholdMethod, segment_pore_space
+
+
+def solve_steady_state_diffusion_axis(
+    pore_mask: np.ndarray,
+    axis: int = 0,
+    tol: float = 1e-6,
+    maxiter: int = 4000,
+) -> dict[str, float]:
+    """Solve 3D steady-state Fickian Laplace diffusion ``div(grad c) = 0`` along ``axis``.
+
+    Uses a cell-centered 6-neighbor finite-volume discretization matching ``OpenImpala``
+    and ``TauFactor``:
+    - Unit voxel spacing ``dx = 1`` and unit intrinsic diffusivity ``D_0 = 1``.
+    - Dirichlet boundary conditions ``c = 1`` on the outer inlet face (``x_axis = 0``) and
+      ``c = 0`` on the outer outlet face (``x_axis = L``) with half-cell boundary conductance ``2``.
+    - Zero-flux Neumann conditions on all solid-pore interfaces and lateral domain boundaries.
+
+    For an analytical straight pore channel of cross-sectional fraction ``phi``, this yields
+    ``D_eff / D_0 = phi`` and ``tortuosity = 1.0`` to solver tolerance.
+    """
+    mask = np.asarray(pore_mask, dtype=bool)
+    if mask.ndim != 3:
+        raise ValueError(f"Expected 3D boolean pore_mask, got shape {mask.shape}.")
+    if axis not in (0, 1, 2):
+        raise ValueError(f"axis must be 0, 1, or 2, got {axis}.")
+
+    porosity = float(mask.mean())
+    if porosity == 0.0:
+        return {
+            "porosity": 0.0,
+            "percolating_porosity": 0.0,
+            "d_eff": 0.0,
+            "tortuosity": float("inf"),
+            "formation_factor": float("inf"),
+            "percolates": 0.0,
+        }
+
+    ordered = np.moveaxis(mask, axis, 0)  # (L, M, N)
+    length, m_dim, n_dim = ordered.shape
+    a_geom = float(m_dim * n_dim)
+
+    # Identify 6-connected (face-sharing) pore clusters spanning inlet (0) to outlet (L - 1)
+    conn6 = generate_binary_structure(3, 1)
+    labels, _ = label(ordered, structure=conn6)
+    inlet_labels = set(np.unique(labels[0])) - {0}
+    outlet_labels = set(np.unique(labels[-1])) - {0}
+    perc_labels = inlet_labels & outlet_labels
+
+    if not perc_labels:
+        return {
+            "porosity": porosity,
+            "percolating_porosity": 0.0,
+            "d_eff": 0.0,
+            "tortuosity": float("inf"),
+            "formation_factor": float("inf"),
+            "percolates": 0.0,
+        }
+
+    perc_mask = np.isin(labels, list(perc_labels))
+    perc_porosity = float(perc_mask.mean())
+
+    if length == 1:
+        d_eff = perc_porosity
+        return {
+            "porosity": porosity,
+            "percolating_porosity": perc_porosity,
+            "d_eff": d_eff,
+            "tortuosity": porosity / d_eff,
+            "formation_factor": 1.0 / d_eff,
+            "percolates": 1.0,
+        }
+
+    # Map percolating pore voxels to compact [0, n_nodes) indices
+    active_flat = np.flatnonzero(perc_mask)
+    n_nodes = int(active_flat.size)
+    node_idx = np.full(perc_mask.shape, -1, dtype=np.int64)
+    node_idx.ravel()[active_flat] = np.arange(n_nodes, dtype=np.int64)
+
+    rows_list: list[np.ndarray] = []
+    cols_list: list[np.ndarray] = []
+    diag = np.zeros(n_nodes, dtype=np.float64)
+
+    # Interior 6-neighbor pore-pore faces (conductance = 1.0)
+    for dim in range(3):
+        sl_lo = [slice(None), slice(None), slice(None)]
+        sl_hi = [slice(None), slice(None), slice(None)]
+        sl_lo[dim] = slice(0, -1)
+        sl_hi[dim] = slice(1, None)
+        both = perc_mask[tuple(sl_lo)] & perc_mask[tuple(sl_hi)]
+        u = node_idx[tuple(sl_lo)][both]
+        v = node_idx[tuple(sl_hi)][both]
+        if u.size > 0:
+            rows_list.append(u)
+            cols_list.append(v)
+            rows_list.append(v)
+            cols_list.append(u)
+            np.add.at(diag, u, 1.0)
+            np.add.at(diag, v, 1.0)
+
+    # Half-cell Dirichlet faces on inlet (c = 1.0) and outlet (c = 0.0), conductance = 2.0
+    rhs = np.zeros(n_nodes, dtype=np.float64)
+    inlet_nodes = node_idx[0][perc_mask[0]]
+    outlet_nodes = node_idx[-1][perc_mask[-1]]
+    diag[inlet_nodes] += 2.0
+    rhs[inlet_nodes] += 2.0
+    diag[outlet_nodes] += 2.0
+
+    diag_idx = np.arange(n_nodes, dtype=np.int64)
+    if rows_list:
+        off_r = np.concatenate(rows_list)
+        off_c = np.concatenate(cols_list)
+        off_v = np.full(off_r.size, -1.0, dtype=np.float64)
+        all_r = np.concatenate([diag_idx, off_r])
+        all_c = np.concatenate([diag_idx, off_c])
+        all_v = np.concatenate([diag, off_v])
+    else:
+        all_r = diag_idx
+        all_c = diag_idx
+        all_v = diag
+
+    mat = sparse.csr_matrix((all_v, (all_r, all_c)), shape=(n_nodes, n_nodes))
+    inv_diag = 1.0 / np.maximum(diag, 1e-12)
+    precond = LinearOperator(
+        shape=(n_nodes, n_nodes),
+        dtype=np.float64,
+        matvec=lambda x: inv_diag * x,
+    )
+    conc, _ = cg(mat, rhs, rtol=tol, atol=0.0, maxiter=maxiter, M=precond)
+
+    q_in = float(np.sum(2.0 * (1.0 - conc[inlet_nodes])))
+    q_out = float(np.sum(2.0 * conc[outlet_nodes]))
+    q_mean = max(0.0, 0.5 * (q_in + q_out))
+
+    d_eff = (q_mean * float(length)) / a_geom
+    if d_eff <= 1e-12:
+        return {
+            "porosity": porosity,
+            "percolating_porosity": perc_porosity,
+            "d_eff": 0.0,
+            "tortuosity": float("inf"),
+            "formation_factor": float("inf"),
+            "percolates": 0.0,
+        }
+
+    return {
+        "porosity": porosity,
+        "percolating_porosity": perc_porosity,
+        "d_eff": d_eff,
+        "tortuosity": porosity / d_eff,
+        "formation_factor": 1.0 / d_eff,
+        "percolates": 1.0,
+    }
+
+
+def compute_directional_tortuosity(
+    pore_mask: np.ndarray,
+    tol: float = 1e-6,
+    maxiter: int = 4000,
+) -> dict[str, float]:
+    """Compute directional effective diffusivity ``D_eff/D_0``, tortuosity ``tau``, and anisotropy across ``z, y, x``."""
+    res_z = solve_steady_state_diffusion_axis(pore_mask, axis=0, tol=tol, maxiter=maxiter)
+    res_y = solve_steady_state_diffusion_axis(pore_mask, axis=1, tol=tol, maxiter=maxiter)
+    res_x = solve_steady_state_diffusion_axis(pore_mask, axis=2, tol=tol, maxiter=maxiter)
+
+    d_vals = [res_z["d_eff"], res_y["d_eff"], res_x["d_eff"]]
+    d_mean = float(np.mean(d_vals))
+    finite_taus = [r["tortuosity"] for r in (res_z, res_y, res_x) if np.isfinite(r["tortuosity"])]
+    tau_mean = float(np.mean(finite_taus)) if finite_taus else float("inf")
+    ff_mean = (1.0 / d_mean) if d_mean > 1e-12 else float("inf")
+
+    min_d = min(d_vals)
+    max_d = max(d_vals)
+    aniso_ratio = (max_d / min_d) if min_d > 1e-12 else (1.0 if max_d <= 1e-12 else float("inf"))
+
+    return {
+        "porosity": res_z["porosity"],
+        "d_eff_z": res_z["d_eff"],
+        "d_eff_y": res_y["d_eff"],
+        "d_eff_x": res_x["d_eff"],
+        "d_eff_mean": d_mean,
+        "tortuosity_z": res_z["tortuosity"],
+        "tortuosity_y": res_y["tortuosity"],
+        "tortuosity_x": res_x["tortuosity"],
+        "tortuosity_mean": tau_mean,
+        "formation_factor_mean": ff_mean,
+        "percolating_axes_count": res_z["percolates"] + res_y["percolates"] + res_x["percolates"],
+        "d_eff_anisotropy_spread": max_d - min_d,
+        "transport_anisotropy_ratio": aniso_ratio,
+    }
+
+
+def compute_drainage_curve(
+    pore_mask: np.ndarray,
+    n_steps: int = 16,
+    voxel_size: float = 1.0,
+    inlet_axis: int = 0,
+    pc_grid: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Simulate inlet-connected capillary drainage (mercury intrusion) on a 3D pore mask.
+
+    Returns ``(pc_values, non_wetting_saturation)`` evaluated on ``pc_grid`` (or a geometric
+    capillary-pressure schedule spanning ``[2 / r_max, 2 / r_min]``).
+    """
+    mask = np.asarray(pore_mask, dtype=bool)
+    if mask.ndim != 3:
+        raise ValueError(f"Expected 3D boolean pore_mask, got shape {mask.shape}.")
+
+    n_pores = int(mask.sum())
+    if n_pores == 0:
+        grid = (
+            np.geomspace(0.1, 2.0, n_steps, dtype=np.float64)
+            if pc_grid is None
+            else np.asarray(pc_grid, dtype=np.float64)
+        )
+        return grid, np.zeros_like(grid, dtype=np.float64)
+
+    dt = distance_transform_edt(mask) * float(voxel_size)
+    if pc_grid is None:
+        r_vals = dt[mask]
+        r_min = max(float(r_vals.min()), 0.5 * float(voxel_size))
+        r_max = max(float(r_vals.max()), r_min * 1.05)
+        grid = np.geomspace(2.0 / r_max, 2.0 / r_min, n_steps, dtype=np.float64)
+    else:
+        grid = np.asarray(pc_grid, dtype=np.float64)
+
+    inlets = np.zeros_like(mask, dtype=bool)
+    sl: list[slice | int] = [slice(None), slice(None), slice(None)]
+    sl[inlet_axis] = 0
+    inlets[tuple(sl)] = mask[tuple(sl)]
+    if not inlets.any():
+        return grid, np.zeros_like(grid, dtype=np.float64)
+
+    pc_transform = np.full(mask.shape, np.inf, dtype=np.float32)
+    pc_transform[mask] = 2.0 / np.maximum(dt[mask], 1e-6).astype(np.float32)
+
+    drn = ps.simulations.drainage(
+        im=mask,
+        pc=pc_transform,
+        dt=dt.astype(np.float32),
+        inlets=inlets,
+        steps=max(4, int(n_steps)),
+    )
+    im_pc = np.asarray(drn.im_pc, dtype=np.float64)
+    pore_pc = im_pc[mask]
+    snwp = np.array([float(np.sum(pore_pc <= p)) / float(n_pores) for p in grid], dtype=np.float64)
+    return grid, snwp
+
+
+def compute_drainage_rmse(
+    pred_mask: np.ndarray,
+    true_mask: np.ndarray,
+    n_steps: int = 16,
+    voxel_size: float = 1.0,
+    inlet_axis: int = 0,
+) -> float:
+    """RMSE between simulated capillary drainage saturation curves ``S_nwp(P_c)``."""
+    pc_grid, true_snwp = compute_drainage_curve(
+        true_mask,
+        n_steps=n_steps,
+        voxel_size=voxel_size,
+        inlet_axis=inlet_axis,
+    )
+    _, pred_snwp = compute_drainage_curve(
+        pred_mask,
+        n_steps=n_steps,
+        voxel_size=voxel_size,
+        inlet_axis=inlet_axis,
+        pc_grid=pc_grid,
+    )
+    return float(np.sqrt(np.mean((pred_snwp - true_snwp) ** 2)))
+
+
+def _json_safe(val: float) -> float | None:
+    return float(val) if np.isfinite(val) else None
+
+
+def evaluate_transport_metrics(
+    pred_vol: np.ndarray,
+    true_vol: np.ndarray,
+    threshold_method: ThresholdMethod = "otsu",
+    fixed_threshold: float | None = None,
+    pore_is_low: bool = True,
+    voxel_size: float = 1.0,
+    drainage_steps: int = 16,
+) -> dict[str, float | None]:
+    """Evaluate 3D diffusive transport and capillary drainage fidelity between SR and HR XCT volumes.
+
+    Uses the ground-truth segmentation threshold consistently across ``true_vol`` and ``pred_vol``
+    (matching ``evaluate_petrophysical_metrics``) so greyscale bias or blurring is faithfully
+    reflected in pore-throat connectivity and effective diffusivity.
+    """
+    true_mask, thr = segment_pore_space(
+        true_vol,
+        method=threshold_method,
+        fixed_value=fixed_threshold,
+        pore_is_low=pore_is_low,
+    )
+    pred_mask, _ = segment_pore_space(
+        pred_vol,
+        method="fixed",
+        fixed_value=thr,
+        pore_is_low=pore_is_low,
+    )
+
+    pred_t = compute_directional_tortuosity(pred_mask)
+    true_t = compute_directional_tortuosity(true_mask)
+
+    d_eff_mae = float(
+        np.mean(
+            [
+                abs(pred_t["d_eff_z"] - true_t["d_eff_z"]),
+                abs(pred_t["d_eff_y"] - true_t["d_eff_y"]),
+                abs(pred_t["d_eff_x"] - true_t["d_eff_x"]),
+            ]
+        )
+    )
+    d_eff_rel_err = (
+        abs(pred_t["d_eff_mean"] - true_t["d_eff_mean"]) / true_t["d_eff_mean"]
+        if true_t["d_eff_mean"] > 1e-12
+        else None
+    )
+    tau_abs_err = (
+        abs(pred_t["tortuosity_mean"] - true_t["tortuosity_mean"])
+        if np.isfinite(pred_t["tortuosity_mean"]) and np.isfinite(true_t["tortuosity_mean"])
+        else None
+    )
+    drainage_rmse = compute_drainage_rmse(
+        pred_mask,
+        true_mask,
+        n_steps=drainage_steps,
+        voxel_size=voxel_size,
+    )
+
+    return {
+        "threshold_used": float(thr),
+        "pred_d_eff_z": _json_safe(pred_t["d_eff_z"]),
+        "pred_d_eff_y": _json_safe(pred_t["d_eff_y"]),
+        "pred_d_eff_x": _json_safe(pred_t["d_eff_x"]),
+        "pred_d_eff_mean": _json_safe(pred_t["d_eff_mean"]),
+        "true_d_eff_mean": _json_safe(true_t["d_eff_mean"]),
+        "d_eff_mae": d_eff_mae,
+        "d_eff_rel_error": _json_safe(d_eff_rel_err) if d_eff_rel_err is not None else None,
+        "pred_tortuosity_mean": _json_safe(pred_t["tortuosity_mean"]),
+        "true_tortuosity_mean": _json_safe(true_t["tortuosity_mean"]),
+        "tortuosity_abs_error": _json_safe(tau_abs_err) if tau_abs_err is not None else None,
+        "pred_formation_factor_mean": _json_safe(pred_t["formation_factor_mean"]),
+        "true_formation_factor_mean": _json_safe(true_t["formation_factor_mean"]),
+        "pred_percolating_axes": float(pred_t["percolating_axes_count"]),
+        "true_percolating_axes": float(true_t["percolating_axes_count"]),
+        "pred_d_eff_anisotropy_spread": float(pred_t["d_eff_anisotropy_spread"]),
+        "true_d_eff_anisotropy_spread": float(true_t["d_eff_anisotropy_spread"]),
+        "pred_transport_anisotropy_ratio": _json_safe(pred_t["transport_anisotropy_ratio"]),
+        "true_transport_anisotropy_ratio": _json_safe(true_t["transport_anisotropy_ratio"]),
+        "drainage_snwp_rmse": drainage_rmse,
+    }

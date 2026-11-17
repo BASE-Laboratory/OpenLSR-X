@@ -2,12 +2,17 @@
 
 from .baselines import upsample_2d, upsample_3d
 from .data import (
+    ZN13X_I13_RESOLUTIONS,
     DatasetObject,
     PairedSliceDataset,
     PairedVolumeDataModule,
     SyntheticPoreSpyDataModule,
+    extract_aligned_slab_from_h5,
     generate_porespy_volume,
     load_volume_any,
+    prepare_zn13x_benchmark,
+    register_multires_pair_3d,
+    synthesize_zn13x_phantom_pair,
 )
 from .inference import (
     fuse_orthogonal_volumes,
@@ -15,35 +20,80 @@ from .inference import (
     super_resolve_volume_orthogonal,
     super_resolve_volume_single_axis,
 )
+from .io import export_for_openimpala
 from .losses import PixelNorm, VGGLoss, custom_sigmoid
-from .metrics import evaluate_image_metrics, evaluate_petrophysical_metrics
-from .models import SRGAN, ConvBlock, Discriminator, Generator, ResidualBlock, UpsampleBlock
+from .metrics import (
+    compute_directional_tortuosity,
+    compute_drainage_curve,
+    compute_drainage_rmse,
+    evaluate_image_metrics,
+    evaluate_petrophysical_metrics,
+    evaluate_transport_metrics,
+    solve_steady_state_diffusion_axis,
+)
+from .models import (
+    RRDB,
+    SRGAN,
+    ArbitraryScaleUpsample,
+    ConvBlock,
+    DenseResidualBlock,
+    Discriminator,
+    Generator,
+    Generator3D,
+    ResidualBlock,
+    ResidualBlock3D,
+    RRDBGenerator,
+    SR3DResNet,
+    UpsampleBlock,
+    build_3d_subcube_dataloaders,
+    super_resolve_volume_3d,
+)
 
 __version__ = "0.2.0"
 
 __all__ = [
+    "ArbitraryScaleUpsample",
     "ConvBlock",
     "DatasetObject",
+    "DenseResidualBlock",
     "Discriminator",
     "Generator",
+    "Generator3D",
     "PairedSliceDataset",
     "PairedVolumeDataModule",
     "PixelNorm",
+    "RRDB",
+    "RRDBGenerator",
     "ResidualBlock",
+    "ResidualBlock3D",
+    "SR3DResNet",
     "SRGAN",
     "SyntheticPoreSpyDataModule",
     "UpsampleBlock",
     "VGGLoss",
+    "ZN13X_I13_RESOLUTIONS",
     "__version__",
+    "build_3d_subcube_dataloaders",
+    "compute_directional_tortuosity",
+    "compute_drainage_curve",
+    "compute_drainage_rmse",
     "custom_sigmoid",
     "evaluate_image_metrics",
     "evaluate_petrophysical_metrics",
+    "evaluate_transport_metrics",
+    "export_for_openimpala",
+    "extract_aligned_slab_from_h5",
     "fuse_orthogonal_volumes",
     "generate_porespy_volume",
     "load_volume_any",
+    "prepare_zn13x_benchmark",
+    "register_multires_pair_3d",
+    "solve_steady_state_diffusion_axis",
     "super_resolve_slice_stack",
+    "super_resolve_volume_3d",
     "super_resolve_volume_orthogonal",
     "super_resolve_volume_single_axis",
+    "synthesize_zn13x_phantom_pair",
     "upsample_2d",
     "upsample_3d",
 ]

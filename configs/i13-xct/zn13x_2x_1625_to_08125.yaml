@@ -1,0 +1,43 @@
+# Diamond Light Source I13-2 Experimental 2x Pair: 4x (1.625 um) -> 8x (0.8125 um)
+# Prepare slabs via: openlsrx download-benchmarks --datasets zn13x_2x
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 300
+  check_val_every_n_epoch: 10
+  log_every_n_steps: 20
+
+model:
+  learning_rate: 1.0e-4
+  adaptive_size: 8
+  accumulate_n_batches: 1
+  super_res_factor: 2
+  num_blocks: 10
+  pretrain_epochs: 20
+  use_adversarial_loss: true
+  use_vgg_loss: true
+  sample_id: Zn13X_2x_1625_to_08125
+
+data:
+  class_path: openlsrx.data.PairedVolumeDataModule
+  init_args:
+    low_path: data/benchmarks/zn13x_2x_lr.tif
+    high_path: data/benchmarks/zn13x_2x_hr.tif
+    scale_factor: 2
+    norm_mode: none
+    train_frac: 0.70
+    val_frac: 0.15
+    guard_slices_lr: 1
+    train_axes: ["yz"]
+    test_axis: perpendicular
+    predict_axis: xy
+    patch_size_lr: 32
+    augment: true
+    batch_size: 4
+    eval_batch_size: 4
+    num_workers: 2
+    pin_memory: true
+    seed: 42

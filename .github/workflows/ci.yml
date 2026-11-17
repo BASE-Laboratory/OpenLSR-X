@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+env:
+  OMP_NUM_THREADS: "2"
+  MKL_NUM_THREADS: "2"
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -38,12 +42,12 @@ jobs:
 
       - name: Ruff lint & format check
         run: |
-          uv run --no-sync ruff check src tests scripts
-          uv run --no-sync ruff format --check src tests scripts
+          uv run --no-sync ruff check src tests scripts examples
+          uv run --no-sync ruff format --check src tests scripts examples
 
       - name: Static type check (Mypy)
         run: |
-          uv run --no-sync mypy src tests scripts
+          uv run --no-sync mypy src tests scripts examples
 
       - name: Build documentation strictly
         env:
@@ -113,14 +117,20 @@ jobs:
           uv pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
           uv pip install -e "."
 
-      - name: Run fast synthetic + rock benchmarks and generate LaTeX/figures
+      - name: Run fast synthetic, rock, and I13-2 Zn-13X benchmarks + campaign aggregation
         run: |
           uv run --no-sync python scripts/benchmarks/porespy_study.py --fast --output-dir /tmp/bench/porespy
           uv run --no-sync python scripts/benchmarks/public_rock_xct.py --fast --output-dir /tmp/bench/rock --data-dir /tmp/bench/data
+          uv run --no-sync python scripts/benchmarks/zn13x_synchrotron_study.py --fast --output-dir /tmp/bench/zn13x --data-dir /tmp/bench/data
           uv run --no-sync python scripts/benchmarks/make_paper_outputs.py \
             --porespy-csv /tmp/bench/porespy/porespy_study_results.csv \
             --rock-csv /tmp/bench/rock/public_rock_results.csv \
             --example-volumes /tmp/bench/porespy/example_volumes \
             --out-dir /tmp/bench/paper_artifacts
+          uv run --no-sync python scripts/benchmarks/aggregate_campaign.py \
+            --inputs /tmp/bench \
+            --output-dir /tmp/bench/campaign_summary
           test -f /tmp/bench/paper_artifacts/tables/porespy_benchmark.tex
           test -f /tmp/bench/paper_artifacts/figures/orthogonal_sr_comparison.pdf
+          test -f /tmp/bench/campaign_summary/campaign_table.tex
+          test -f /tmp/bench/zn13x/openimpala_ready/zn13x_2x_rrdb_ragan_s42_openimpala.inputs
