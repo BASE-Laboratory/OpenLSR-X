@@ -157,9 +157,13 @@ class SRGAN(pl.LightningModule):
         high_res = _ensure_4d(high_res)
 
         optimizers = self.optimizers()
-        opt_gen, opt_disc = optimizers  # type: ignore[misc]
+        assert isinstance(optimizers, list)
+        opt_gen, opt_disc = optimizers
         schedulers = self.lr_schedulers()
-        gen_scheduler, disc_scheduler = schedulers  # type: ignore[misc]
+        assert isinstance(schedulers, list)
+        gen_scheduler, disc_scheduler = schedulers
+        assert isinstance(gen_scheduler, optim.lr_scheduler.LRScheduler)
+        assert isinstance(disc_scheduler, optim.lr_scheduler.LRScheduler)
 
         should_step = (
             (batch_idx + 1) % self.accumulate_n_batches == 0

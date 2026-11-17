@@ -128,3 +128,43 @@ def test_public_rock_offline_fallback(tmp_path: Path) -> None:
     vol = tifffile.imread(tif_path)
     assert vol.shape == (32, 32, 32)
     assert manifest["lithology"] == "Sandstone"
+
+
+def test_slice_directory_alignment_and_local_thickness(tmp_path: Path) -> None:
+    from openlsrx.data import (
+        VolumeAlignment,
+        apply_alignment,
+        downsample_orthogonal_slabs,
+        load_volume_any,
+    )
+
+    lr, hr, _ = generate_porespy_volume(
+        shape=24,
+        feature_regime="low_feature",
+        noise_regime="low_noise",
+        representation="local_thickness",
+        scale_factor=2,
+        seed=5,
+    )
+    assert hr.shape == (24, 24, 24) and lr.shape == (12, 12, 12)
+
+    slabs = downsample_orthogonal_slabs(
+        hr, scale_factor=2, variable_slice_noise=True, contrast_shift=0.05, seed=9
+    )
+    assert slabs["yz"].shape == (24, 12, 12)
+    assert slabs["xz"].shape == (24, 12, 12)
+    assert slabs["xy"].shape == (24, 12, 12)
+
+    slice_dir = tmp_path / "slices"
+    slice_dir.mkdir()
+    for idx in range(16):
+        tifffile.imwrite(slice_dir / f"slice_{idx:03d}.tif", hr[idx])
+
+    loaded = load_volume_any(slice_dir, max_slices=12)
+    assert loaded.shape == (12, 24, 24)
+
+    aligned = apply_alignment(
+        loaded,
+        VolumeAlignment(z_range=(2, 10), y_range=(4, 20), x_range=(4, 20), rotation_deg=15.0),
+    )
+    assert aligned.shape == (8, 16, 16)

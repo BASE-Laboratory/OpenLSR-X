@@ -1,4 +1,4 @@
-"""Schema validation for all repository YAML configs and CLI subcommands."""
+"""Schema validation for all repository YAML configs and in-process CLI tests."""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 import tifffile
+
+from openlsrx.cli import main as cli_main
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_FILES = sorted((REPO_ROOT / "configs").rglob("*.yaml"))
@@ -29,55 +31,70 @@ def test_all_yaml_configs_validate_with_lightning_cli(config_path: Path) -> None
     assert "model:" in proc.stdout
 
 
-def test_cli_evaluate_and_download_benchmarks(tmp_path: Path) -> None:
+def test_cli_inprocess_download_and_evaluate(tmp_path: Path) -> None:
     bench_dir = tmp_path / "benchmarks"
-    dl_proc = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "openlsrx",
-            "download-benchmarks",
-            "--datasets",
-            "bentheimer_sandstone",
-            "--dest",
-            str(bench_dir),
-            "--size",
-            "24",
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert dl_proc.returncode == 0, dl_proc.stderr
+    with pytest.raises(SystemExit) as exc_dl:
+        cli_main(
+            [
+                "download-benchmarks",
+                "--datasets",
+                "bentheimer_sandstone",
+                "indiana_limestone",
+                "--dest",
+                str(bench_dir),
+                "--size",
+                "24",
+            ]
+        )
+    assert exc_dl.value.code == 0
     hr_tif = bench_dir / "bentheimer_sandstone_hr.tif"
-    assert hr_tif.is_file()
+    il_tif = bench_dir / "indiana_limestone_hr.tif"
+    assert hr_tif.is_file() and il_tif.is_file()
 
-    # Perturb slightly and run CLI evaluate
+    # Second call hits cached manifest path cleanly
+    with pytest.raises(SystemExit) as exc_cached:
+        cli_main(
+            [
+                "download-benchmarks",
+                "--datasets",
+                "bentheimer_sandstone",
+                "--dest",
+                str(bench_dir),
+                "--size",
+                "24",
+            ]
+        )
+    assert exc_cached.value.code == 0
+
     vol = tifffile.imread(hr_tif)
     pred_tif = tmp_path / "pred.tif"
     out_json = tmp_path / "metrics.json"
     tifffile.imwrite(pred_tif, np.clip(vol + 0.02, 0.0, 1.0).astype(np.float32))
 
-    ev_proc = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "openlsrx",
-            "evaluate",
-            "--pred",
-            str(pred_tif),
-            "--target",
-            str(hr_tif),
-            "--output",
-            str(out_json),
-        ],
-        cwd=REPO_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert ev_proc.returncode == 0, ev_proc.stderr
+    with pytest.raises(SystemExit) as exc_ev:
+        cli_main(
+            [
+                "evaluate",
+                "--pred",
+                str(pred_tif),
+                "--target",
+                str(hr_tif),
+                "--threshold",
+                "yen",
+                "--output",
+                str(out_json),
+            ]
+        )
+    assert exc_ev.value.code == 0
     report = json.loads(out_json.read_text(encoding="utf-8"))
     assert report["image_metrics"]["psnr"] > 25.0
     assert "porosity_abs_error" in report["petrophysical_metrics"]
+
+
+def test_cli_evaluate_shape_mismatch_raises(tmp_path: Path) -> None:
+    a = tmp_path / "a.npy"
+    b = tmp_path / "b.npy"
+    np.save(a, np.zeros((8, 8, 8), dtype=np.float32))
+    np.save(b, np.zeros((10, 8, 8), dtype=np.float32))
+    with pytest.raises(ValueError, match="Shape mismatch"):
+        cli_main(["evaluate", "--pred", str(a), "--target", str(b)])

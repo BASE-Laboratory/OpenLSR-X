@@ -153,8 +153,8 @@ def fetch_or_generate_rock_sample(
     manifest_path = out_dir / f"{spec.name}_manifest.json"
 
     if tif_path.is_file() and manifest_path.is_file():
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        return tif_path, manifest
+        cached_manifest: dict[str, object] = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return tif_path, cached_manifest
 
     source_kind = "downloaded"
     vol: np.ndarray | None = None

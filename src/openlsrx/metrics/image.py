@@ -81,7 +81,8 @@ def compute_ssim(
             data_range=data_range,
             kernel_size=kernel_size,
         )
-        scores.append(float(val.item()))
+        val_t = val[0] if isinstance(val, tuple) else val
+        scores.append(float(val_t.item()))
         weights.append(int(p_chunk.shape[0]))
 
     total = sum(weights)

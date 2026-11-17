@@ -32,6 +32,7 @@ def upsample_2d(
     n, h, w = arr.shape
     out_h, out_w = h * scale_factor, w * scale_factor
 
+    out: np.ndarray
     if mode == "lanczos4":
         out = np.empty((n, out_h, out_w), dtype=np.float32)
         for i in range(n):
