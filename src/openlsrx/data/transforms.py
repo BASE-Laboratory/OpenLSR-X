@@ -259,12 +259,20 @@ def extract_paired_slices_from_subvolume(
     hr_sub: np.ndarray,
     scale_factor: int = 2,
     axes: tuple[str, ...] = ("yz",),
+    context_slices: int = 1,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Extract aligned ``(low_slices, high_slices)`` from paired isotropic 3D ``(lr_sub, hr_sub)``.
 
     For each requested axis in ``('yz', 'xz', 'xy')``, ``lr_sub`` is cubic-interpolated along
     that slicing axis by ``scale_factor`` so its slice count matches ``hr_sub`` along that axis.
+    When ``context_slices = 2k + 1 > 1`` (``2.5D`` mode), returns ``low_slices`` of shape
+    ``(N_total, context_slices, h, w)`` strictly reflect-padded *within* each axis slab so adjacent
+    orthogonal axes never bleed across boundaries.
     """
+    if context_slices < 1 or context_slices % 2 == 0:
+        raise ValueError(
+            f"context_slices must be a positive odd integer (1, 3, 5, ...), got {context_slices}."
+        )
     axis_map = {"yz": 0, "xz": 1, "xy": 2}
     low_list: list[np.ndarray] = []
     high_list: list[np.ndarray] = []
@@ -274,21 +282,32 @@ def extract_paired_slices_from_subvolume(
         lr_ord = np.moveaxis(lr_sub, dim, 0)
         hr_ord = np.moveaxis(hr_sub, dim, 0)
         if lr_ord.shape[0] != hr_ord.shape[0]:
-            lr_ord = zoom(lr_ord, zoom=(scale_factor, 1, 1), order=3, mode="reflect").astype(
+            zoom_f = hr_ord.shape[0] / float(lr_ord.shape[0])
+            lr_ord = zoom(lr_ord, zoom=(zoom_f, 1, 1), order=3, mode="reflect").astype(
                 np.float32, copy=False
             )
             lr_ord = np.clip(lr_ord, 0.0, 1.0)
-        low_list.append(lr_ord)
+        if context_slices > 1:
+            half = context_slices // 2
+            padded = np.pad(lr_ord, ((half, half), (0, 0), (0, 0)), mode="reflect")
+            win = np.lib.stride_tricks.sliding_window_view(
+                padded, window_shape=context_slices, axis=0
+            )
+            lr_ctx = np.ascontiguousarray(np.moveaxis(win, -1, 1), dtype=np.float32)
+            low_list.append(lr_ctx)
+        else:
+            low_list.append(lr_ord)
         high_list.append(hr_ord)
 
     return np.concatenate(low_list, axis=0), np.concatenate(high_list, axis=0)
 
 
 class PairedSliceDataset(Dataset[tuple[Tensor, Tensor]]):
-    """PyTorch Dataset of paired ``(low_res, high_res)`` 2D XCT slices.
+    """PyTorch Dataset of paired ``(low_res, high_res)`` 2D or 2.5D XCT slices.
 
-    Supports optional aligned random spatial patch cropping and dihedral ``D_4``
-    (90-degree rotations + flips) equivariant augmentations during training.
+    Supports optional ``context_slices = 2k + 1`` multi-slice LR inputs, aligned random spatial
+    patch cropping, and full ``O(3)`` slab-equivariant augmentations (dihedral ``D_4`` in-plane
+    rotations/flips plus through-plane ``z``-stack reversal when ``context_slices > 1``).
     """
 
     def __init__(
@@ -298,13 +317,29 @@ class PairedSliceDataset(Dataset[tuple[Tensor, Tensor]]):
         patch_size_lr: int | None = None,
         scale_factor: int = 2,
         augment: bool = False,
+        context_slices: int = 1,
     ) -> None:
         super().__init__()
-        self.low_res = torch.as_tensor(low_res, dtype=torch.float32)
+        if context_slices < 1 or context_slices % 2 == 0:
+            raise ValueError(
+                f"context_slices must be a positive odd integer (1, 3, 5, ...), got {context_slices}."
+            )
+        self.context_slices = int(context_slices)
+
+        lr_arr = np.asarray(low_res, dtype=np.float32)
+        if lr_arr.ndim == 3 and self.context_slices > 1:
+            half = self.context_slices // 2
+            padded = np.pad(lr_arr, ((half, half), (0, 0), (0, 0)), mode="reflect")
+            win = np.lib.stride_tricks.sliding_window_view(
+                padded, window_shape=self.context_slices, axis=0
+            )
+            lr_arr = np.ascontiguousarray(np.moveaxis(win, -1, 1), dtype=np.float32)
+
+        self.low_res = torch.as_tensor(lr_arr, dtype=torch.float32)
         self.high_res = (
             torch.as_tensor(high_res, dtype=torch.float32) if high_res is not None else None
         )
-        if self.low_res.ndim == 4 and self.low_res.shape[1] == 1:
+        if self.low_res.ndim == 4 and self.low_res.shape[1] == 1 and self.context_slices == 1:
             self.low_res = self.low_res.squeeze(1)
         if self.high_res is not None and self.high_res.ndim == 4 and self.high_res.shape[1] == 1:
             self.high_res = self.high_res.squeeze(1)
@@ -323,7 +358,11 @@ class PairedSliceDataset(Dataset[tuple[Tensor, Tensor]]):
 
     def __getitem__(self, idx: int) -> tuple[Tensor, Tensor]:
         lr = self.low_res[idx]
-        hr = self.high_res[idx] if self.high_res is not None else lr
+        hr = (
+            self.high_res[idx]
+            if self.high_res is not None
+            else (lr[lr.shape[0] // 2] if lr.ndim == 3 else lr)
+        )
 
         if self.patch_size_lr is not None and self.high_res is not None:
             p_lr = self.patch_size_lr
@@ -331,9 +370,9 @@ class PairedSliceDataset(Dataset[tuple[Tensor, Tensor]]):
             if h_lr >= p_lr and w_lr >= p_lr:
                 top = int(torch.randint(0, h_lr - p_lr + 1, (1,)).item())
                 left = int(torch.randint(0, w_lr - p_lr + 1, (1,)).item())
-                lr = lr[top : top + p_lr, left : left + p_lr]
+                lr = lr[..., top : top + p_lr, left : left + p_lr]
                 s = self.scale_factor
-                hr = hr[top * s : (top + p_lr) * s, left * s : (left + p_lr) * s]
+                hr = hr[..., top * s : (top + p_lr) * s, left * s : (left + p_lr) * s]
 
         if self.augment and self.high_res is not None:
             k_rot = int(torch.randint(0, 4, (1,)).item())
@@ -343,6 +382,9 @@ class PairedSliceDataset(Dataset[tuple[Tensor, Tensor]]):
             if bool(torch.randint(0, 2, (1,)).item()):
                 lr = torch.flip(lr, dims=(-1,))
                 hr = torch.flip(hr, dims=(-1,))
+            if lr.ndim == 3 and lr.shape[0] > 1 and bool(torch.randint(0, 2, (1,)).item()):
+                # Reversing adjacent LR context slices preserves the central HR target slice
+                lr = torch.flip(lr, dims=(0,))
 
         return lr.contiguous(), hr.contiguous()
 

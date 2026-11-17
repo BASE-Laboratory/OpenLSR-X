@@ -1,8 +1,12 @@
 # API Reference
 
-## Models (2D SRGAN, RRDB-ESRGAN & Native 3D CNN)
+## Models (SwinIR-2.5D, RRDB-ESRGAN, SRGAN & Native 3D CNN)
 
 ::: openlsrx.models.srgan.SRGAN
+
+::: openlsrx.models.swinir.SwinIRGenerator
+
+::: openlsrx.models.swinir.ResidualSwinBlock
 
 ::: openlsrx.models.rrdb.RRDBGenerator
 
@@ -28,7 +32,15 @@
 
 ---
 
-## Losses & Normalizations
+## Physics, Topology & Perceptual Losses
+
+::: openlsrx.losses.physics.AttenuationConservationLoss
+
+::: openlsrx.losses.physics.SoftCLDiceLoss
+
+::: openlsrx.losses.physics.SobelGradientLoss
+
+::: openlsrx.losses.physics.FocalFrequencyLoss
 
 ::: openlsrx.losses.loss.VGGLoss
 
@@ -38,13 +50,15 @@
 
 ---
 
-## 3D Orthogonal Inference
+## 3D Orthogonal Inference & Epistemic Uncertainty
 
 ::: openlsrx.inference.orthogonal.super_resolve_volume_orthogonal
 
 ::: openlsrx.inference.orthogonal.super_resolve_volume_single_axis
 
 ::: openlsrx.inference.orthogonal.fuse_orthogonal_volumes
+
+::: openlsrx.inference.orthogonal.compute_orthogonal_uncertainty
 
 ---
 
@@ -70,13 +84,23 @@
 
 ---
 
-## Metrics, Transport Physics & OpenImpala I/O
+## Spectral Metrology, Petrophysics, Transport & OpenImpala I/O
+
+::: openlsrx.metrics.spectral.compute_fsc_3d
+
+::: openlsrx.metrics.spectral.compute_frc_2d
+
+::: openlsrx.metrics.spectral.evaluate_spectral_metrics
 
 ::: openlsrx.metrics.image.evaluate_image_metrics
 
 ::: openlsrx.metrics.petrophysics.evaluate_petrophysical_metrics
 
+::: openlsrx.metrics.petrophysics.evaluate_triphase_zn13x_metrics
+
 ::: openlsrx.metrics.transport.evaluate_transport_metrics
+
+::: openlsrx.metrics.transport.compute_tortuosity_uncertainty_bounds
 
 ::: openlsrx.metrics.transport.compute_directional_tortuosity
 

@@ -12,6 +12,12 @@ from .sr3d import (
 )
 from .srgan import SRGAN, BackboneType, GANLossType
 from .submodels import Discriminator, Generator, OutputActivation
+from .swinir import (
+    ResidualSwinBlock,
+    SwinIRGenerator,
+    SwinTransformerLayer,
+    WindowAttention2D,
+)
 
 __all__ = [
     "ArbitraryScaleUpsample",
@@ -29,9 +35,13 @@ __all__ = [
     "RRDBGenerator",
     "ResidualBlock",
     "ResidualBlock3D",
+    "ResidualSwinBlock",
     "SR3DResNet",
     "SRGAN",
+    "SwinIRGenerator",
+    "SwinTransformerLayer",
     "UpsampleBlock",
+    "WindowAttention2D",
     "build_3d_subcube_dataloaders",
     "super_resolve_volume_3d",
 ]

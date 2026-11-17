@@ -198,11 +198,19 @@ class SR3DResNet(pl.LightningModule):
         out_channels: int = 24,
         num_blocks: int = 4,
         loss_type: Literal["l1", "mse"] = "l1",
+        conservation_loss_weight: float = 0.0,
+        topology_loss_weight: float = 0.0,
+        gradient_loss_weight: float = 0.0,
+        ffl_loss_weight: float = 0.0,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
         self.learning_rate = float(learning_rate)
         self.super_res_factor = int(super_res_factor)
+        self.conservation_loss_weight = float(conservation_loss_weight)
+        self.topology_loss_weight = float(topology_loss_weight)
+        self.gradient_loss_weight = float(gradient_loss_weight)
+        self.ffl_loss_weight = float(ffl_loss_weight)
         self.gen = Generator3D(
             in_channels=1,
             out_channels=out_channels,
@@ -210,6 +218,17 @@ class SR3DResNet(pl.LightningModule):
             super_res_factor=super_res_factor,
         )
         self.criterion: nn.Module = nn.L1Loss() if loss_type == "l1" else nn.MSELoss()
+        from ..losses import (
+            AttenuationConservationLoss,
+            FocalFrequencyLoss,
+            SobelGradientLoss,
+            SoftCLDiceLoss,
+        )
+
+        self.conservation_criterion = AttenuationConservationLoss()
+        self.topology_criterion = SoftCLDiceLoss()
+        self.gradient_criterion = SobelGradientLoss()
+        self.ffl_criterion = FocalFrequencyLoss()
 
     def forward(self, x: Tensor) -> Tensor:
         return self.gen(x)
@@ -218,6 +237,14 @@ class SR3DResNet(pl.LightningModule):
         lr_cube, hr_cube = batch
         pred = self.gen(lr_cube)
         loss = self.criterion(pred, hr_cube)
+        if self.conservation_loss_weight > 0.0:
+            loss = loss + self.conservation_loss_weight * self.conservation_criterion(pred, lr_cube)
+        if self.topology_loss_weight > 0.0:
+            loss = loss + self.topology_loss_weight * self.topology_criterion(pred, hr_cube)
+        if self.gradient_loss_weight > 0.0:
+            loss = loss + self.gradient_loss_weight * self.gradient_criterion(pred, hr_cube)
+        if self.ffl_loss_weight > 0.0:
+            loss = loss + self.ffl_loss_weight * self.ffl_criterion(pred, hr_cube)
         self.log(
             "train/loss_3d",
             loss.detach(),

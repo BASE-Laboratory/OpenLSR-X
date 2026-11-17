@@ -134,6 +134,7 @@ class PairedVolumeDataModule(pl.LightningDataModule):
         test_axis: Literal["parallel", "perpendicular", "all"] = "perpendicular",
         predict_axis: Literal["yz", "xz", "xy"] = "xy",
         patch_size_lr: int | None = None,
+        context_slices: int = 1,
         augment: bool = True,
         batch_size: int = 2,
         eval_batch_size: int = 2,
@@ -144,6 +145,10 @@ class PairedVolumeDataModule(pl.LightningDataModule):
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
+        if context_slices < 1 or context_slices % 2 == 0:
+            raise ValueError(
+                f"context_slices must be a positive odd integer (1, 3, 5, ...), got {context_slices}."
+            )
 
         self.high_path = high_path
         self.low_path = low_path
@@ -187,6 +192,7 @@ class PairedVolumeDataModule(pl.LightningDataModule):
         self.test_axis = test_axis
         self.predict_axis = predict_axis
         self.patch_size_lr = patch_size_lr
+        self.context_slices = int(context_slices)
         self.augment = bool(augment)
         self.batch_size = int(batch_size)
         self.eval_batch_size = int(eval_batch_size)
@@ -296,7 +302,11 @@ class PairedVolumeDataModule(pl.LightningDataModule):
                     1.0,
                 )
             self.predict_dataset = PairedSliceDataset(
-                ordered, high_res=None, scale_factor=self.scale_factor, augment=False
+                ordered,
+                high_res=None,
+                scale_factor=self.scale_factor,
+                augment=False,
+                context_slices=self.context_slices,
             )
             return
 
@@ -305,7 +315,11 @@ class PairedVolumeDataModule(pl.LightningDataModule):
         if stage in (None, "fit"):
             lr_tr, hr_tr = self.splits_3d["train"]
             tr_low, tr_high = extract_paired_slices_from_subvolume(
-                lr_tr, hr_tr, scale_factor=self.scale_factor, axes=self.train_axes
+                lr_tr,
+                hr_tr,
+                scale_factor=self.scale_factor,
+                axes=self.train_axes,
+                context_slices=self.context_slices,
             )
             self.train_dataset = PairedSliceDataset(
                 tr_low,
@@ -313,15 +327,24 @@ class PairedVolumeDataModule(pl.LightningDataModule):
                 patch_size_lr=self.patch_size_lr,
                 scale_factor=self.scale_factor,
                 augment=self.augment,
+                context_slices=self.context_slices,
             )
 
         if stage in (None, "fit", "validate"):
             lr_va, hr_va = self.splits_3d["val"]
             va_low, va_high = extract_paired_slices_from_subvolume(
-                lr_va, hr_va, scale_factor=self.scale_factor, axes=self.train_axes
+                lr_va,
+                hr_va,
+                scale_factor=self.scale_factor,
+                axes=self.train_axes,
+                context_slices=self.context_slices,
             )
             self.val_dataset = PairedSliceDataset(
-                va_low, va_high, scale_factor=self.scale_factor, augment=False
+                va_low,
+                va_high,
+                scale_factor=self.scale_factor,
+                augment=False,
+                context_slices=self.context_slices,
             )
 
         if stage in (None, "test"):
@@ -333,19 +356,35 @@ class PairedVolumeDataModule(pl.LightningDataModule):
             else:
                 axes = ("yz", "xz", "xy")
             te_low, te_high = extract_paired_slices_from_subvolume(
-                lr_te, hr_te, scale_factor=self.scale_factor, axes=axes
+                lr_te,
+                hr_te,
+                scale_factor=self.scale_factor,
+                axes=axes,
+                context_slices=self.context_slices,
             )
             self.test_dataset = PairedSliceDataset(
-                te_low, te_high, scale_factor=self.scale_factor, augment=False
+                te_low,
+                te_high,
+                scale_factor=self.scale_factor,
+                augment=False,
+                context_slices=self.context_slices,
             )
 
         if stage in (None, "predict"):
             lr_te, hr_te = self.splits_3d["test"]
             pr_low, pr_high = extract_paired_slices_from_subvolume(
-                lr_te, hr_te, scale_factor=self.scale_factor, axes=(self.predict_axis,)
+                lr_te,
+                hr_te,
+                scale_factor=self.scale_factor,
+                axes=(self.predict_axis,),
+                context_slices=self.context_slices,
             )
             self.predict_dataset = PairedSliceDataset(
-                pr_low, pr_high, scale_factor=self.scale_factor, augment=False
+                pr_low,
+                pr_high,
+                scale_factor=self.scale_factor,
+                augment=False,
+                context_slices=self.context_slices,
             )
 
     @property

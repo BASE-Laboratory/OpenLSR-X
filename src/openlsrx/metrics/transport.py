@@ -364,3 +364,100 @@ def evaluate_transport_metrics(
         "true_transport_anisotropy_ratio": _json_safe(true_t["transport_anisotropy_ratio"]),
         "drainage_snwp_rmse": drainage_rmse,
     }
+
+
+def compute_tortuosity_uncertainty_bounds(
+    pred_vol: np.ndarray,
+    uncertainty_std: np.ndarray,
+    true_vol: np.ndarray | None = None,
+    threshold_method: ThresholdMethod = "otsu",
+    fixed_threshold: float | None = None,
+    pore_is_low: bool = True,
+    k_sigma: float = 1.0,
+) -> dict[str, float | None]:
+    """Propagate voxel-wise orthogonal epistemic uncertainty ``sigma_ortho`` into 3D tortuosity bounds.
+
+    Evaluates 3D Fickian steady-state diffusion across the nominal reconstruction ``V_hat`` and
+    its ``+/- k_sigma * sigma_ortho`` epistemic intensity envelope, producing calibrated intervals
+    for effective diffusivity ``D_eff / D_0`` and diffusive tortuosity ``tau``. When ``true_vol``
+    is supplied, also reports epistemic calibration (Spearman rank correlation between
+    ``sigma_ortho(x)`` and voxel error ``|V_hat(x) - V_HR(x)|``).
+    """
+    from scipy.stats import spearmanr
+
+    pred_arr = np.asarray(pred_vol, dtype=np.float32)
+    unc_arr = np.asarray(uncertainty_std, dtype=np.float32)
+    if pred_arr.shape != unc_arr.shape or pred_arr.ndim != 3:
+        raise ValueError(
+            f"Expected matching 3D arrays for pred_vol and uncertainty_std, got {pred_arr.shape} and {unc_arr.shape}."
+        )
+
+    ref_for_thr = np.asarray(true_vol, dtype=np.float32) if true_vol is not None else pred_arr
+    _, thr = segment_pore_space(
+        ref_for_thr,
+        method=threshold_method,
+        fixed_value=fixed_threshold,
+        pore_is_low=pore_is_low,
+    )
+
+    delta = float(k_sigma) * np.maximum(unc_arr, 0.0)
+    # Dilated vs constricted pore envelopes depending on pore_is_low
+    vol_open = np.clip(pred_arr - delta if pore_is_low else pred_arr + delta, 0.0, 1.0)
+    vol_tight = np.clip(pred_arr + delta if pore_is_low else pred_arr - delta, 0.0, 1.0)
+
+    mask_nom, _ = segment_pore_space(
+        pred_arr, method="fixed", fixed_value=thr, pore_is_low=pore_is_low
+    )
+    mask_open, _ = segment_pore_space(
+        vol_open, method="fixed", fixed_value=thr, pore_is_low=pore_is_low
+    )
+    mask_tight, _ = segment_pore_space(
+        vol_tight, method="fixed", fixed_value=thr, pore_is_low=pore_is_low
+    )
+
+    t_nom = compute_directional_tortuosity(mask_nom)
+    t_open = compute_directional_tortuosity(mask_open)
+    t_tight = compute_directional_tortuosity(mask_tight)
+
+    d_lo = min(t_tight["d_eff_mean"], t_open["d_eff_mean"])
+    d_hi = max(t_tight["d_eff_mean"], t_open["d_eff_mean"])
+    tau_lo = min(t_open["tortuosity_mean"], t_tight["tortuosity_mean"])
+    tau_hi = max(t_open["tortuosity_mean"], t_tight["tortuosity_mean"])
+    tau_hw = (
+        0.5 * (tau_hi - tau_lo) if (np.isfinite(tau_lo) and np.isfinite(tau_hi)) else float("inf")
+    )
+
+    result: dict[str, float | None] = {
+        "threshold_used": float(thr),
+        "mean_epistemic_std": float(unc_arr.mean()),
+        "p95_epistemic_std": float(np.percentile(unc_arr, 95.0)),
+        "d_eff_nominal": _json_safe(t_nom["d_eff_mean"]),
+        "d_eff_lower": _json_safe(d_lo),
+        "d_eff_upper": _json_safe(d_hi),
+        "d_eff_halfwidth": float(0.5 * (d_hi - d_lo)),
+        "tortuosity_nominal": _json_safe(t_nom["tortuosity_mean"]),
+        "tortuosity_lower": _json_safe(tau_lo),
+        "tortuosity_upper": _json_safe(tau_hi),
+        "tortuosity_halfwidth": _json_safe(tau_hw),
+    }
+
+    if true_vol is not None:
+        true_arr = np.asarray(true_vol, dtype=np.float32)
+        true_mask, _ = segment_pore_space(
+            true_arr, method="fixed", fixed_value=thr, pore_is_low=pore_is_low
+        )
+        t_true = compute_directional_tortuosity(true_mask)
+        d_true = t_true["d_eff_mean"]
+        result["true_d_eff_mean"] = _json_safe(d_true)
+        result["d_eff_bracketed_by_envelope"] = float(d_lo - 1e-8 <= d_true <= d_hi + 1e-8)
+
+        abs_err = np.abs(pred_arr - true_arr).ravel()
+        u_flat = unc_arr.ravel()
+        if float(np.std(u_flat)) > 1e-12 and float(np.std(abs_err)) > 1e-12:
+            corr_res = spearmanr(u_flat, abs_err)
+            rho = float(corr_res.statistic)
+            result["uncertainty_error_spearman_r"] = _json_safe(rho)
+        else:
+            result["uncertainty_error_spearman_r"] = 0.0
+
+    return result

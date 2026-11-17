@@ -128,6 +128,7 @@ class RRDBGenerator(nn.Module):
         super_res_factor: float | int = 2,
         sigmoid_k: float = 1.0,
         output_activation: OutputActivation = "clamp",
+        out_img_channels: int = 1,
     ) -> None:
         super().__init__()
         if output_activation not in ("custom_sigmoid", "sigmoid", "clamp", "identity"):
@@ -137,6 +138,7 @@ class RRDBGenerator(nn.Module):
             )
 
         self.in_channels = int(in_channels)
+        self.out_img_channels = int(out_img_channels)
         self.out_channels = int(out_channels)
         self.growth_channels = int(growth_channels)
         self.num_blocks = int(num_blocks)
@@ -159,7 +161,9 @@ class RRDBGenerator(nn.Module):
         self.upsample = ArbitraryScaleUpsample(
             channels=self.out_channels, scale_factor=self.super_res_factor
         )
-        final_conv = nn.Conv2d(self.out_channels, self.in_channels, 3, 1, 1, padding_mode="reflect")
+        final_conv = nn.Conv2d(
+            self.out_channels, self.out_img_channels, 3, 1, 1, padding_mode="reflect"
+        )
         if final_conv.bias is not None:
             nn.init.zeros_(final_conv.bias)
         final_conv.weight.data.mul_(0.1)
@@ -181,7 +185,12 @@ class RRDBGenerator(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         target_h = int(round(x.shape[-2] * self.super_res_factor))
         target_w = int(round(x.shape[-1] * self.super_res_factor))
-        base = F.interpolate(x, size=(target_h, target_w), mode="bicubic", align_corners=False)
+        if x.shape[1] == self.out_img_channels:
+            center = x
+        else:
+            c_mid = x.shape[1] // 2
+            center = x[:, c_mid : c_mid + self.out_img_channels, :, :]
+        base = F.interpolate(center, size=(target_h, target_w), mode="bicubic", align_corners=False)
         feat = self.conv_first(x)
         trunk = self.trunk_conv(self.trunk(feat))
         feat = feat + trunk

@@ -28,6 +28,7 @@ class Generator(nn.Module):
         sigmoid_k: float = 1.0,
         norm_type: NormType = "pixel",
         output_activation: OutputActivation = "custom_sigmoid",
+        out_img_channels: int = 1,
     ) -> None:
         super().__init__()
         if super_res_factor < 1 or (super_res_factor & (super_res_factor - 1)) != 0:
@@ -41,6 +42,7 @@ class Generator(nn.Module):
             )
 
         self.in_channels = int(in_channels)
+        self.out_img_channels = int(out_img_channels)
         self.out_channels = int(out_channels)
         self.num_blocks = int(num_blocks)
         self.super_res_factor = int(super_res_factor)
@@ -84,7 +86,7 @@ class Generator(nn.Module):
 
         self.final_conv = ConvBlock(
             in_channels=self.out_channels,
-            out_channels=self.in_channels,
+            out_channels=self.out_img_channels,
             kernel_size=9,
             stride=1,
             padding=4,
