@@ -29,9 +29,12 @@ from openlsrx.data import (
 from openlsrx.inference import super_resolve_volume_orthogonal
 from openlsrx.io import export_for_openimpala
 from openlsrx.metrics import (
+    compute_tortuosity_uncertainty_bounds,
     evaluate_image_metrics,
     evaluate_petrophysical_metrics,
+    evaluate_spectral_metrics,
     evaluate_transport_metrics,
+    evaluate_triphase_zn13x_metrics,
 )
 from openlsrx.models import (
     SRGAN,
@@ -57,6 +60,7 @@ def _evaluate_method(
     gen_params: int = 0,
     train_sec: float = 0.0,
     infer_sec: float = 0.0,
+    uncertainty_std: np.ndarray | None = None,
 ) -> dict[str, object]:
     row: dict[str, object] = {
         "dataset": dataset_name,
@@ -68,6 +72,7 @@ def _evaluate_method(
         "infer_sec": round(infer_sec, 4),
     }
     row.update(evaluate_image_metrics(pred_vol, hr_test))
+    row.update(evaluate_spectral_metrics(pred_vol, hr_test, voxel_size_um=voxel_size_um))
     row.update(
         evaluate_petrophysical_metrics(
             pred_vol,
@@ -77,6 +82,7 @@ def _evaluate_method(
             stack_axis=stack_axis,
         )
     )
+    row.update(evaluate_triphase_zn13x_metrics(pred_vol, hr_test))
     row.update(
         evaluate_transport_metrics(
             pred_vol,
@@ -86,6 +92,19 @@ def _evaluate_method(
             drainage_steps=10,
         )
     )
+    if uncertainty_std is not None:
+        unc_bounds = compute_tortuosity_uncertainty_bounds(
+            pred_vol, uncertainty_std, true_vol=hr_test, pore_is_low=True
+        )
+        row["mean_epistemic_std"] = unc_bounds["mean_epistemic_std"]
+        row["d_eff_halfwidth"] = unc_bounds["d_eff_halfwidth"]
+        row["tortuosity_halfwidth"] = unc_bounds["tortuosity_halfwidth"]
+        row["uncertainty_error_spearman_r"] = unc_bounds["uncertainty_error_spearman_r"]
+    else:
+        row["mean_epistemic_std"] = None
+        row["d_eff_halfwidth"] = None
+        row["tortuosity_halfwidth"] = None
+        row["uncertainty_error_spearman_r"] = None
     return row
 
 
@@ -218,7 +237,11 @@ def run_zn13x_study(
 
             t0 = time.perf_counter()
             srres_vols = super_resolve_volume_orthogonal(
-                srresnet.gen, lr_test, scale_factor=scale, fusion="fourier"
+                srresnet.gen,
+                lr_test,
+                scale_factor=scale,
+                fusion="fourier",
+                return_uncertainty=True,
             )
             infer_srres = time.perf_counter() - t0
             rows.append(
@@ -233,6 +256,7 @@ def run_zn13x_study(
                     gen_params=_count_params(srresnet.gen),
                     train_sec=train_srres,
                     infer_sec=infer_srres,
+                    uncertainty_std=srres_vols["uncertainty_std"],
                 )
             )
 
@@ -325,7 +349,11 @@ def run_zn13x_study(
 
             t0 = time.perf_counter()
             srgan_vols = super_resolve_volume_orthogonal(
-                srgan.gen, lr_test, scale_factor=scale, fusion="fourier"
+                srgan.gen,
+                lr_test,
+                scale_factor=scale,
+                fusion="fourier",
+                return_uncertainty=True,
             )
             infer_srgan = time.perf_counter() - t0
             rows.append(
@@ -356,6 +384,7 @@ def run_zn13x_study(
                     gen_params=_count_params(srgan.gen),
                     train_sec=train_srgan,
                     infer_sec=infer_srgan,
+                    uncertainty_std=srgan_vols["uncertainty_std"],
                 )
             )
 
@@ -395,7 +424,11 @@ def run_zn13x_study(
 
             t0 = time.perf_counter()
             rrdb_vols = super_resolve_volume_orthogonal(
-                rrdb_ragan.gen, lr_test, scale_factor=scale, fusion="fourier"
+                rrdb_ragan.gen,
+                lr_test,
+                scale_factor=scale,
+                fusion="fourier",
+                return_uncertainty=True,
             )
             infer_rrdb = time.perf_counter() - t0
             rows.append(
@@ -411,6 +444,86 @@ def run_zn13x_study(
                     gen_params=_count_params(rrdb_ragan.gen),
                     train_sec=train_rrdb,
                     infer_sec=infer_rrdb,
+                    uncertainty_std=rrdb_vols["uncertainty_std"],
+                )
+            )
+
+            # 7) Physics-Consistent SwinIR-2.5D + Confidence-Fourier Fusion (npj Flagship)
+            pl.seed_everything(seed, workers=True)
+            dm_25d = PairedVolumeDataModule(
+                low_path=str(lr_tif),
+                high_path=str(hr_tif),
+                scale_factor=scale,
+                context_slices=3,
+                norm_mode="none",
+                train_frac=0.65,
+                val_frac=0.20,
+                guard_slices_lr=1,
+                patch_size_lr=min(16, cur_lr_size),
+                batch_size=4 if scale == 2 else 2,
+                eval_batch_size=4 if scale == 2 else 2,
+                seed=seed,
+            )
+            swin_phys = SRGAN(
+                learning_rate=2e-4,
+                adaptive_size=4 if fast else 8,
+                super_res_factor=scale,
+                num_blocks=2 if fast else 4,
+                out_channels=16 if fast else 48,
+                context_slices=3,
+                backbone="swinir",
+                swin_window_size=4 if fast else 8,
+                swin_num_heads=4,
+                output_activation="clamp",
+                pixel_loss_type="l1",
+                disc_features=disc_features,
+                use_adversarial_loss=False,
+                use_vgg_loss=False,
+                conservation_loss_weight=0.25,
+                conservation_psf_sigma=0.5,
+                topology_loss_weight=0.05,
+                gradient_loss_weight=0.10,
+                ffl_loss_weight=0.05,
+                output_dir=str(output_dir / "runs" / f"{dataset_name}_s{seed}_swinir_25d_phys"),
+                save_val_images=False,
+            )
+            trainer_swin = pl.Trainer(
+                default_root_dir=str(output_dir / "runs"),
+                max_epochs=epochs,
+                accelerator="auto",
+                devices=1,
+                logger=False,
+                enable_checkpointing=False,
+                enable_progress_bar=False,
+                enable_model_summary=False,
+            )
+            t0 = time.perf_counter()
+            trainer_swin.fit(swin_phys, datamodule=dm_25d)
+            train_swin = time.perf_counter() - t0
+
+            t0 = time.perf_counter()
+            swin_vols = super_resolve_volume_orthogonal(
+                swin_phys.gen,
+                lr_test,
+                scale_factor=scale,
+                fusion="confidence_fourier",
+                return_uncertainty=True,
+            )
+            infer_swin = time.perf_counter() - t0
+            rows.append(
+                _evaluate_method(
+                    dataset_name,
+                    pair_lit,
+                    seed,
+                    "OpenLSR-X-SwinIR-2.5D-Physics-ConfFourier",
+                    swin_vols["fused"],
+                    hr_test,
+                    voxel_um,
+                    stack_axis=0,
+                    gen_params=_count_params(swin_phys.gen),
+                    train_sec=train_swin,
+                    infer_sec=infer_swin,
+                    uncertainty_std=swin_vols["uncertainty_std"],
                 )
             )
 
@@ -419,6 +532,12 @@ def run_zn13x_study(
                     rrdb_vols["fused"],
                     output_dir=output_dir / "openimpala_ready",
                     name=f"{dataset_name}_rrdb_ragan_s{seed}",
+                    pore_is_low=True,
+                )
+                export_for_openimpala(
+                    swin_vols["fused"],
+                    output_dir=output_dir / "openimpala_ready",
+                    name=f"{dataset_name}_swinir_25d_phys_s{seed}",
                     pore_is_low=True,
                 )
             if torch.cuda.is_available():

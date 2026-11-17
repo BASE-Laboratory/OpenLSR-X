@@ -12,18 +12,25 @@ import tifffile
 import torch
 from torch import Tensor, nn, optim
 
-from ..losses import VGGLoss
+from ..losses import (
+    AttenuationConservationLoss,
+    FocalFrequencyLoss,
+    SobelGradientLoss,
+    SoftCLDiceLoss,
+    VGGLoss,
+)
 from ..metrics.image import compute_mae, compute_psnr, compute_rmse, compute_ssim
 from .blocks import NormType
 from .rrdb import RRDBGenerator
 from .submodels import Discriminator, Generator, OutputActivation
+from .swinir import SwinIRGenerator
 
-BackboneType = Literal["srgan", "rrdb"]
+BackboneType = Literal["srgan", "rrdb", "swinir"]
 GANLossType = Literal["standard", "ragan"]
 
 
 def _ensure_4d(x: Tensor) -> Tensor:
-    """Convert ``(B, H, W)`` or ``(B, 1, H, W)`` tensors to ``(B, 1, H, W)``."""
+    """Convert ``(B, H, W)`` or ``(B, C, H, W)`` tensors to 4D ``(B, C, H, W)``."""
     if x.ndim == 3:
         return x.unsqueeze(1)
     if x.ndim == 4:
@@ -34,16 +41,16 @@ def _ensure_4d(x: Tensor) -> Tensor:
 
 
 class SRGAN(pl.LightningModule):
-    """Learnable Super-Resolution GAN (SRGAN / RRDB-ESRGAN / SRResNet) for XCT data.
+    """Learnable Super-Resolution Module (SRGAN / RRDB-RaGAN / SwinIR-2.5D) for XCT data.
 
     Supports:
-    - Classical ``Generator`` (``backbone='srgan'``) or normalization-free ``RRDBGenerator``
-      with arbitrary beamline magnification ratios (``backbone='rrdb'``)
+    - Classical ``Generator`` (``backbone='srgan'``), normalization-free ``RRDBGenerator``
+      (``backbone='rrdb'``), or shifted-window attention ``SwinIRGenerator`` (``backbone='swinir'``)
+    - Single-slice ``2D`` (``context_slices=1``) or multi-slice ``2.5D`` (``context_slices=3, 5``)
     - Standard BCE adversarial loss or Relativistic Average GAN (``gan_loss_type='ragan'``)
-    - Generator-only MSE/L1 pretraining or full ablation (``use_adversarial_loss=False``)
-    - Optional generator warmup epochs (``pretrain_epochs > 0``) prior to GAN updates
+    - Quantitative domain losses: ``AttenuationConservationLoss``, ``SoftCLDiceLoss``
+      (pore-throat connectivity), ``SobelGradientLoss``, and ``FocalFrequencyLoss``
     - Built-in PSNR, SSIM, MAE, and RMSE logging on validation and test splits
-    - Safe ``pathlib``-based slice and 3D BigTIFF stack export without mutating ``os.getcwd()``
     """
 
     def __init__(
@@ -55,7 +62,10 @@ class SRGAN(pl.LightningModule):
         num_blocks: int = 10,
         out_channels: int = 64,
         growth_channels: int = 32,
+        context_slices: int = 1,
         backbone: BackboneType = "srgan",
+        swin_window_size: int = 8,
+        swin_num_heads: int = 4,
         gan_loss_type: GANLossType = "standard",
         norm_type: NormType = "pixel",
         output_activation: OutputActivation = "custom_sigmoid",
@@ -68,6 +78,11 @@ class SRGAN(pl.LightningModule):
         vgg_loss_weight: float = 0.006,
         vgg_layers: int = 18,
         vgg_pretrained: bool = True,
+        conservation_loss_weight: float = 0.0,
+        conservation_psf_sigma: float = 0.0,
+        topology_loss_weight: float = 0.0,
+        gradient_loss_weight: float = 0.0,
+        ffl_loss_weight: float = 0.0,
         disc_features: Sequence[int] | None = None,
         sample_id: str = "",
         strict_loading: bool = True,
@@ -82,12 +97,18 @@ class SRGAN(pl.LightningModule):
 
         if accumulate_n_batches < 1:
             raise ValueError(f"accumulate_n_batches must be >= 1, got {accumulate_n_batches}.")
+        if context_slices < 1 or context_slices % 2 == 0:
+            raise ValueError(
+                f"context_slices must be a positive odd integer (1, 3, 5, ...), got {context_slices}."
+            )
         if lr_scheduler_type not in ("constant", "CAWR"):
             raise ValueError(
                 f"Unsupported lr_scheduler_type={lr_scheduler_type!r}. Expected 'constant' or 'CAWR'."
             )
-        if backbone not in ("srgan", "rrdb"):
-            raise ValueError(f"Unsupported backbone={backbone!r}. Expected 'srgan' or 'rrdb'.")
+        if backbone not in ("srgan", "rrdb", "swinir"):
+            raise ValueError(
+                f"Unsupported backbone={backbone!r}. Expected 'srgan', 'rrdb', or 'swinir'."
+            )
         if gan_loss_type not in ("standard", "ragan"):
             raise ValueError(
                 f"Unsupported gan_loss_type={gan_loss_type!r}. Expected 'standard' or 'ragan'."
@@ -105,7 +126,10 @@ class SRGAN(pl.LightningModule):
         self.num_blocks = int(num_blocks)
         self.out_channels = int(out_channels)
         self.growth_channels = int(growth_channels)
+        self.context_slices = int(context_slices)
         self.backbone: BackboneType = backbone
+        self.swin_window_size = int(swin_window_size)
+        self.swin_num_heads = int(swin_num_heads)
         self.gan_loss_type: GANLossType = gan_loss_type
         self.norm_type: NormType = norm_type
         self.output_activation: OutputActivation = output_activation
@@ -118,6 +142,11 @@ class SRGAN(pl.LightningModule):
         self.vgg_loss_weight = float(vgg_loss_weight)
         self.vgg_layers = int(vgg_layers)
         self.vgg_pretrained = bool(vgg_pretrained)
+        self.conservation_loss_weight = float(conservation_loss_weight)
+        self.conservation_psf_sigma = float(conservation_psf_sigma)
+        self.topology_loss_weight = float(topology_loss_weight)
+        self.gradient_loss_weight = float(gradient_loss_weight)
+        self.ffl_loss_weight = float(ffl_loss_weight)
         self.lr_scheduler_type = lr_scheduler_type
         self.lr_scheduler_args = dict(
             lr_scheduler_args or {"T_0": 50, "T_mult": 1, "eta_min": 1e-6}
@@ -129,28 +158,42 @@ class SRGAN(pl.LightningModule):
 
         if self.backbone == "rrdb":
             self.gen: nn.Module = RRDBGenerator(
-                in_channels=1,
+                in_channels=self.context_slices,
                 out_channels=self.out_channels,
                 growth_channels=self.growth_channels,
                 num_blocks=self.num_blocks,
                 super_res_factor=self.super_res_factor,
                 sigmoid_k=self.sigmoid_k,
                 output_activation=self.output_activation,
+                out_img_channels=1,
+            )
+        elif self.backbone == "swinir":
+            self.gen = SwinIRGenerator(
+                in_channels=self.context_slices,
+                out_channels=self.out_channels,
+                num_blocks=self.num_blocks,
+                num_heads=self.swin_num_heads,
+                window_size=self.swin_window_size,
+                super_res_factor=self.super_res_factor,
+                sigmoid_k=self.sigmoid_k,
+                output_activation=self.output_activation,
+                out_img_channels=1,
             )
         else:
             if not isinstance(self.super_res_factor, int):
                 raise ValueError(
                     f"backbone='srgan' requires integer power-of-2 super_res_factor, "
-                    f"got {self.super_res_factor}. Use backbone='rrdb' for fractional scales."
+                    f"got {self.super_res_factor}. Use backbone='rrdb' or 'swinir' for fractional scales."
                 )
             self.gen = Generator(
-                in_channels=1,
+                in_channels=self.context_slices,
                 out_channels=self.out_channels,
                 num_blocks=self.num_blocks,
                 super_res_factor=self.super_res_factor,
                 sigmoid_k=self.sigmoid_k,
                 norm_type=self.norm_type,
                 output_activation=self.output_activation,
+                out_img_channels=1,
             )
         self.disc = Discriminator(
             in_channels=1,
@@ -168,6 +211,12 @@ class SRGAN(pl.LightningModule):
             if self.use_vgg_loss
             else None
         )
+        self.conservation_criterion = AttenuationConservationLoss(
+            psf_sigma=self.conservation_psf_sigma
+        )
+        self.topology_criterion = SoftCLDiceLoss()
+        self.gradient_criterion = SobelGradientLoss()
+        self.ffl_criterion = FocalFrequencyLoss()
 
         self.automatic_optimization = False
         self._predict_slice_counter = 0
@@ -188,6 +237,18 @@ class SRGAN(pl.LightningModule):
 
     def _is_adversarial_active(self) -> bool:
         return self.use_adversarial_loss and (self.current_epoch >= self.pretrain_epochs)
+
+    def _compute_physics_loss(self, fake: Tensor, high_res: Tensor, low_res: Tensor) -> Tensor:
+        phys = torch.zeros((), device=self.device, dtype=torch.float32)
+        if self.conservation_loss_weight > 0.0:
+            phys = phys + self.conservation_loss_weight * self.conservation_criterion(fake, low_res)
+        if self.topology_loss_weight > 0.0:
+            phys = phys + self.topology_loss_weight * self.topology_criterion(fake, high_res)
+        if self.gradient_loss_weight > 0.0:
+            phys = phys + self.gradient_loss_weight * self.gradient_criterion(fake, high_res)
+        if self.ffl_loss_weight > 0.0:
+            phys = phys + self.ffl_loss_weight * self.ffl_criterion(fake, high_res)
+        return phys.to(fake.dtype)
 
     def training_step(self, train_batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
         low_res, high_res = train_batch
@@ -267,7 +328,9 @@ class SRGAN(pl.LightningModule):
         else:
             vgg_loss = torch.zeros((), device=self.device, dtype=pixel_loss.dtype)
 
-        gen_loss = pixel_loss + adv_loss + vgg_loss
+        physics_loss = self._compute_physics_loss(fake, high_res, low_res)
+
+        gen_loss = pixel_loss + adv_loss + vgg_loss + physics_loss
         self.manual_backward(gen_loss / self.accumulate_n_batches)
         if should_step:
             opt_gen.step()
@@ -301,6 +364,13 @@ class SRGAN(pl.LightningModule):
         self.log(
             "train/vgg_loss",
             vgg_loss.detach(),
+            on_step=False,
+            on_epoch=True,
+            batch_size=batch_size,
+        )
+        self.log(
+            "train/physics_loss",
+            physics_loss.detach(),
             on_step=False,
             on_epoch=True,
             batch_size=batch_size,
@@ -369,9 +439,10 @@ class SRGAN(pl.LightningModule):
                 epoch_dir / f"high_{batch_idx:04d}.tiff",
                 high_f32[0, 0].cpu().numpy(),
             )
+            c_mid = low_4d.shape[1] // 2
             tifffile.imwrite(
                 epoch_dir / f"low_{batch_idx:04d}.tiff",
-                low_4d[0, 0].to(torch.float32).cpu().numpy(),
+                low_4d[0, c_mid].to(torch.float32).cpu().numpy(),
             )
 
     def on_test_epoch_start(self) -> None:
@@ -403,6 +474,7 @@ class SRGAN(pl.LightningModule):
         if self.global_rank == 0:
             test_dir = self._resolve_root_dir() / "test_saved"
             test_dir.mkdir(parents=True, exist_ok=True)
+            c_mid = low_f32.shape[1] // 2
             for i in range(batch_size):
                 idx = self._test_slice_counter
                 self._test_slice_counter += 1
@@ -410,7 +482,7 @@ class SRGAN(pl.LightningModule):
                     test_dir / f"upsampled_{idx:05d}.tiff", pred_f32[i, 0].cpu().numpy()
                 )
                 tifffile.imwrite(test_dir / f"high_{idx:05d}.tiff", high_f32[i, 0].cpu().numpy())
-                tifffile.imwrite(test_dir / f"low_{idx:05d}.tiff", low_f32[i, 0].cpu().numpy())
+                tifffile.imwrite(test_dir / f"low_{idx:05d}.tiff", low_f32[i, c_mid].cpu().numpy())
 
     def _predict_base_dir(self) -> Path:
         dm = getattr(self.trainer, "datamodule", None) if self._trainer is not None else None

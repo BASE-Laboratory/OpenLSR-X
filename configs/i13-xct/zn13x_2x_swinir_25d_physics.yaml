@@ -1,0 +1,56 @@
+# Diamond Light Source I13-2 Physics-Consistent SwinIR-2.5D Configuration (1.625 -> 0.8125 um)
+# Combines 3-slice 2.5D context, Windowed Self-Attention (SwinIR), Attenuation Conservation,
+# and Soft-clDice Pore-Throat Topology Supervision (zero RGB ImageNet VGG dependency).
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 300
+  check_val_every_n_epoch: 10
+  log_every_n_steps: 20
+
+model:
+  backbone: swinir
+  context_slices: 3
+  out_channels: 48
+  num_blocks: 4
+  swin_window_size: 8
+  swin_num_heads: 4
+  output_activation: clamp
+  pixel_loss_type: l1
+  learning_rate: 2.0e-4
+  adaptive_size: 8
+  accumulate_n_batches: 1
+  super_res_factor: 2
+  use_adversarial_loss: false
+  use_vgg_loss: false
+  conservation_loss_weight: 0.25
+  conservation_psf_sigma: 0.6
+  topology_loss_weight: 0.05
+  gradient_loss_weight: 0.10
+  ffl_loss_weight: 0.05
+  sample_id: Zn13X_2x_SwinIR_25D_Physics
+
+data:
+  class_path: openlsrx.data.PairedVolumeDataModule
+  init_args:
+    low_path: data/benchmarks/zn13x_2x_lr.tif
+    high_path: data/benchmarks/zn13x_2x_hr.tif
+    scale_factor: 2
+    context_slices: 3
+    norm_mode: none
+    train_frac: 0.70
+    val_frac: 0.15
+    guard_slices_lr: 1
+    train_axes: ["yz"]
+    test_axis: perpendicular
+    predict_axis: xy
+    patch_size_lr: 32
+    augment: true
+    batch_size: 4
+    eval_batch_size: 4
+    num_workers: 2
+    pin_memory: true
+    seed: 42

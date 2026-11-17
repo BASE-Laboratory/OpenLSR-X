@@ -262,3 +262,77 @@ def evaluate_petrophysical_metrics(
             pred_arr, true_arr, stack_axis=stack_axis
         )
     return metrics
+
+
+def evaluate_triphase_zn13x_metrics(
+    pred: np.ndarray,
+    target: np.ndarray,
+    thresholds: tuple[float, float] | None = None,
+) -> dict[str, float]:
+    """Quantify three-phase reactive microstructure in Zn-doped Zeolite 13X XCT volumes.
+
+    Partitions ``Zn-13X`` absorption micro-CT reconstructions (Green et al., *Sci. Data* 2025)
+    into three physically meaningful chemical/structural domains ordered by 27 keV X-ray
+    linear attenuation:
+    1. **Macropore / Mesopore network** (``I < t_low``)
+    2. **Unexchanged ``Na-13X`` zeolite core** (``t_low <= I < t_high``)
+    3. **Ion-exchanged ``Zn-13X`` outer shell** (``I >= t_high``)
+
+    Reports per-phase Dice similarity, phase volume-fraction errors, and the macroscopic
+    ``Zn / (Zn + Na)`` solid ion-exchange fraction error (directly linkable to DIAD ``XRD-CT``).
+    """
+    from skimage.filters import threshold_multiotsu
+
+    pred_arr = np.asarray(pred, dtype=np.float32)
+    true_arr = np.asarray(target, dtype=np.float32)
+    if pred_arr.shape != true_arr.shape:
+        raise ValueError(f"Shape mismatch: {pred_arr.shape} vs {true_arr.shape}.")
+
+    if thresholds is not None:
+        t_lo, t_hi = float(thresholds[0]), float(thresholds[1])
+    else:
+        try:
+            thrs = threshold_multiotsu(true_arr, classes=3)
+            t_lo, t_hi = float(thrs[0]), float(thrs[1])
+        except ValueError:
+            p33, p67 = np.percentile(true_arr, [33.3, 66.7])
+            t_lo, t_hi = float(p33), float(p67)
+
+    true_pore = true_arr < t_lo
+    true_na = (true_arr >= t_lo) & (true_arr < t_hi)
+    true_zn = true_arr >= t_hi
+
+    pred_pore = pred_arr < t_lo
+    pred_na = (pred_arr >= t_lo) & (pred_arr < t_hi)
+    pred_zn = pred_arr >= t_hi
+
+    pore_dice, _ = compute_dice_iou(pred_pore, true_pore)
+    na_dice, _ = compute_dice_iou(pred_na, true_na)
+    zn_dice, _ = compute_dice_iou(pred_zn, true_zn)
+    macro_dice = (pore_dice + na_dice + zn_dice) / 3.0
+
+    f_na_true = float(true_na.mean())
+    f_na_pred = float(pred_na.mean())
+    f_zn_true = float(true_zn.mean())
+    f_zn_pred = float(pred_zn.mean())
+
+    zn_ratio_true = f_zn_true / max(f_zn_true + f_na_true, 1e-8)
+    zn_ratio_pred = f_zn_pred / max(f_zn_pred + f_na_pred, 1e-8)
+
+    return {
+        "triphase_threshold_low": t_lo,
+        "triphase_threshold_high": t_hi,
+        "triphase_pore_dice": pore_dice,
+        "triphase_na13x_core_dice": na_dice,
+        "triphase_zn13x_rim_dice": zn_dice,
+        "triphase_macro_dice": macro_dice,
+        "na13x_fraction_true": f_na_true,
+        "na13x_fraction_pred": f_na_pred,
+        "na13x_fraction_abs_error": abs(f_na_pred - f_na_true),
+        "zn13x_fraction_true": f_zn_true,
+        "zn13x_fraction_pred": f_zn_pred,
+        "zn13x_fraction_abs_error": abs(f_zn_pred - f_zn_true),
+        "zn_exchange_ratio_true": zn_ratio_true,
+        "zn_exchange_ratio_pred": zn_ratio_pred,
+        "zn_exchange_ratio_abs_error": abs(zn_ratio_pred - zn_ratio_true),
+    }

@@ -1,4 +1,4 @@
-"""OpenLSR-X: Learnable 2D-to-3D Super-Resolution and Petrophysical Benchmark Suite for XCT."""
+"""OpenLSR-X: Physics-Consistent 2D/2.5D-to-3D Super-Resolution & Transport Suite for XCT."""
 
 from .baselines import upsample_2d, upsample_3d
 from .data import (
@@ -15,20 +15,35 @@ from .data import (
     synthesize_zn13x_phantom_pair,
 )
 from .inference import (
+    compute_orthogonal_uncertainty,
     fuse_orthogonal_volumes,
     super_resolve_slice_stack,
     super_resolve_volume_orthogonal,
     super_resolve_volume_single_axis,
 )
 from .io import export_for_openimpala
-from .losses import PixelNorm, VGGLoss, custom_sigmoid
+from .losses import (
+    AttenuationConservationLoss,
+    FocalFrequencyLoss,
+    PixelNorm,
+    SobelGradientLoss,
+    SoftCLDiceLoss,
+    VGGLoss,
+    custom_sigmoid,
+    soft_skeletonize,
+)
 from .metrics import (
     compute_directional_tortuosity,
     compute_drainage_curve,
     compute_drainage_rmse,
+    compute_frc_2d,
+    compute_fsc_3d,
+    compute_tortuosity_uncertainty_bounds,
     evaluate_image_metrics,
     evaluate_petrophysical_metrics,
+    evaluate_spectral_metrics,
     evaluate_transport_metrics,
+    evaluate_triphase_zn13x_metrics,
     solve_steady_state_diffusion_axis,
 )
 from .models import (
@@ -42,8 +57,10 @@ from .models import (
     Generator3D,
     ResidualBlock,
     ResidualBlock3D,
+    ResidualSwinBlock,
     RRDBGenerator,
     SR3DResNet,
+    SwinIRGenerator,
     UpsampleBlock,
     build_3d_subcube_dataloaders,
     super_resolve_volume_3d,
@@ -53,10 +70,12 @@ __version__ = "0.2.0"
 
 __all__ = [
     "ArbitraryScaleUpsample",
+    "AttenuationConservationLoss",
     "ConvBlock",
     "DatasetObject",
     "DenseResidualBlock",
     "Discriminator",
+    "FocalFrequencyLoss",
     "Generator",
     "Generator3D",
     "PairedSliceDataset",
@@ -66,8 +85,12 @@ __all__ = [
     "RRDBGenerator",
     "ResidualBlock",
     "ResidualBlock3D",
+    "ResidualSwinBlock",
     "SR3DResNet",
     "SRGAN",
+    "SobelGradientLoss",
+    "SoftCLDiceLoss",
+    "SwinIRGenerator",
     "SyntheticPoreSpyDataModule",
     "UpsampleBlock",
     "VGGLoss",
@@ -77,10 +100,16 @@ __all__ = [
     "compute_directional_tortuosity",
     "compute_drainage_curve",
     "compute_drainage_rmse",
+    "compute_frc_2d",
+    "compute_fsc_3d",
+    "compute_orthogonal_uncertainty",
+    "compute_tortuosity_uncertainty_bounds",
     "custom_sigmoid",
     "evaluate_image_metrics",
     "evaluate_petrophysical_metrics",
+    "evaluate_spectral_metrics",
     "evaluate_transport_metrics",
+    "evaluate_triphase_zn13x_metrics",
     "export_for_openimpala",
     "extract_aligned_slab_from_h5",
     "fuse_orthogonal_volumes",
@@ -88,6 +117,7 @@ __all__ = [
     "load_volume_any",
     "prepare_zn13x_benchmark",
     "register_multires_pair_3d",
+    "soft_skeletonize",
     "solve_steady_state_diffusion_axis",
     "super_resolve_slice_stack",
     "super_resolve_volume_3d",

@@ -34,4 +34,5 @@ nav:
   - End-to-End Tutorial: tutorial.md
   - Datasets & Configuration: datasets-and-configs.md
   - Benchmarks & Metrics: benchmarks-and-metrics.md
+  - npj Study Blueprint: npj-study-design.md
   - API Reference: api.md

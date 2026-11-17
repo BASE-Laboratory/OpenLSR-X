@@ -23,7 +23,9 @@ import matplotlib.pyplot as plt
 CORE_METRICS: list[tuple[str, str, str]] = [
     ("psnr", "PSNR (dB)", "higher"),
     ("ssim_3d_triplanar", "3D SSIM", "higher"),
+    ("fsc_auc", "FSC AUC", "higher"),
     ("pore_dice", "Pore Dice", "higher"),
+    ("triphase_macro_dice", "3-Phase Dice", "higher"),
     ("porosity_abs_error", "|dPhi|", "lower"),
     ("through_plane_anisotropy_error", "Stack Aniso.", "lower"),
     ("d_eff_mae", "D_eff MAE", "lower"),

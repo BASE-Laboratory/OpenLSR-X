@@ -24,7 +24,9 @@ from .io import export_for_openimpala
 from .metrics import (
     evaluate_image_metrics,
     evaluate_petrophysical_metrics,
+    evaluate_spectral_metrics,
     evaluate_transport_metrics,
+    evaluate_triphase_zn13x_metrics,
 )
 from .models import SRGAN
 
@@ -34,7 +36,7 @@ ZN13X_BENCHMARK_KEYS = ("zn13x_2x", "zn13x_8x")
 def _run_evaluate(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="openlsrx evaluate",
-        description="Compute 2D/3D image-fidelity, petrophysical, and transport metrics on XCT volumes.",
+        description="Compute 2D/3D image-fidelity, spectral FSC, petrophysical, and transport metrics on XCT volumes.",
     )
     parser.add_argument(
         "--pred", required=True, help="Path to super-resolved TIFF/HDF5/NPY volume."
@@ -59,9 +61,21 @@ def _run_evaluate(argv: Sequence[str]) -> int:
         action="store_true",
         help="Set if pores have higher greyscale intensity than solid (e.g., local-thickness maps).",
     )
-    parser.add_argument("--voxel-size", type=float, default=1.0, help="Isotropic voxel spacing.")
+    parser.add_argument(
+        "--voxel-size", type=float, default=1.0, help="Isotropic voxel spacing (um)."
+    )
     parser.add_argument(
         "--stack-axis", type=int, default=0, help="Stacking axis for anisotropy check."
+    )
+    parser.add_argument(
+        "--include-spectral",
+        action="store_true",
+        help="Also compute 2D FRC / 3D FSC resolution cutoffs (1/2-bit and 0.143 criteria).",
+    )
+    parser.add_argument(
+        "--include-triphase",
+        action="store_true",
+        help="Also evaluate three-phase (Pore / Na-13X Core / Zn-13X Rim) chemical segmentation.",
     )
     parser.add_argument(
         "--include-transport",
@@ -99,6 +113,12 @@ def _run_evaluate(argv: Sequence[str]) -> int:
         "image_metrics": img_metrics,
         "petrophysical_metrics": petro_metrics,
     }
+    if ns.include_spectral:
+        combined["spectral_metrics"] = evaluate_spectral_metrics(
+            pred_vol, target_vol, voxel_size_um=ns.voxel_size
+        )
+    if ns.include_triphase:
+        combined["triphase_zn13x_metrics"] = evaluate_triphase_zn13x_metrics(pred_vol, target_vol)
     if ns.include_transport and pred_vol.ndim == 3:
         combined["transport_metrics"] = evaluate_transport_metrics(
             pred_vol,

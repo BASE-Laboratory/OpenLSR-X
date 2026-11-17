@@ -134,3 +134,4 @@ jobs:
           test -f /tmp/bench/paper_artifacts/figures/orthogonal_sr_comparison.pdf
           test -f /tmp/bench/campaign_summary/campaign_table.tex
           test -f /tmp/bench/zn13x/openimpala_ready/zn13x_2x_rrdb_ragan_s42_openimpala.inputs
+          test -f /tmp/bench/zn13x/openimpala_ready/zn13x_2x_swinir_25d_phys_s42_openimpala.inputs
