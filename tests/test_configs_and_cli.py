@@ -98,3 +98,19 @@ def test_cli_evaluate_shape_mismatch_raises(tmp_path: Path) -> None:
     np.save(b, np.zeros((10, 8, 8), dtype=np.float32))
     with pytest.raises(ValueError, match="Shape mismatch"):
         cli_main(["evaluate", "--pred", str(a), "--target", str(b)])
+
+
+def test_release_metadata_consistency() -> None:
+    import yaml
+
+    import openlsrx
+
+    cff = yaml.safe_load((REPO_ROOT / "CITATION.cff").read_text(encoding="utf-8"))
+    zenodo = json.loads((REPO_ROOT / ".zenodo.json").read_text(encoding="utf-8"))
+
+    assert cff["version"] == openlsrx.__version__
+    assert zenodo["version"] == openlsrx.__version__
+    assert cff["license"] == zenodo["license"] == "BSD-3-Clause"
+    assert len(cff["authors"]) == len(zenodo["creators"]) >= 3
+    assert (REPO_ROOT / "paper" / "paper.md").is_file()
+    assert (REPO_ROOT / "paper" / "paper.bib").is_file()
