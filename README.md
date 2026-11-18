@@ -13,7 +13,7 @@
 ## Highlights
 
 - **Cell-Centered 2D & `2.5D` Training → Isotropic 3D Reconstruction:** Train memory-efficient `1`-slice or native-LR-strided `2k + 1` multi-slice (`2.5D`) generators (`SwinIR`, `RRDB` + `RaGAN`, `SRGAN`/`SRResNet`) alongside native `SR3DResNet` baselines across integer and fractional synchrotron optical magnifications (`2x`, `2.5x`, `4x`, `8x`), and fuse cell-centered (`grid_mode=True`) orthogonal sweeps (`yz + xz + xy`) via **Confidence-Weighted Directional Fourier Fusion** (`confidence_fourier`) with zero-overhead voxel-wise **orthogonal view-disagreement uncertainty** $\sigma_{\text{ortho}}(\mathbf{x})$ ($n=3$ views).
-- **Physics- & Topology-Guided Objectives:** Combines **linear-attenuation ($\mu$) downsampling consistency** (`AttenuationConservationLoss`, with `2.5D` through-plane $z$-PSF curvature correction), differentiable **bimodal pore-throat skeleton preservation** (`SoftCLDiceLoss`), 2D/3D **Sobel phase-boundary sharpness** (`SobelGradientLoss`), and **Focal Frequency Loss** (`FocalFrequencyLoss`).
+- **Physics- & Topology-Guided Objectives:** Combines **approximate slice/`2.5D` linear-attenuation ($\mu$) downsampling consistency** (`AttenuationConservationLoss`, with local `2.5D` discrete $z$-Laplacian PSF curvature reduction), differentiable **bimodal pore-throat skeleton preservation** (`SoftCLDiceLoss`), 2D/3D **Sobel phase-boundary sharpness** (`SobelGradientLoss`), and **Focal Frequency Loss** (`FocalFrequencyLoss`).
 - **Split-Isolated 3D Spatial Splitting & Normalization:** Partitions 3D volumes into disjoint sub-volume slabs (separated by PSF guard margins) *before* fitting intensity normalization bounds on `train` only and *before* per-split synthetic PSF degradation.
 - **Synchrotron Spectral, Petrophysical & Diffusive Transport Metrology:** Evaluates **3D Fourier Shell Correlation (FSC)** & **2D Fourier Ring Correlation (FRC)** (`FSC = 0.5` prediction-vs-reference crossover frequency & spectral AUC), ground-truth-thresholded porosity/Euler/surface-area metrics, tri-phase `Zn-13X` reactive core-rim segmentation (`Macropore` / `Na-13X` / `Zn-13X`), quasi-static drainage capillary pressure $S_{\text{nwp}}(P_c)$, and residual-verified **3D steady-state Laplace diffusive tortuosity** ($D_{\text{eff}} / D_0$, $\tau$) with view-disagreement sensitivity bounds $[D_{\text{eff}}^-, D_{\text{eff}}^+]$ and direct **OpenImpala** export.
 - **Provenance-Verified Open Benchmarks:** Ships with deterministic **Factorial PoreSpy** benchmarks, **Open Rock Micro-CT** (Bentheimer Sandstone from Zenodo `5542624` & calibrated carbonate phantom), and coaxial sub-voxel-registered Zenodo staging (`10.5281/zenodo.14245751`) + explicit provenance tracking (`source_kind`, `is_experimental_xct`) for the Diamond Light Source I13-2 multi-resolution `Zn-13X` dataset ([*Scientific Data*, 2025](https://doi.org/10.1038/s41597-025-04605-9)).
@@ -79,6 +79,10 @@ openlsrx evaluate \
 Run the Factorial PoreSpy, Open Rock Micro-CT, and 9-arm Diamond I13-2 `Zn-13X` studies and generate publication-ready LaTeX `booktabs` tables and comparison figures (production runs fail loudly if real Zenodo/HDF5 data are unavailable unless `--allow-synthetic-fallback` is explicitly passed):
 
 ```bash
+# Closed-form analytical accuracy tests (<10s) & full visual verification suite
+pytest tests/test_analytical_verification.py
+python scripts/verification/run_verification_suite.py --output-dir docs/assets/verification --include-bentheimer
+
 # Rapid offline CPU smoke verification (~2 minutes; explicitly labeled synthetic phantoms)
 python scripts/benchmarks/porespy_study.py --fast
 python scripts/benchmarks/public_rock_xct.py --fast
@@ -97,11 +101,12 @@ python scripts/benchmarks/aggregate_campaign.py --inputs results --output-dir re
 ```text
 OpenLSR-X/
 ├── configs/                  # Validated LightningCLI YAML configs (base, porespy, labxct, i13-xct)
-├── docs/                     # MkDocs user, dataset, benchmark, API, and npj study design docs
+├── docs/                     # MkDocs user, dataset, benchmark, verification, API & npj study docs
 ├── paper/                    # JOSS manuscript (paper.md) and bibliography (paper.bib)
 ├── scripts/
 │   ├── benchmarks/           # PoreSpy, Rock XCT & I13-2 Zn-13X runners + multi-seed campaign aggregator
-│   └── hpc/                  # Isambard-AI GH200 SLURM array, generic SLURM, and SGE ('Young') templates
+│   ├── hpc/                  # Isambard-AI GH200 SLURM array, generic SLURM, and SGE ('Young') templates
+│   └── verification/         # End-to-end closed-form analytical & visual verification suite
 ├── src/openlsrx/
 │   ├── baselines/            # Cell-centered 2D & 3D classical interpolation baselines
 │   ├── data/                 # PoreSpy, Rock XCT, DLS I13-2 Zn-13X loaders & split-isolated 2.5D datasets
