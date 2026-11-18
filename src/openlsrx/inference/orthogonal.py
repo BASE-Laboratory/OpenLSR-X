@@ -1,4 +1,4 @@
-"""2D-to-3D and 2.5D-to-3D multi-axis orthogonal XCT super-resolution & epistemic uncertainty."""
+"""2D-to-3D and 2.5D-to-3D multi-axis orthogonal XCT super-resolution & view-disagreement uncertainty."""
 
 from __future__ import annotations
 
@@ -7,8 +7,10 @@ from typing import Literal
 
 import numpy as np
 import torch
-from scipy.ndimage import gaussian_filter, zoom
+from scipy.ndimage import gaussian_filter
 from torch import nn
+
+from ..data.transforms import build_strided_context_windows, zoom_cell_centered
 
 AxisName = Literal["yz", "xz", "xy"]
 FusionMode = Literal["mean", "median", "fourier", "confidence", "confidence_fourier"]
@@ -30,18 +32,15 @@ def _move_slice_axis_back(vol: np.ndarray, axis: AxisName) -> np.ndarray:
     return np.moveaxis(vol, 0, dim)
 
 
-def _build_slice_context_windows(slices: np.ndarray, context_slices: int) -> np.ndarray:
-    """Construct ``(N, context_slices, h, w)`` reflect-padded adjacent slice windows."""
-    if context_slices < 1 or context_slices % 2 == 0:
-        raise ValueError(
-            f"context_slices must be a positive odd integer (1, 3, 5, ...), got {context_slices}."
-        )
-    if context_slices == 1:
-        return slices[:, np.newaxis, :, :]
-    half = context_slices // 2
-    padded = np.pad(slices, ((half, half), (0, 0), (0, 0)), mode="reflect")
-    win = np.lib.stride_tricks.sliding_window_view(padded, window_shape=context_slices, axis=0)
-    return np.moveaxis(win, -1, 1)
+def _build_slice_context_windows(
+    slices: np.ndarray,
+    context_slices: int,
+    context_stride: int = 1,
+) -> np.ndarray:
+    """Construct ``(N, context_slices, h, w)`` adjacent slice windows at ``context_stride``."""
+    return build_strided_context_windows(
+        slices, context_slices=context_slices, context_stride=context_stride
+    )
 
 
 @torch.no_grad()
@@ -51,13 +50,9 @@ def super_resolve_slice_stack(
     batch_size: int = 8,
     device: torch.device | str | None = None,
     context_slices: int | None = None,
+    context_stride: int = 1,
 ) -> np.ndarray:
-    """Run a 2D or 2.5D generator over a ``(N, h, w)`` stack of slices and return ``(N, H, W)``.
-
-    When ``context_slices`` is ``None``, automatically inspects ``generator.in_channels`` so
-    that ``2.5D`` multi-slice generators (``in_channels = 2k + 1``) seamlessly receive
-    reflect-padded adjacent slice windows ``[z - k, ..., z + k]``.
-    """
+    """Run a 2D or 2.5D generator over a ``(N, h, w)`` stack of slices and return ``(N, H, W)``."""
     arr = np.asarray(slices, dtype=np.float32)
     if arr.ndim != 3:
         raise ValueError(f"Expected 3D slice stack (N, h, w), got shape {arr.shape}.")
@@ -67,7 +62,7 @@ def super_resolve_slice_stack(
         if context_slices is not None
         else int(getattr(generator, "in_channels", 1))
     )
-    windows = _build_slice_context_windows(arr, ctx)
+    windows = _build_slice_context_windows(arr, ctx, context_stride=context_stride)
 
     if device is None:
         try:
@@ -104,23 +99,25 @@ def super_resolve_volume_single_axis(
     device: torch.device | str | None = None,
     context_slices: int | None = None,
 ) -> np.ndarray:
-    """Super-resolve a 3D XCT volume ``(D, H, W)`` using a 2D/2.5D generator along ``axis``."""
+    """Super-resolve a 3D XCT volume ``(D, H, W)`` using a 2D/2.5D generator along ``axis``.
+
+    Uses ``zoom_cell_centered`` (``grid_mode=True``) along the stacking axis so half-voxel
+    cell centers remain strictly aligned with ``PixelShuffle`` across all 3 orthogonal sweeps,
+    and samples 2.5D context neighbors at native-LR spacing (``context_stride = round(zoom_n)``).
+    """
     vol = np.asarray(low_volume, dtype=np.float32)
     if vol.ndim != 3:
         raise ValueError(f"Expected 3D volume, got shape {vol.shape}.")
 
     ordered = _move_slice_axis_first(vol, axis)  # (N_axis, h, w)
     sf = float(scale_factor)
+    ctx_stride = 1
     if interpolate_stack_axis and sf > 1.0:
-        target_n = int(round(ordered.shape[0] * sf))
+        target_n = max(1, int(round(ordered.shape[0] * sf)))
         zoom_n = target_n / float(ordered.shape[0])
-        ordered = zoom(
-            ordered,
-            zoom=(zoom_n, 1, 1),
-            order=3,
-            mode="reflect",
-        ).astype(np.float32, copy=False)
+        ordered = zoom_cell_centered(ordered, zoom_factors=(zoom_n, 1.0, 1.0), order=3)
         ordered = np.clip(ordered, 0.0, 1.0)
+        ctx_stride = max(1, int(round(zoom_n)))
 
     sr_ordered = super_resolve_slice_stack(
         generator=generator,
@@ -128,6 +125,7 @@ def super_resolve_volume_single_axis(
         batch_size=batch_size,
         device=device,
         context_slices=context_slices,
+        context_stride=ctx_stride,
     )
     return _move_slice_axis_back(sr_ordered, axis)
 
@@ -136,17 +134,7 @@ def compute_orthogonal_uncertainty(
     volumes: Mapping[AxisName, np.ndarray],
     eps: float = 1e-6,
 ) -> dict[str, np.ndarray]:
-    """Compute zero-overhead voxel-wise epistemic uncertainty across orthogonal SR reconstructions.
-
-    Because each voxel ``x`` is reconstructed from perpendicular high-resolution sweep planes,
-    inter-axis disagreement ``sigma_ortho(x) = std(V_yz, V_xz, V_xy)`` concentrates selectively
-    at sub-resolution pore throats and multi-phase grain boundaries where out-of-plane blur or
-    hallucination occurs.
-
-    Returns:
-        Dictionary with keys ``'mean'``, ``'std'``, ``'range'``, and ``'cv'`` (coefficient of
-        variation), each of shape ``(D, H, W)`` in ``float32``.
-    """
+    """Compute zero-overhead voxel-wise orthogonal view-disagreement uncertainty (``n=3`` sweeps)."""
     if not volumes:
         raise ValueError("At least one orthogonal volume is required.")
     items = [(ax, np.asarray(v, dtype=np.float32)) for ax, v in volumes.items()]
@@ -177,40 +165,106 @@ def _fourier_directional_fuse(
     ref_shape: tuple[int, ...],
     psf_cutoff: float | None = None,
 ) -> np.ndarray:
+    """Streaming ``float32`` / ``complex64`` ``rfftn`` directional synthesis (6x lower RAM, NaN-free)."""
     d, h, w = ref_shape
-    kz = np.fft.fftfreq(d)[:, None, None] ** 2
-    ky = np.fft.fftfreq(h)[None, :, None] ** 2
-    kx = np.fft.fftfreq(w)[None, None, :] ** 2
+    kz = (np.fft.fftfreq(d).astype(np.float32)[:, None, None]) ** 2
+    ky = (np.fft.fftfreq(h).astype(np.float32)[None, :, None]) ** 2
+    kx = (np.fft.rfftfreq(w).astype(np.float32)[None, None, :]) ** 2
     k_dims = [kz, ky, kx]
 
-    weights: list[np.ndarray] = []
-    spectra: list[np.ndarray] = []
+    rfft_shape = (d, h, w // 2 + 1)
+    acc_spec = np.zeros(rfft_shape, dtype=np.complex64)
+    weight_sum = np.zeros(rfft_shape, dtype=np.float32)
+    dc_values: list[complex] = []
+
+    if psf_cutoff is not None and psf_cutoff > 0.0:
+        use_otf = True
+        inv_two_sigma_sq = np.float32(1.0 / max(2.0 * (psf_cutoff**2), 1e-12))
+    else:
+        use_otf = False
+        inv_two_sigma_sq = np.float32(0.0)
+
     for ax, v in items:
+        v_f32 = np.ascontiguousarray(v, dtype=np.float32)
         stack_dim = AXIS_TO_DIM[ax]
         in_plane_energy = sum(k_dims[i] for i in range(3) if i != stack_dim)
-        w_ax = np.asarray(in_plane_energy, dtype=np.float64) + 1e-12
-        if psf_cutoff is not None and psf_cutoff > 0.0:
-            # Attenuate interpolated stacking-axis frequencies above optical OTF roll-off
-            k_stack_sq = np.asarray(k_dims[stack_dim], dtype=np.float64)
-            w_ax = w_ax * np.exp(-k_stack_sq / (2.0 * float(psf_cutoff) ** 2))
-        weights.append(w_ax)
-        spectra.append(np.fft.fftn(v))
+        if use_otf:
+            otf_stack = np.exp(-k_dims[stack_dim] * inv_two_sigma_sq).astype(np.float32, copy=False)
+            # Positive floor added AFTER OTF roll-off guarantees w_ax >= 1e-6 > 0 everywhere (never 0/0 = NaN)
+            w_ax = (in_plane_energy * otf_stack + np.float32(1e-6)).astype(np.float32, copy=False)
+        else:
+            w_ax = (in_plane_energy + np.float32(1e-6)).astype(np.float32, copy=False)
 
-    weight_sum = sum(weights)
-    fused_spec = sum(w_i * s_i for w_i, s_i in zip(weights, spectra, strict=True)) / weight_sum
-    fused_spec[0, 0, 0] = np.mean([s[0, 0, 0] for s in spectra])
-    return np.fft.ifftn(fused_spec).real.astype(np.float32)
+        spec = np.fft.rfftn(v_f32).astype(np.complex64, copy=False)
+        dc_values.append(complex(spec[0, 0, 0]))
+        acc_spec += w_ax * spec
+        weight_sum += w_ax
+
+    fused_spec = acc_spec / np.maximum(weight_sum, np.float32(1e-12))
+    fused_spec[0, 0, 0] = np.complex64(sum(dc_values) / len(dc_values))
+    return np.fft.irfftn(fused_spec, s=(d, h, w), axes=(0, 1, 2)).astype(np.float32, copy=False)
 
 
-def _confidence_consensus_fuse(stacked: np.ndarray) -> np.ndarray:
+def _through_plane_roughness(vol: np.ndarray, stack_dim: int) -> np.ndarray:
+    """Local stacking-axis discontinuity magnitude used to weight 2-axis consensus."""
+    if vol.shape[stack_dim] < 2:
+        return np.zeros_like(vol, dtype=np.float32)
+    diff = np.abs(np.diff(vol, axis=stack_dim))
+    pad_spec = [(0, 0), (0, 0), (0, 0)]
+    pad_spec[stack_dim] = (0, 1)
+    padded = np.pad(diff, pad_spec, mode="edge")
+    return gaussian_filter(padded, sigma=1.0, mode="reflect").astype(np.float32, copy=False)
+
+
+def _confidence_consensus_fuse(items: list[tuple[AxisName, np.ndarray]]) -> np.ndarray:
     """Inverse-disagreement spatial consensus suppressing isolated single-axis blur/artifacts."""
-    med = np.median(stacked, axis=0)
+    stacked = np.stack([v for _, v in items], axis=0)
+    if stacked.shape[0] == 2:
+        # With only 2 axes, median == mean identically; weight inversely by local stacking roughness
+        r0 = _through_plane_roughness(items[0][1], AXIS_TO_DIM[items[0][0]])
+        r1 = _through_plane_roughness(items[1][1], AXIS_TO_DIM[items[1][0]])
+        w0 = 1.0 / ((r0 + np.float32(1e-3)) ** 2)
+        w1 = 1.0 / ((r1 + np.float32(1e-3)) ** 2)
+        return np.asarray((w0 * stacked[0] + w1 * stacked[1]) / (w0 + w1), dtype=np.float32)
+
+    med = np.median(stacked, axis=0).astype(np.float32, copy=False)
     weights = np.empty_like(stacked, dtype=np.float32)
     for idx in range(stacked.shape[0]):
         dev = gaussian_filter(np.abs(stacked[idx] - med), sigma=1.0, mode="reflect")
-        weights[idx] = 1.0 / ((dev + 1e-4) ** 2)
+        weights[idx] = 1.0 / ((dev + np.float32(1e-4)) ** 2)
     w_sum = np.sum(weights, axis=0, dtype=np.float32)
     return np.asarray(np.sum(weights * stacked, axis=0, dtype=np.float32) / w_sum, dtype=np.float32)
+
+
+def _outlier_suppressed_fourier_fuse(
+    items: list[tuple[AxisName, np.ndarray]],
+    ref_shape: tuple[int, ...],
+    psf_cutoff: float | None = None,
+) -> np.ndarray:
+    """Outlier-clamped directional Fourier synthesis (suppresses single-axis defects without stacking noise).
+
+    Instead of blending spatial consensus directly into high-contrast pore walls (which re-injects
+    slice-stacking jitter wherever ``sigma_ortho`` rises), each single-axis sweep is Winsorized
+    toward the perpendicular-axes consensus wherever the remaining axes agree tightly, and the
+    cleaned sweeps are then synthesized via directional 3D Fourier fusion.
+    """
+    v_conf = _confidence_consensus_fuse(items)
+    if len(items) < 3:
+        v_four = _fourier_directional_fuse(items, ref_shape, psf_cutoff=psf_cutoff)
+        return np.asarray(0.5 * (v_conf + v_four), dtype=np.float32)
+
+    cleaned_items: list[tuple[AxisName, np.ndarray]] = []
+    n_axes = len(items)
+    for idx, (ax, v_ax) in enumerate(items):
+        others = [items[j][1] for j in range(n_axes) if j != idx]
+        other_spread = np.ptp(np.stack(others, axis=0), axis=0).astype(np.float32)
+        # Tolerance scales with perpendicular-axes spread; when perpendicular axes agree (spread ~ 0),
+        # isolated out-of-plane blur or corruption on v_ax is pulled cleanly to v_conf.
+        tol = 1.25 * other_spread + np.float32(0.015)
+        v_clean = v_conf + np.clip(v_ax - v_conf, -tol, tol)
+        cleaned_items.append((ax, v_clean.astype(np.float32, copy=False)))
+
+    return _fourier_directional_fuse(cleaned_items, ref_shape, psf_cutoff=psf_cutoff)
 
 
 def fuse_orthogonal_volumes(
@@ -219,19 +273,7 @@ def fuse_orthogonal_volumes(
     clamp_01: bool = True,
     psf_cutoff: float | None = None,
 ) -> np.ndarray:
-    """Fuse aligned single-axis 3D super-resolved volumes into an isotropic 3D reconstruction.
-
-    Supported fusion modes:
-    - ``'mean'``: Equal-weight voxel-wise average across provided axes.
-    - ``'median'``: Voxel-wise median (robust against isolated slice artifacts).
-    - ``'fourier'``: 3D Fourier-space directional fusion weighting each single-axis
-      reconstruction by its in-plane spatial frequencies (and optional OTF ``psf_cutoff``).
-    - ``'confidence'``: Inverse-disagreement local consensus weighting that suppresses the
-      out-of-plane blurred axis when the two perpendicular axes agree on a sharp throat.
-    - ``'confidence_fourier'``: Hybrid spectral-consensus fusion applying directional 3D
-      Fourier synthesis in high-agreement bulk regions while transitioning smoothly to
-      outlier-resistant consensus where inter-axis epistemic uncertainty ``sigma_ortho`` spikes.
-    """
+    """Fuse aligned single-axis 3D super-resolved volumes into an isotropic 3D reconstruction."""
     if not volumes:
         raise ValueError("At least one orthogonal volume is required for fusion.")
 
@@ -257,15 +299,9 @@ def fuse_orthogonal_volumes(
     elif mode == "fourier":
         out = _fourier_directional_fuse(items, ref_shape, psf_cutoff=psf_cutoff)
     elif mode == "confidence":
-        stacked = np.stack([v for _, v in items], axis=0)
-        out = _confidence_consensus_fuse(stacked)
+        out = _confidence_consensus_fuse(items)
     elif mode == "confidence_fourier":
-        stacked = np.stack([v for _, v in items], axis=0)
-        v_fourier = _fourier_directional_fuse(items, ref_shape, psf_cutoff=psf_cutoff)
-        v_conf = _confidence_consensus_fuse(stacked)
-        sigma = np.std(stacked, axis=0, ddof=1, dtype=np.float32)
-        alpha = np.clip(sigma / 0.08, 0.0, 1.0)
-        out = ((1.0 - alpha) * v_fourier + alpha * v_conf).astype(np.float32)
+        out = _outlier_suppressed_fourier_fuse(items, ref_shape, psf_cutoff=psf_cutoff)
     else:
         raise ValueError(
             f"Unsupported fusion mode={mode!r}. Expected 'mean', 'median', 'fourier', "

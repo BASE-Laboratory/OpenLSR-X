@@ -8,8 +8,9 @@ import cv2
 import numpy as np
 import torch
 import torch.nn.functional as F
-from scipy.ndimage import zoom
 from torch import Tensor
+
+from openlsrx.data.transforms import sanitize_xct_volume, zoom_cell_centered
 
 Interp2DMode = Literal["nearest", "bilinear", "bicubic", "lanczos4"]
 Interp3DMode = Literal["nearest", "trilinear", "tricubic"]
@@ -17,12 +18,12 @@ Interp3DMode = Literal["nearest", "trilinear", "tricubic"]
 
 def upsample_2d(
     low_res: Tensor | np.ndarray,
-    scale_factor: int = 2,
+    scale_factor: float = 2,
     mode: Interp2DMode = "bicubic",
     clamp_01: bool = True,
 ) -> np.ndarray:
     """Upsample a 2D image ``(H, W)`` or stack of 2D slices ``(N, H, W)`` by ``scale_factor``."""
-    arr = np.asarray(low_res, dtype=np.float32)
+    arr = sanitize_xct_volume(np.asarray(low_res, dtype=np.float32))
     single = arr.ndim == 2
     if single:
         arr = arr[np.newaxis, ...]
@@ -30,7 +31,8 @@ def upsample_2d(
         raise ValueError(f"Expected 2D (H, W) or 3D (N, H, W) slice stack, got shape {arr.shape}.")
 
     n, h, w = arr.shape
-    out_h, out_w = h * scale_factor, w * scale_factor
+    out_h = max(1, int(round(h * float(scale_factor))))
+    out_w = max(1, int(round(w * float(scale_factor))))
 
     out: np.ndarray
     if mode == "lanczos4":
@@ -55,24 +57,33 @@ def upsample_2d(
 
 def upsample_3d(
     low_volume: Tensor | np.ndarray,
-    scale_factors: int | tuple[int, int, int] = 2,
+    scale_factors: float | tuple[float, float, float] = 2,
     mode: Interp3DMode = "trilinear",
     clamp_01: bool = True,
 ) -> np.ndarray:
-    """Upsample a 3D volume ``(D, H, W)`` isotropically or anisotropically."""
-    arr = np.asarray(low_volume, dtype=np.float32)
+    """Upsample a 3D volume ``(D, H, W)`` isotropically or anisotropically with cell-centered alignment."""
+    arr = sanitize_xct_volume(np.asarray(low_volume, dtype=np.float32))
     if arr.ndim != 3:
         raise ValueError(f"Expected 3D volume (D, H, W), got shape {arr.shape}.")
 
     factors = (
-        (scale_factors, scale_factors, scale_factors)
-        if isinstance(scale_factors, int)
-        else tuple(int(s) for s in scale_factors)
+        (float(scale_factors), float(scale_factors), float(scale_factors))
+        if isinstance(scale_factors, (int, float))
+        else tuple(float(s) for s in scale_factors)
     )
-    out_shape = (arr.shape[0] * factors[0], arr.shape[1] * factors[1], arr.shape[2] * factors[2])
+    out_shape = (
+        max(1, int(round(arr.shape[0] * factors[0]))),
+        max(1, int(round(arr.shape[1] * factors[1]))),
+        max(1, int(round(arr.shape[2] * factors[2]))),
+    )
 
     if mode == "tricubic":
-        out = zoom(arr, zoom=factors, order=3, mode="reflect").astype(np.float32, copy=False)
+        eff_zoom = (
+            out_shape[0] / float(arr.shape[0]),
+            out_shape[1] / float(arr.shape[1]),
+            out_shape[2] / float(arr.shape[2]),
+        )
+        out = zoom_cell_centered(arr, zoom_factors=eff_zoom, order=3)
     elif mode in ("nearest", "trilinear"):
         t = torch.from_numpy(arr).unsqueeze(0).unsqueeze(0)
         align = None if mode == "nearest" else False

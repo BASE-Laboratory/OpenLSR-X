@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytorch_lightning as pl
 import tifffile
+import torch
+from pytorch_lightning.callbacks import ModelCheckpoint
 
 from openlsrx.baselines import upsample_3d
 from openlsrx.data import FeatureRegime, NoiseRegime, SyntheticPoreSpyDataModule
@@ -73,17 +75,33 @@ def _train_model(
         output_dir=str(work_dir),
         save_val_images=False,
     )
+    use_ckpt = epochs > 10
+    ckpt_cb: ModelCheckpoint | None = None
+    callbacks: list[pl.Callback] = []
+    if use_ckpt:
+        ckpt_cb = ModelCheckpoint(
+            dirpath=str(work_dir / "checkpoints"),
+            filename="best",
+            monitor="val/psnr",
+            mode="max",
+            save_top_k=1,
+        )
+        callbacks.append(ckpt_cb)
     trainer = pl.Trainer(
         default_root_dir=str(work_dir),
         max_epochs=epochs,
         accelerator="auto",
         devices=1,
         logger=False,
-        enable_checkpointing=False,
+        enable_checkpointing=use_ckpt,
+        callbacks=callbacks,
         enable_progress_bar=False,
         enable_model_summary=False,
     )
     trainer.fit(model, datamodule=dm)
+    if ckpt_cb is not None and ckpt_cb.best_model_path:
+        ckpt = torch.load(ckpt_cb.best_model_path, map_location=model.device, weights_only=False)
+        model.load_state_dict(ckpt["state_dict"], strict=False)
     return model
 
 

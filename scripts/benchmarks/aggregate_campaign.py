@@ -61,16 +61,21 @@ def aggregate_csv_files(csv_paths: list[Path], output_dir: Path) -> dict[str, ob
     if not csv_paths:
         raise FileNotFoundError("No *_results.csv files found in provided input paths.")
 
-    # Group by (dataset_or_regime, method) -> metric -> list[float]
+    # Group by (dataset_or_regime, method) -> metric -> list[float], plus total row count & provenance
     grouped: dict[tuple[str, str], dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    row_counts: dict[tuple[str, str], int] = defaultdict(int)
+    source_kinds: dict[tuple[str, str], set[str]] = defaultdict(set)
     for p in csv_paths:
         with p.open("r", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
                 ds_key = str(row.get("dataset") or row.get("regime") or p.stem)
                 method = str(row.get("method", "unknown"))
+                row_counts[(ds_key, method)] += 1
+                if row.get("source_kind"):
+                    source_kinds[(ds_key, method)].add(str(row["source_kind"]))
                 for k, v in row.items():
-                    if k in ("dataset", "regime", "pair", "method", "seed"):
+                    if k in ("dataset", "regime", "pair", "method", "seed", "source_kind"):
                         continue
                     fv = _parse_float(v)
                     if fv is not None:
@@ -78,15 +83,24 @@ def aggregate_csv_files(csv_paths: list[Path], output_dir: Path) -> dict[str, ob
 
     summary_records: list[dict[str, object]] = []
     for (ds_key, method), metric_map in sorted(grouped.items()):
+        total_rows = int(row_counts[(ds_key, method)])
         rec: dict[str, object] = {
             "dataset": ds_key,
             "method": method,
-            "n_seeds": max((len(vals) for vals in metric_map.values()), default=0),
+            "n_seeds": total_rows,
+            "source_kinds": sorted(source_kinds.get((ds_key, method), {"synthetic"})),
         }
         for m_key, vals in sorted(metric_map.items()):
             arr = np.asarray(vals, dtype=np.float64)
+            ddof = 1 if arr.size >= 2 else 0
             rec[f"{m_key}_mean"] = float(np.mean(arr))
-            rec[f"{m_key}_std"] = float(np.std(arr, ddof=0))
+            rec[f"{m_key}_std"] = float(np.std(arr, ddof=ddof))
+            rec[f"{m_key}_n_valid"] = int(arr.size)
+        if "pred_tortuosity_mean" in metric_map or "tortuosity_mae" in metric_map:
+            n_perc = len(
+                metric_map.get("pred_tortuosity_mean", metric_map.get("tortuosity_mae", []))
+            )
+            rec["n_percolating_seeds"] = int(n_perc)
         summary_records.append(rec)
 
     # 1) JSON summary
@@ -114,11 +128,15 @@ def aggregate_csv_files(csv_paths: list[Path], output_dir: Path) -> dict[str, ob
         for m, _, _ in active_metrics:
             mean_v = rec.get(f"{m}_mean")
             std_v = rec.get(f"{m}_std")
+            n_val = rec.get(f"{m}_n_valid", n_seeds)
             if isinstance(mean_v, float) and isinstance(std_v, float):
-                if n_seeds > 1:
-                    cells.append(f"{mean_v:.4f} ± {std_v:.4f}")
+                suffix = (
+                    f" ({n_val}/{n_seeds})" if isinstance(n_val, int) and n_val < n_seeds else ""
+                )
+                if isinstance(n_val, int) and n_val > 1:
+                    cells.append(f"{mean_v:.4f} ± {std_v:.4f}{suffix}")
                 else:
-                    cells.append(f"{mean_v:.4f}")
+                    cells.append(f"{mean_v:.4f}{suffix}")
             else:
                 cells.append("—")
         md_lines.append(

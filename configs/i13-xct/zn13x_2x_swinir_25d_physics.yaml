@@ -44,7 +44,7 @@ data:
     train_frac: 0.70
     val_frac: 0.15
     guard_slices_lr: 1
-    train_axes: ["yz"]
+    train_axes: ["yz", "xz", "xy"]
     test_axis: perpendicular
     predict_axis: xy
     patch_size_lr: 32

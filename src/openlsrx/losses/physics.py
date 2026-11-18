@@ -2,9 +2,11 @@
 
 Replaces or complements RGB ImageNet VGG perceptual priors with domain invariants:
 1. ``AttenuationConservationLoss``: Coarse-voxel X-ray linear attenuation conservation under
-   scale-matched optical PSF + area/volume downsampling (supports 2D, 2.5D, and 3D).
+   scale-matched optical PSF + area/volume downsampling (supports 2D, 2.5D through-plane
+   Laplacian z-PSF correction, and 3D).
 2. ``SoftCLDiceLoss``: Differentiable soft-skeleton topological connectivity loss penalizing
-   pinched pore throats and spurious isolated pores (adapted from Shit et al., CVPR 2021).
+   pinched pore throats and spurious isolated pores (adapted from Shit et al., CVPR 2021),
+   with bimodal quantile thresholding and single-phase homogeneity gating.
 3. ``SobelGradientLoss``: 2D/3D interfacial edge sharpness preservation across phase boundaries.
 4. ``FocalFrequencyLoss``: Adaptive spectral loss weighting poorly recovered high wavenumbers
    in 2D/3D Fourier space (adapted from Jiang et al., ICCV 2021).
@@ -26,8 +28,13 @@ def _gaussian_kernel_1d(sigma: float, device: torch.device, dtype: torch.dtype) 
     return kernel / kernel.sum()
 
 
+def _safe_pad_1d(x: Tensor, pad_tuple: tuple[int, ...], dim_size: int, r: int) -> Tensor:
+    mode = "reflect" if (dim_size > r and dim_size > 1) else "replicate"
+    return F.pad(x, pad_tuple, mode=mode)
+
+
 def _apply_separable_gaussian(x: Tensor, sigma: float) -> Tensor:
-    """Apply reflect-padded separable Gaussian blur to a 4D (2D) or 5D (3D) single-channel tensor."""
+    """Apply reflect/replicate-padded separable Gaussian blur to a 4D (2D) or 5D (3D) tensor."""
     if sigma <= 0.0:
         return x
     k1d = _gaussian_kernel_1d(sigma, device=x.device, dtype=x.dtype)
@@ -36,29 +43,33 @@ def _apply_separable_gaussian(x: Tensor, sigma: float) -> Tensor:
     if x.ndim == 4:
         kh = k1d.view(1, 1, -1, 1).expand(c, 1, -1, 1)
         kw = k1d.view(1, 1, 1, -1).expand(c, 1, 1, -1)
-        out = F.pad(x, (0, 0, r, r), mode="reflect")
+        out = _safe_pad_1d(x, (0, 0, r, r), int(x.shape[2]), r)
         out = F.conv2d(out, kh, groups=c)
-        out = F.pad(out, (r, r, 0, 0), mode="reflect")
+        out = _safe_pad_1d(out, (r, r, 0, 0), int(out.shape[3]), r)
         return F.conv2d(out, kw, groups=c)
     if x.ndim == 5:
         kd = k1d.view(1, 1, -1, 1, 1).expand(c, 1, -1, 1, 1)
         kh = k1d.view(1, 1, 1, -1, 1).expand(c, 1, 1, -1, 1)
         kw = k1d.view(1, 1, 1, 1, -1).expand(c, 1, 1, 1, -1)
-        out = F.pad(x, (0, 0, 0, 0, r, r), mode="reflect")
+        out = _safe_pad_1d(x, (0, 0, 0, 0, r, r), int(x.shape[2]), r)
         out = F.conv3d(out, kd, groups=c)
-        out = F.pad(out, (0, 0, r, r, 0, 0), mode="reflect")
+        out = _safe_pad_1d(out, (0, 0, r, r, 0, 0), int(out.shape[3]), r)
         out = F.conv3d(out, kh, groups=c)
-        out = F.pad(out, (r, r, 0, 0, 0, 0), mode="reflect")
+        out = _safe_pad_1d(out, (r, r, 0, 0, 0, 0), int(out.shape[4]), r)
         return F.conv3d(out, kw, groups=c)
     raise ValueError(f"Expected 4D or 5D tensor, got shape {tuple(x.shape)}.")
 
 
 class AttenuationConservationLoss(nn.Module):
-    """Enforces physical X-ray linear attenuation conservation between HR predictions and LR inputs.
+    """Enforces linear-attenuation (``mu``) downsampling consistency between HR predictions and LR inputs.
 
-    In absorption micro-CT, coarse voxel attenuation equals the spatial integral (mean) of
-    sub-voxel attenuation convolved with the detector/scintillator point-spread function.
-    Automatically selects the central context slice when ``low_res`` has ``2k + 1`` channels.
+    In reconstructed absorption micro-CT, coarse voxel linear attenuation approximates the spatial
+    average of sub-voxel linear attenuation convolved with the system point-spread function (assuming
+    joint intensity calibration between LR and HR). When ``low_res`` provides ``2.5D`` multi-slice
+    context (``C >= 3`` sampled at unit native-LR spacing ``+-Delta z_LR``) and ``psf_sigma > 0``,
+    incorporates the leading-order through-plane ``z``-PSF curvature term
+    ``0.5 * sigma_{z,LR}^2 * d^2 mu / dz_{LR}^2`` so horizontal phase boundaries are not biased
+    toward out-of-plane partial-volume blur.
     """
 
     def __init__(
@@ -72,14 +83,30 @@ class AttenuationConservationLoss(nn.Module):
 
     def forward(self, pred_hr: Tensor, low_res: Tensor) -> Tensor:
         pred_f32 = pred_hr.to(torch.float32)
-        lr_f32 = low_res.to(torch.float32)
-        if lr_f32.shape[1] != pred_f32.shape[1]:
-            mid = lr_f32.shape[1] // 2
-            lr_f32 = lr_f32[:, mid : mid + pred_f32.shape[1]]
+        lr_full = low_res.to(torch.float32)
+
+        z_correction: Tensor | None = None
+        if lr_full.shape[1] != pred_f32.shape[1]:
+            mid = lr_full.shape[1] // 2
+            lr_f32 = lr_full[:, mid : mid + pred_f32.shape[1]]
+            if pred_f32.ndim == 4 and lr_full.shape[1] >= 3 and self.psf_sigma > 0.0:
+                scale_est = max(1.0, float(pred_f32.shape[-1]) / max(float(lr_full.shape[-1]), 1.0))
+                sigma_lr_z = self.psf_sigma / scale_est
+                lap_z = (
+                    lr_full[:, mid - 1 : mid]
+                    - 2.0 * lr_full[:, mid : mid + 1]
+                    + lr_full[:, mid + 1 : mid + 2]
+                )
+                z_correction = 0.5 * (sigma_lr_z**2) * lap_z
+        else:
+            lr_f32 = lr_full
 
         blurred = _apply_separable_gaussian(pred_f32, self.psf_sigma)
         target_size = lr_f32.shape[2:]
         downsampled = F.interpolate(blurred, size=target_size, mode="area")
+        if z_correction is not None:
+            downsampled = downsampled + z_correction
+
         if self.reduction_norm == "mse":
             return F.mse_loss(downsampled, lr_f32)
         return F.l1_loss(downsampled, lr_f32)
@@ -124,9 +151,9 @@ def soft_skeletonize(img: Tensor, num_iter: int = 5) -> Tensor:
 class SoftCLDiceLoss(nn.Module):
     """Differentiable centerline-Dice (soft-clDice) pore-throat connectivity loss for XCT.
 
-    Maps continuous greyscale reconstructions ``[0, 1]`` to differentiable soft pore masks
-    via temperature-scaled sigmoid around a sample-adaptive (or fixed) threshold, extracts
-    medial pore-throat skeletons, and penalizes broken throats or isolated false pores.
+    Uses a bimodal quantile midpoint ``0.5 * (Q_20 + Q_80)`` when ``threshold=None`` and gates
+    out single-phase homogeneous patches (dynamic range ``< min_phase_contrast``) so pure solid
+    grains or pure macro-pores never have acquisition noise amplified into fake skeletons.
     """
 
     def __init__(
@@ -135,6 +162,7 @@ class SoftCLDiceLoss(nn.Module):
         temperature: float = 15.0,
         pore_is_low: bool = True,
         threshold: float | None = None,
+        min_phase_contrast: float = 0.08,
         smooth: float = 1e-4,
     ) -> None:
         super().__init__()
@@ -142,6 +170,7 @@ class SoftCLDiceLoss(nn.Module):
         self.temperature = float(temperature)
         self.pore_is_low = bool(pore_is_low)
         self.threshold = float(threshold) if threshold is not None else None
+        self.min_phase_contrast = float(min_phase_contrast)
         self.smooth = float(smooth)
 
     def _to_soft_pore_prob(self, x: Tensor, thr: Tensor) -> Tensor:
@@ -153,10 +182,23 @@ class SoftCLDiceLoss(nn.Module):
         true_f32 = target_hr.to(torch.float32)
 
         spatial_dims = tuple(range(2, true_f32.ndim))
+        b, c = true_f32.shape[0], true_f32.shape[1]
+        flat_true = true_f32.detach().reshape(b, c, -1)
+        dyn_range = flat_true.amax(dim=-1) - flat_true.amin(dim=-1)  # (B, C)
+
         if self.threshold is not None:
             thr = torch.full_like(true_f32.mean(dim=spatial_dims, keepdim=True), self.threshold)
+            active_mask = torch.ones((b, c), device=pred_f32.device, dtype=torch.float32)
         else:
-            thr = true_f32.detach().mean(dim=spatial_dims, keepdim=True)
+            q20 = torch.quantile(flat_true, 0.20, dim=-1)
+            q80 = torch.quantile(flat_true, 0.80, dim=-1)
+            mid_q = 0.5 * (q20 + q80)
+            view_shape = (b, c) + (1,) * len(spatial_dims)
+            thr = mid_q.reshape(view_shape)
+            active_mask = (dyn_range >= self.min_phase_contrast).to(torch.float32)
+
+        if float(active_mask.sum().item()) == 0.0:
+            return pred_f32.sum() * 0.0
 
         p_pred = self._to_soft_pore_prob(pred_f32, thr)
         p_true = self._to_soft_pore_prob(true_f32, thr)
@@ -171,7 +213,8 @@ class SoftCLDiceLoss(nn.Module):
             skel_true.sum(dim=spatial_dims) + self.smooth
         )
         cl_dice = (2.0 * t_prec * t_sens) / (t_prec + t_sens + self.smooth)
-        return (1.0 - cl_dice).mean()
+        per_sample = (1.0 - cl_dice) * active_mask
+        return per_sample.sum() / active_mask.sum().clamp_min(1.0)
 
 
 class SobelGradientLoss(nn.Module):
@@ -184,6 +227,8 @@ class SobelGradientLoss(nn.Module):
     def _spatial_gradients(x: Tensor) -> list[Tensor]:
         grads: list[Tensor] = []
         for dim in range(2, x.ndim):
+            if x.shape[dim] < 2:
+                continue
             sl_hi = [slice(None)] * x.ndim
             sl_lo = [slice(None)] * x.ndim
             sl_hi[dim] = slice(1, None)
@@ -194,6 +239,8 @@ class SobelGradientLoss(nn.Module):
     def forward(self, pred_hr: Tensor, target_hr: Tensor) -> Tensor:
         pred_grads = self._spatial_gradients(pred_hr.to(torch.float32))
         true_grads = self._spatial_gradients(target_hr.to(torch.float32))
+        if not pred_grads:
+            return pred_hr.to(torch.float32).sum() * 0.0
         losses = [F.l1_loss(pg, tg) for pg, tg in zip(pred_grads, true_grads, strict=True)]
         return torch.stack(losses).mean()
 

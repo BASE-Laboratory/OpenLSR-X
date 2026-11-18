@@ -16,6 +16,34 @@ OutputActivation = Literal["custom_sigmoid", "sigmoid", "clamp", "identity"]
 DEFAULT_DISC_FEATURES: tuple[int, ...] = (64, 64, 128, 128, 256, 256, 512, 512)
 
 
+def apply_bounded_output(
+    x: Tensor,
+    activation: OutputActivation,
+    sigmoid_k: float = 1.0,
+    training: bool = False,
+    base: Tensor | None = None,
+) -> Tensor:
+    """Apply generator output activation with straight-through clamping and skip-aware logits."""
+    if activation == "identity":
+        return (base + x) if base is not None else x
+    if activation == "clamp":
+        raw = (base + x) if base is not None else x
+        clamped = torch.clamp(raw, 0.0, 1.0)
+        return (raw + (clamped - raw).detach()) if training else clamped
+    if activation == "sigmoid":
+        if base is not None:
+            base_logit = torch.logit(torch.clamp(base, 1e-4, 1.0 - 1e-4))
+            return torch.sigmoid(base_logit + x)
+        return torch.sigmoid(x)
+    if activation == "custom_sigmoid":
+        k = max(float(sigmoid_k), 1e-6)
+        if base is not None:
+            base_logit = torch.logit(torch.clamp(base, 1e-4, 1.0 - 1e-4)) / k
+            return custom_sigmoid(base_logit + x, k=k)
+        return custom_sigmoid(x, k=k)
+    raise ValueError(f"Unsupported output_activation={activation!r}.")
+
+
 class Generator(nn.Module):
     """SRResNet / SRGAN Generator adapted for single-channel XCT data with reflect padding."""
 
@@ -95,22 +123,18 @@ class Generator(nn.Module):
             use_act=False,
         )
 
-    def _apply_output_activation(self, x: Tensor) -> Tensor:
-        if self.output_activation == "custom_sigmoid":
-            return custom_sigmoid(x, k=self.sigmoid_k)
-        if self.output_activation == "sigmoid":
-            return torch.sigmoid(x)
-        if self.output_activation == "clamp":
-            return torch.clamp(x, 0.0, 1.0)
-        return x
-
     def forward(self, x: Tensor) -> Tensor:
         initial = self.initial(x)
         out = self.res_blocks(initial)
         out = self.last_res(out) + initial
         out = self.upsample(out)
         out = self.final_conv(out)
-        return self._apply_output_activation(out)
+        return apply_bounded_output(
+            out,
+            activation=self.output_activation,
+            sigmoid_k=self.sigmoid_k,
+            training=self.training,
+        )
 
 
 class Discriminator(nn.Module):

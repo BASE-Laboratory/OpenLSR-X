@@ -201,7 +201,7 @@ def test_zn13x_registration_h5_extraction_and_cli_download(tmp_path: Path) -> No
     # CLI download-benchmarks for zn13x_2x and zn13x_8x (offline fallback / cache)
     bench_dir = tmp_path / "benchmarks"
     lr_8x, hr_8x, man_8x = prepare_zn13x_benchmark(
-        pair="8x", dest_dir=bench_dir, tier="full", lr_size=10, seed=5
+        pair="8x", dest_dir=bench_dir, tier="full", lr_size=10, prefer_offline=True, seed=5
     )
     assert lr_8x.is_file() and hr_8x.is_file()
     assert man_8x["scale_factor"] == 8
@@ -216,6 +216,7 @@ def test_zn13x_registration_h5_extraction_and_cli_download(tmp_path: Path) -> No
                 str(bench_dir),
                 "--size",
                 "16",
+                "--offline",
             ]
         )
     assert exc_dl.value.code == 0
@@ -238,7 +239,7 @@ def test_rrdb_arbitrary_scale_ragan_and_sr3d_end_to_end(tmp_path: Path) -> None:
 
     # 2) End-to-end RRDB + RaGAN Lightning fit (warmup epoch 0 + active RaGAN epoch 1)
     lr_p, hr_p, _ = prepare_zn13x_benchmark(
-        pair="2x", dest_dir=tmp_path / "zn", tier="full", lr_size=16, seed=9
+        pair="2x", dest_dir=tmp_path / "zn", tier="full", lr_size=16, prefer_offline=True, seed=9
     )
     dm = PairedVolumeDataModule(
         low_path=str(lr_p),

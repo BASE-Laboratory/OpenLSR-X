@@ -12,7 +12,7 @@ trainer:
 
 model:
   learning_rate: 1.0e-5
-  adaptive_size: 40
+  adaptive_size: 8
   accumulate_n_batches: 1
   super_res_factor: 2
   num_blocks: 10
@@ -32,8 +32,8 @@ data:
     norm_mode: fixed
     low_vmin: -5.23e-4
     low_vmax: 1.11e-3
-    high_vmin: -2.50e-4
-    high_vmax: 6.79e-4
+    high_vmin: -5.23e-4
+    high_vmax: 1.11e-3
     low_z_range: [845, 1485]
     low_y_range: [1010, 1650]
     low_x_range: [858, 1498]

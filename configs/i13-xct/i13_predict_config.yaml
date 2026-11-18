@@ -9,7 +9,7 @@ trainer:
 
 model:
   learning_rate: 1.0e-5
-  adaptive_size: 40
+  adaptive_size: 8
   super_res_factor: 2
   num_blocks: 10
   sample_id: Zn13X
@@ -28,6 +28,8 @@ data:
     low_y_range: [1010, 1650]
     low_x_range: [858, 1498]
     predict_axis: xy
+    predict_mode: orthogonal_3axis
+    predict_fusion: confidence_fourier
     eval_batch_size: 2
     num_workers: 0
     seed: 42

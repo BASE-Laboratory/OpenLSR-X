@@ -19,20 +19,53 @@ from torch.utils.data import DataLoader, Dataset
 from ..metrics import compute_mae, compute_psnr, compute_rmse, compute_ssim_3d_isotropic
 
 
+def _safe_conv3d(conv: nn.Conv3d, x: Tensor) -> Tensor:
+    """Apply ``conv`` falling back from ``reflect`` to ``replicate`` when ``min(D, H, W) <= pad``."""
+    if conv.padding_mode == "reflect" and isinstance(conv.padding, tuple):
+        pd, ph, pw = int(conv.padding[0]), int(conv.padding[1]), int(conv.padding[2])
+        if (pd > 0 or ph > 0 or pw > 0) and (
+            x.shape[2] <= pd or x.shape[3] <= ph or x.shape[4] <= pw
+        ):
+            x_pad = F.pad(x, (pw, pw, ph, ph, pd, pd), mode="replicate")
+            return F.conv3d(
+                x_pad,
+                conv.weight,
+                conv.bias,
+                stride=conv.stride,
+                padding=0,
+                dilation=conv.dilation,
+                groups=conv.groups,
+            )
+    return conv(x)
+
+
+class _SafeReflectConv3d(nn.Module):
+    """Thin-slab-safe 3D convolution wrapper preserving exact ``Conv3d`` parameter layout."""
+
+    def __init__(self, in_ch: int, out_ch: int, kernel_size: int = 3, padding: int = 1) -> None:
+        super().__init__()
+        self.conv = nn.Conv3d(
+            in_ch, out_ch, kernel_size=kernel_size, padding=padding, padding_mode="reflect"
+        )
+
+    def forward(self, x: Tensor) -> Tensor:
+        return _safe_conv3d(self.conv, x)
+
+
 class ResidualBlock3D(nn.Module):
     """3D reflect-padded residual block without batch normalization."""
 
     def __init__(self, channels: int = 32, res_scale: float = 0.2) -> None:
         super().__init__()
         self.res_scale = float(res_scale)
-        self.block = nn.Sequential(
-            nn.Conv3d(channels, channels, kernel_size=3, padding=1, padding_mode="reflect"),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv3d(channels, channels, kernel_size=3, padding=1, padding_mode="reflect"),
-        )
+        self.conv1 = nn.Conv3d(channels, channels, kernel_size=3, padding=1, padding_mode="reflect")
+        self.act = nn.LeakyReLU(0.2, inplace=True)
+        self.conv2 = nn.Conv3d(channels, channels, kernel_size=3, padding=1, padding_mode="reflect")
 
     def forward(self, x: Tensor) -> Tensor:
-        return x + self.res_scale * self.block(x)
+        h = self.act(_safe_conv3d(self.conv1, x))
+        h = _safe_conv3d(self.conv2, h)
+        return x + self.res_scale * h
 
 
 class Generator3D(nn.Module):
@@ -71,12 +104,8 @@ class Generator3D(nn.Module):
             up_layers.extend(
                 [
                     nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False),
-                    nn.Conv3d(
-                        self.out_channels,
-                        self.out_channels,
-                        kernel_size=3,
-                        padding=1,
-                        padding_mode="reflect",
+                    _SafeReflectConv3d(
+                        self.out_channels, self.out_channels, kernel_size=3, padding=1
                     ),
                     nn.LeakyReLU(0.2, inplace=True),
                 ]
@@ -95,14 +124,15 @@ class Generator3D(nn.Module):
             mode="trilinear",
             align_corners=False,
         )
-        feat = self.conv_first(x)
-        feat = feat + self.trunk_conv(self.trunk(feat))
-        out = base + self.conv_last(self.upsample(feat))
-        return torch.clamp(out, 0.0, 1.0)
+        feat = _safe_conv3d(self.conv_first, x)
+        feat = feat + _safe_conv3d(self.trunk_conv, self.trunk(feat))
+        out = base + _safe_conv3d(self.conv_last, self.upsample(feat))
+        clamped = torch.clamp(out, 0.0, 1.0)
+        return out + (clamped - out).detach() if self.training else clamped
 
 
 class PairedSubCubeDataset(Dataset[tuple[Tensor, Tensor]]):
-    """Random/grid 3D sub-cube sampler for training ``SR3DResNet`` on paired 3D slabs."""
+    """Random/grid 3D sub-cube sampler with full 3D octahedral ($O_h$) symmetry augmentation."""
 
     def __init__(
         self,
@@ -112,6 +142,7 @@ class PairedSubCubeDataset(Dataset[tuple[Tensor, Tensor]]):
         patch_size_lr: int = 16,
         samples_per_epoch: int = 32,
         deterministic: bool = False,
+        augment: bool = True,
         seed: int = 42,
     ) -> None:
         self.lr_vol = np.asarray(lr_vol, dtype=np.float32)
@@ -120,6 +151,7 @@ class PairedSubCubeDataset(Dataset[tuple[Tensor, Tensor]]):
         self.patch_size_lr = tuple(min(int(patch_size_lr), s) for s in self.lr_vol.shape)
         self.samples_per_epoch = int(samples_per_epoch)
         self.deterministic = bool(deterministic)
+        self.augment = bool(augment) and not self.deterministic
         self.rng = np.random.default_rng(seed)
 
     def __len__(self) -> int:
@@ -145,9 +177,26 @@ class PairedSubCubeDataset(Dataset[tuple[Tensor, Tensor]]):
             y0 * s : (y0 + ph) * s,
             x0 * s : (x0 + pw) * s,
         ]
+
+        if self.augment:
+            # 1) Independent 3D reflections along (Z, Y, X)
+            for ax in range(3):
+                if bool(self.rng.integers(0, 2)):
+                    lr_patch = np.flip(lr_patch, axis=ax)
+                    hr_patch = np.flip(hr_patch, axis=ax)
+            # 2) Shape-preserving 3D axis permutations (full 48-element O_h group on cubic patches)
+            if pd == ph == pw:
+                perm = tuple(int(a) for a in self.rng.permutation(3))
+                if perm != (0, 1, 2):
+                    lr_patch = np.transpose(lr_patch, axes=perm)
+                    hr_patch = np.transpose(hr_patch, axes=perm)
+            elif ph == pw and bool(self.rng.integers(0, 2)):
+                lr_patch = np.swapaxes(lr_patch, 1, 2)
+                hr_patch = np.swapaxes(hr_patch, 1, 2)
+
         return (
-            torch.from_numpy(lr_patch.copy()).unsqueeze(0),
-            torch.from_numpy(hr_patch.copy()).unsqueeze(0),
+            torch.from_numpy(np.ascontiguousarray(lr_patch, dtype=np.float32)).unsqueeze(0),
+            torch.from_numpy(np.ascontiguousarray(hr_patch, dtype=np.float32)).unsqueeze(0),
         )
 
 
@@ -161,6 +210,7 @@ def build_3d_subcube_dataloaders(
     train_samples: int = 32,
     val_samples: int = 8,
     batch_size: int = 2,
+    augment: bool = True,
     seed: int = 42,
 ) -> tuple[DataLoader[tuple[Tensor, Tensor]], DataLoader[tuple[Tensor, Tensor]]]:
     """Build train and validation 3D sub-cube DataLoaders from disjoint 3D slabs."""
@@ -171,6 +221,7 @@ def build_3d_subcube_dataloaders(
         patch_size_lr=patch_size_lr,
         samples_per_epoch=train_samples,
         deterministic=False,
+        augment=augment,
         seed=seed,
     )
     va_ds = PairedSubCubeDataset(
@@ -180,6 +231,7 @@ def build_3d_subcube_dataloaders(
         patch_size_lr=patch_size_lr,
         samples_per_epoch=val_samples,
         deterministic=True,
+        augment=False,
         seed=seed,
     )
     return (
@@ -198,6 +250,7 @@ class SR3DResNet(pl.LightningModule):
         out_channels: int = 24,
         num_blocks: int = 4,
         loss_type: Literal["l1", "mse"] = "l1",
+        pore_is_low: bool = True,
         conservation_loss_weight: float = 0.0,
         topology_loss_weight: float = 0.0,
         gradient_loss_weight: float = 0.0,
@@ -207,6 +260,7 @@ class SR3DResNet(pl.LightningModule):
         self.save_hyperparameters()
         self.learning_rate = float(learning_rate)
         self.super_res_factor = int(super_res_factor)
+        self.pore_is_low = bool(pore_is_low)
         self.conservation_loss_weight = float(conservation_loss_weight)
         self.topology_loss_weight = float(topology_loss_weight)
         self.gradient_loss_weight = float(gradient_loss_weight)
@@ -226,7 +280,7 @@ class SR3DResNet(pl.LightningModule):
         )
 
         self.conservation_criterion = AttenuationConservationLoss()
-        self.topology_criterion = SoftCLDiceLoss()
+        self.topology_criterion = SoftCLDiceLoss(pore_is_low=self.pore_is_low)
         self.gradient_criterion = SobelGradientLoss()
         self.ffl_criterion = FocalFrequencyLoss()
 
@@ -261,12 +315,15 @@ class SR3DResNet(pl.LightningModule):
         pred = self.gen(lr_cube).to(torch.float32)
         target = hr_cube.to(torch.float32)
         bs = int(lr_cube.shape[0])
+        ssim_mean = float(
+            np.mean([compute_ssim_3d_isotropic(pred[i, 0], target[i, 0]) for i in range(bs)])
+        )
         self.log(
             "val/psnr", compute_psnr(pred, target), prog_bar=True, on_epoch=True, batch_size=bs
         )
         self.log(
             "val/ssim_3d",
-            compute_ssim_3d_isotropic(pred[0, 0], target[0, 0]),
+            ssim_mean,
             on_epoch=True,
             batch_size=bs,
         )

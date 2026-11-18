@@ -11,7 +11,7 @@ from .sr3d import (
     super_resolve_volume_3d,
 )
 from .srgan import SRGAN, BackboneType, GANLossType
-from .submodels import Discriminator, Generator, OutputActivation
+from .submodels import Discriminator, Generator, OutputActivation, apply_bounded_output
 from .swinir import (
     ResidualSwinBlock,
     SwinIRGenerator,
@@ -42,6 +42,7 @@ __all__ = [
     "SwinTransformerLayer",
     "UpsampleBlock",
     "WindowAttention2D",
+    "apply_bounded_output",
     "build_3d_subcube_dataloaders",
     "super_resolve_volume_3d",
 ]

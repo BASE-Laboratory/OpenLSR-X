@@ -44,6 +44,7 @@ def test_cli_inprocess_download_and_evaluate(tmp_path: Path) -> None:
                 str(bench_dir),
                 "--size",
                 "24",
+                "--offline",
             ]
         )
     assert exc_dl.value.code == 0
@@ -62,6 +63,7 @@ def test_cli_inprocess_download_and_evaluate(tmp_path: Path) -> None:
                 str(bench_dir),
                 "--size",
                 "24",
+                "--offline",
             ]
         )
     assert exc_cached.value.code == 0

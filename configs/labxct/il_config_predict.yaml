@@ -9,7 +9,7 @@ trainer:
 
 model:
   learning_rate: 5.0e-5
-  adaptive_size: 16
+  adaptive_size: 8
   super_res_factor: 2
   num_blocks: 12
   sample_id: indlime
@@ -20,7 +20,14 @@ data:
     high_path: data/benchmarks/indiana_limestone_hr.tif
     degrade_from_hr: true
     scale_factor: 2
+    psf_sigma: 0.90
+    degrade_noise_std: 0.030
+    norm_mode: percentile
+    lower_pct: 0.5
+    upper_pct: 99.5
     predict_axis: xz
+    predict_mode: orthogonal_3axis
+    predict_fusion: confidence_fourier
     eval_batch_size: 4
     num_workers: 0
     seed: 42

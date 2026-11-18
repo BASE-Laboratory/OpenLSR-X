@@ -6,26 +6,26 @@ This guide documents the scientific thesis, methodology equations, ablation matr
 
 ## Working Title
 
-> **Physics-Consistent 2.5D Orthogonal Super-Resolution with Epistemic Uncertainty for Multi-Magnification Synchrotron Tomography and Pore-Scale Transport**
+> **Physics-Guided 2.5D Orthogonal Super-Resolution and View-Disagreement Transport Uncertainty for Multi-Magnification Synchrotron Tomography**
 
 ---
 
 ## 150-Word Draft Abstract
 
-Quantitative X-ray computed tomography (XCT) of functional porous materials at synchrotron beamlines is fundamentally constrained by the hardware coupling between spatial resolution, field of view (FOV), and X-ray dose. Existing deep super-resolution methods either suffer from cubic memory scaling in 3D convolutional networks or rely on 2D natural-image generative adversarial priors that violate linear attenuation conservation and hallucinate disconnected pore throats without uncertainty estimates. Here we introduce a physics-consistent 2.5D-to-3D orthogonal super-resolution framework (`OpenLSR-X`) integrating shifted-window self-attention (`SwinIR`), coarse-voxel X-ray attenuation conservation, and differentiable soft-skeleton (`soft-clDice`) pore-throat topology supervision. Exploiting three-axis orthogonal sweeps (`yz`, `xz`, `xy`), our confidence-weighted 3D Fourier synthesis yields zero-overhead voxel-wise epistemic uncertainty maps that localize sub-resolution bottlenecks and propagate directly into calibrated 3D Fickian diffusive tortuosity bounds. Validated on paired multi-magnification Diamond Light Source I13-2 synchrotron tomograms of reactive Zn-doped Zeolite 13X (`2×` and `8×` scale jumps), our approach recovers effective Fourier Shell Correlation resolution, tri-phase `Pore / Na-13X / Zn-13X` ion-exchange stoichiometry, and pore-scale diffusivity at gigavoxel throughput.
+Quantitative X-ray computed tomography (XCT) of functional porous materials at synchrotron beamlines is constrained by the hardware coupling between spatial resolution, field of view (FOV), and X-ray dose. Existing deep super-resolution methods either incur cubic memory scaling in 3D convolutional networks or rely on 2D natural-image adversarial priors that distort greyscale attenuation consistency and pinch off sub-micron pore throats without diagnostic error indicators. Here we introduce a cell-centered `2.5D`-to-3D orthogonal super-resolution framework (`OpenLSR-X`) combining multi-axis shifted-window self-attention (`SwinIR`), linear-attenuation downsampling consistency (`2.5D` $z$-PSF corrected), and differentiable soft-skeleton (`soft-clDice`) pore-throat topology supervision. Across three orthogonal sweeps (`yz`, `xz`, `xy`), outlier-suppressed 3D Fourier synthesis yields zero-overhead voxel-wise view-disagreement maps $\sigma_{\text{ortho}}(\mathbf{x})$ that correlate spatially with reconstruction error and propagate into 3D Fickian diffusive tortuosity sensitivity bounds. Evaluated on sub-voxel-registered multi-magnification Diamond Light Source I13-2 tomograms of reactive Zn-doped Zeolite 13X (`2×` and `8×`), our method improves reference `FSC = 0.5` spectral recovery, tri-phase `Pore / Na-13X / Zn-13X` segmentation, and pore-scale diffusivity fidelity.
 
 ---
 
 ## Four Core Contributions (Addressing *npj Computational Materials* Criteria)
 
-1. **Zero-Overhead Voxel-Wise Epistemic Uncertainty $\sigma_{\text{ortho}}(\mathbf{x}) \to \tau \pm \Delta\tau$:**
-   Unlike 3D CNNs or $50\times$-slower conditional diffusion samplers, three-axis orthogonal reconstruction naturally measures directional epistemic disagreement across perpendicular high-resolution planes. Propagating $\hat{V} \pm \sigma_{\text{ortho}}$ through 3D finite-volume Fickian Laplace diffusion (`solve_steady_state_diffusion_axis` / `OpenImpala`) yields **calibrated transport error bars** on unseen low-magnification full-pellet tomograms.
-2. **Domain-Grounded Tomographic Physics & Topology Supervision:**
-   Replaces RGB ImageNet `VGG-19` perceptual priors with `AttenuationConservationLoss` (preserving quantitative 27 keV linear attenuation per coarse scintillator PSF voxel), `SoftCLDiceLoss` (preventing GAN throat pinch-off), and `FocalFrequencyLoss`.
-3. **2.5D Windowed Self-Attention (`SwinIR-2.5D`) + Confidence-Fourier Synthesis:**
-   Provides local through-plane `[z-1, z, z+1]` context at `< 0.3%` parameter overhead over 2D models while avoiding $O(N^3)$ 3D patch stitching, paired with hybrid `confidence_fourier` fusion that suppresses single-axis out-of-plane blur at sharp phase boundaries.
-4. **Beamline `3D FSC` Metrology & Tri-Phase Reactive Zeolite Validation (`Zn-13X`):**
-   Evaluates half-bit and $0.143$ **3D Fourier Shell Correlation (`compute_fsc_3d`)** cutoffs alongside three-phase (`Macropore` / `Na-13X Core` / `Zn-Exchanged Shell`) segmentation fidelity on the open multimodal Diamond I13-2 benchmark (Green et al., *Sci. Data* 2025, `10.1038/s41597-025-04605-9`).
+1. **Zero-Overhead Orthogonal View-Disagreement Uncertainty $\sigma_{\text{ortho}}(\mathbf{x}) \to [D_{\text{eff}}^-, D_{\text{eff}}^+]$:**
+   Three-axis orthogonal reconstruction ($n=3$ sweeps) naturally measures inter-view disagreement between in-plane super-resolution and through-plane structure at sub-resolution interfaces. We evaluate $\sigma_{\text{ortho}}(\mathbf{x})$ rigorously via voxel-wise Spearman rank correlation against ground-truth error $|\hat{V} - V_{\text{HR}}|$ and empirical ground-truth $D_{\text{eff}}$ bracketing rates under $\hat{V} \pm k\sigma_{\text{ortho}}$ sensitivity propagation (`solve_steady_state_diffusion_axis` / `OpenImpala`).
+2. **Domain-Grounded Tomographic Attenuation & Topology Supervision:**
+   Replaces RGB ImageNet `VGG-19` perceptual priors with `AttenuationConservationLoss` (enforcing joint-calibrated linear-attenuation $\mu$ downsampling consistency with a `2.5D` through-plane $z$-PSF Laplacian correction), bimodal `SoftCLDiceLoss` (preventing pore-throat pinch-off), and `FocalFrequencyLoss`.
+3. **Multi-Axis Native-LR-Strided `SwinIR-2.5D` + Outlier-Suppressed Fourier Synthesis:**
+   Samples `[z - s, z, z + s]` neighbors at true physical LR slice spacing ($\pm \Delta z_{\text{LR}}$) across all three training orientations (`train_axes=("yz", "xz", "xy")`) at `< 0.3%` parameter overhead over 2D models, paired with Winsorized `confidence_fourier` fusion tested in a controlled 9-arm stepwise ablation ladder (`SwinIR-2.5D-L1-Fourier` $\to$ `+Physics-Fourier` $\to$ `+ConfFourier`).
+4. **Full-Reference `3D FSC` Metrology & Tri-Phase Reactive Zeolite Validation (`Zn-13X`):**
+   Evaluates blur-sensitive prediction-vs-reference **`FSC = 0.5` crossover frequencies and spectral AUC (`compute_fsc_3d`)** alongside reference-locked petrophysics and three-phase (`Macropore` / `Na-13X Core` / `Zn-Exchanged Shell`) segmentation fidelity on coaxial sub-voxel-registered Diamond I13-2 scans (Green et al., *Sci. Data* 2025, `10.1038/s41597-025-04605-9`).
 
 ---
 
@@ -33,12 +33,12 @@ Quantitative X-ray computed tomography (XCT) of functional porous materials at s
 
 | Figure | Content & Scientific Message | Generated By |
 | :--- | :--- | :--- |
-| **Fig. 1** | **FOV–Resolution–Dose Trade-off & Architecture:** Diamond I13-2 multi-magnification optics (`2.60 -> 0.325 um`), `2.5D` `SwinIR` trunk, physics/topology losses, and `Confidence-Fourier` + $\sigma_{\text{ortho}}$ pipeline. | Schematic + `quickstart_walkthrough.py` |
-| **Fig. 2** | **Paired Synchrotron Visual & Spectral Fidelity (`2×` and `8×`):** Cross-sections (`xy`, `xz`, `yz`), radial **3D FSC curves** with $1/2$-bit cutoffs proving true spatial frequency recovery vs. GAN hallucination. | `compute_fsc_3d` + `zn13x_synchrotron_study.py` |
-| **Fig. 3** | **Tri-Phase Reactive `Zn-13X` Ion-Exchange Fidelity:** Three-phase segmentation (`Macropore`, `Na-13X` core, `Zn-13X` shell), radial Zn exchange profile, and attenuation histogram conservation. | `evaluate_triphase_zn13x_metrics` |
-| **Fig. 4** | **Orthogonal Epistemic Uncertainty Calibration:** Spatial co-localization of $\sigma_{\text{ortho}}(\mathbf{x})$ with actual HR error $|\hat{V} - V_{\text{HR}}|$ at sub-voxel pore throats (Spearman $\rho$) and outlier suppression under `confidence_fourier` fusion. | `compute_orthogonal_uncertainty` |
-| **Fig. 5** | **3D Pore-Scale Diffusive Tortuosity & Capillary Drainage:** Steady-state concentration fields $c(\mathbf{x})$, $D_{\text{eff}}/D_0$ & $\tau$ parity plots with $\pm 1\sigma_{\text{ortho}}$ transport envelopes, and simulated mercury/non-wetting drainage $S_{\text{nwp}}(P_c)$ curves. | `evaluate_transport_metrics` + `compute_tortuosity_uncertainty_bounds` + `OpenImpala` |
-| **Fig. 6** | **Compute/VRAM Scaling & Ablation Pareto Frontier:** GPU memory, inference wall-time extrapolated to $2160 \times 2560^2$ full-field synchrotron tomograms, and loss/backbone ablations (`SRGAN` vs `RRDB-RaGAN` vs `SR3DResNet` vs `SwinIR-2.5D + Physics`). | `aggregate_campaign.py` (`campaign_tradeoffs.png` & `campaign_table.tex`) |
+| **Fig. 1** | **FOV–Resolution–Dose Trade-off & Architecture:** Diamond I13-2 multi-magnification optics (`2.60 -> 0.325 um`), cell-centered `2.5D` `SwinIR` trunk, physics/topology losses, and `Confidence-Fourier` + $\sigma_{\text{ortho}}$ pipeline. | Schematic + `quickstart_walkthrough.py` |
+| **Fig. 2** | **Paired Synchrotron Visual & Spectral Fidelity (`2×` and `8×`):** Cross-sections (`xy`, `xz`, `yz`), radial **3D FSC curves** with `FSC = 0.5` reference crossovers and spectral AUC quantifying spatial frequency recovery. | `compute_fsc_3d` + `zn13x_synchrotron_study.py` |
+| **Fig. 3** | **Tri-Phase Reactive `Zn-13X` Ion-Exchange Fidelity:** Three-phase segmentation (`Macropore`, `Na-13X` core, `Zn-13X` shell), phase volume-fraction conservation, and joint-calibrated attenuation histograms. | `evaluate_triphase_zn13x_metrics` |
+| **Fig. 4** | **Orthogonal View-Disagreement Diagnostics:** Spatial co-localization of $\sigma_{\text{ortho}}(\mathbf{x})$ with actual HR error $|\hat{V} - V_{\text{HR}}|$ at sub-voxel pore throats (Spearman $\rho$) and single-view outlier suppression under `confidence_fourier` fusion. | `compute_orthogonal_uncertainty` |
+| **Fig. 5** | **3D Pore-Scale Diffusive Tortuosity & Capillary Drainage:** Converged steady-state concentration fields $c(\mathbf{x})$, $D_{\text{eff}}/D_0$ & $\tau$ parity plots with $\pm k\sigma_{\text{ortho}}$ sensitivity bounds and empirical bracketing rates, plus simulated drainage $S_{\text{nwp}}(P_c)$ curves. | `evaluate_transport_metrics` + `compute_tortuosity_uncertainty_bounds` + `OpenImpala` |
+| **Fig. 6** | **Compute/VRAM Scaling & 9-Arm Controlled Stepwise Ablation:** GPU memory, inference wall-time, and controlled stepwise ablations (`SRResNet` vs `SR3DResNet` vs `SRGAN` vs `RRDB-RaGAN` vs `SwinIR-2.5D-L1` vs `+Physics` vs `+ConfFourier`). | `aggregate_campaign.py` (`campaign_tradeoffs.png` & `campaign_table.tex`) |
 
 ---
 
@@ -46,7 +46,8 @@ Quantitative X-ray computed tomography (XCT) of functional porous materials at s
 
 1. **Stage Real Diamond I13-2 `Zn-13X` Zenodo Sub-Volumes (`14245751` or raw `169065`–`169068` HDF5):**
    ```bash
-   uv run openlsrx download-benchmarks --datasets zn13x_2x zn13x_8x --output-dir data/benchmarks
+   openlsrx download-zn13x --dest data/benchmarks --lr-size 48
+   openlsrx download-benchmarks --dest data/benchmarks --size 128
    ```
 2. **Launch Multi-Seed Array Campaign on Isambard-AI (`GH200`):**
    ```bash
@@ -54,11 +55,11 @@ Quantitative X-ray computed tomography (XCT) of functional porous materials at s
    ```
    Or train the flagship configuration directly via CLI:
    ```bash
-   uv run openlsrx fit --config configs/i13-xct/zn13x_2x_swinir_25d_physics.yaml
+   openlsrx fit --config configs/i13-xct/zn13x_2x_swinir_25d_physics.yaml
    ```
 3. **Aggregate Multi-Seed Statistics, Booktabs LaTeX Tables & Pareto Figures:**
    ```bash
-   uv run python scripts/benchmarks/aggregate_campaign.py \
+   python scripts/benchmarks/aggregate_campaign.py \
      --inputs results \
      --output-dir results/campaign_summary
    ```

@@ -7,11 +7,11 @@ OpenLSR-X provides two composable PyTorch Lightning `DataModule` classes selecta
 
 ---
 
-## Leakage-Free 3D Spatial Splitting
+## Split-Isolated 3D Spatial Splitting & Normalization
 
-When evaluating 2D-trained models on orthogonal 3D XCT planes, naive random 2D slice splits leak structural information across axes because every `xy` or `xz` plane intersects all `yz` slices of the same cube.
+When evaluating 2D/`2.5D`-trained models on orthogonal 3D XCT planes, naive random 2D slice splits leak structural information across axes because every `xy` or `xz` plane intersects all `yz` slices of the same cube, and whole-volume intensity normalization or PSF blurring leaks `test` statistics into `train`.
 
-Both DataModules partition the 3D volume along `split_axis` into **strictly non-overlapping 3D slabs** (`train`, `val`, `test`) separated by `guard_slices_lr` buffer slices before extracting 2D training or orthogonal evaluation slices.
+Both DataModules partition the 3D volume along `split_axis` into **strictly non-overlapping 3D slabs** (`train`, `val`, `test`) separated by `guard_slices_lr` buffer slices *before* fitting intensity normalization bounds (on `train` only) and *before* applying per-split synthetic PSF degradation, then extract cell-centered (`grid_mode=True`) 2D or native-LR-strided `2.5D` slice pairs.
 
 ---
 
@@ -23,37 +23,38 @@ Both DataModules partition the 3D volume along `split_axis` into **strictly non-
 | `configs/base/srresnet_ablation.yaml` | Synthetic PoreSpy | Non-adversarial L1/CAWR generator ablation |
 | `configs/porespy/Low_Noise/*.yaml` | Factorial PoreSpy | Low acquisition noise × Low/High feature frequency |
 | `configs/porespy/High_Noise/*.yaml` | Factorial PoreSpy | High acquisition noise × Low/High feature frequency |
-| `configs/labxct/bs_config.yaml` | Bentheimer Sandstone | Well-sorted quartz sandstone (~22% intergranular porosity) |
-| `configs/labxct/il_config.yaml` | Indiana Limestone | Bimodal vuggy + microporous carbonate (~18% total porosity) |
-| `configs/i13-xct/i13_xct_config.yaml` | Diamond I13 (`Zn13X`) | Raw Savu TomopyRecon HDF5/NeXus template with ROI crops |
+| `configs/labxct/bs_config.yaml` | Bentheimer Sandstone | Well-sorted quartz sandstone (~22% intergranular porosity, Zenodo `5542624`) |
+| `configs/labxct/il_config.yaml` | Indiana Limestone | Calibrated bimodal vuggy + microporous carbonate phantom (~18% total porosity) |
+| `configs/i13-xct/i13_xct_config.yaml` | Diamond I13 (`Zn13X`) | Raw Savu TomopyRecon HDF5/NeXus template with joint `[vmin, vmax]` calibration |
 | `configs/i13-xct/zn13x_2x_1625_to_08125.yaml` | Diamond I13 (`Zn13X` $2\times$) | Experimental $4\times$ ($1.625\ \mu\text{m}$) $\to 8\times$ ($0.8125\ \mu\text{m}$) aligned slab |
+| `configs/i13-xct/zn13x_2x_swinir_25d_physics.yaml` | Diamond I13 (`Zn13X` $2\times$) | Multi-axis `2.5D SwinIR` + physics/topology losses + `confidence_fourier` fusion |
 | `configs/i13-xct/zn13x_8x_2600_to_0325.yaml` | Diamond I13 (`Zn13X` $8\times$) | Experimental $2.5\times$ ($2.600\ \mu\text{m}$) $\to 20\times$ ($0.325\ \mu\text{m}$) aligned slab |
 
 ---
 
 ## Preparing Open Rock & Diamond I13-2 `Zn-13X` Benchmarks
 
-Run the built-in fetcher to prepare `bentheimer_sandstone`, `indiana_limestone`, and aligned Diamond Light Source I13-2 `Zn-13X` ($2\times$ & $8\times$) 3D reference volumes with SHA-256 provenance manifests:
+Run the built-in fetcher to prepare `bentheimer_sandstone`, `indiana_limestone`, and coaxial sub-voxel-registered Diamond Light Source I13-2 `Zn-13X` ($2\times$ & $8\times$) 3D reference volumes with SHA-256 provenance manifests:
 
 ```bash
-# Prepare laboratory rock benchmarks (Bentheimer & Indiana Limestone)
+# Prepare laboratory rock benchmarks (Bentheimer from Zenodo 5542624 & calibrated carbonate phantom)
 openlsrx download-benchmarks --dest data/benchmarks --size 128
 
-# Prepare Diamond Light Source I13-2 Zn-13X synchrotron pairs (from local .h5, Zenodo, or calibrated phantom)
-openlsrx download-benchmarks --datasets zn13x_2x zn13x_8x --dest data/benchmarks --size 96
+# Prepare Diamond Light Source I13-2 Zn-13X synchrotron pairs (from local .h5 or Zenodo 14245751)
+openlsrx download-zn13x --dest data/benchmarks --lr-size 48
 ```
 
-When running on air-gapped HPC compute nodes without outbound internet access (and when `--raw-h5-dir` is not supplied), `download-benchmarks` automatically synthesizes calibrated digital-rock and two-phase `Zn-13X` synchrotron phantoms and records `"source_kind"` in `<dataset>_manifest.json`.
+Cache validation checks requested size, local `--raw-h5-dir`, and online vs. `--offline` mode so a cached offline smoke phantom never masks real experimental data. Synthetic fallback manifests omit experimental Zenodo DOIs and set `"is_experimental_xct": false`, while full benchmark scripts fail loudly by default unless `--allow-synthetic-fallback` is passed.
 
 ---
 
-## Vectorized 3D Registration for Multi-Magnification Synchrotron Scans
+## Sub-Voxel 3D Registration for Multi-Magnification Synchrotron Scans
 
-Experimental multi-magnification XCT scans suffer from sub-millimetre stage drift and distinct scintillator point-spread functions across objectives. `openlsrx.data.register_multires_pair_3d` and `openlsrx.data.extract_aligned_slab_from_h5` perform:
+Experimental multi-magnification XCT scans exhibit sub-millimetre stage drift and distinct scintillator point-spread functions across objectives. `openlsrx.data.register_multires_pair_3d` and `openlsrx.data.extract_aligned_slab_from_h5` perform:
 
-1. Chunked ROI slab extraction directly from $>50\ \text{GB}$ Savu `4-TomopyRecon-tomo/data` HDF5 files without loading full cubes into host RAM.
-2. Calibrated attenuation normalization using verified I13-2 dynamic bounds.
-3. Coarse-grid 3D FFT phase cross-correlation (`skimage.registration.phase_cross_correlation`) followed by local 3D SSIM refinement to produce strictly shape-matched `(LR, HR)` slabs.
+1. On-disk HDF5 ROI hyperslab slicing directly from $>50\ \text{GB}$ Savu `4-TomopyRecon-tomo/data` files (or coaxial center-ROI cropping of Zenodo `14245751` `16906*_8bit_cropped.h5` sub-volumes) without loading full cubes into host RAM.
+2. Joint physical attenuation normalization using shared `[vmin, vmax]` calibration bounds across LR and HR scans.
+3. HR-grid sub-voxel 3D FFT phase cross-correlation (`upsample_factor=4`, accurate to $\le 0.25$ HR voxels) followed by sub-voxel cubic shift interpolation and normalized cross-correlation quality verification (`registration_quality_ok`).
 
 ---
 

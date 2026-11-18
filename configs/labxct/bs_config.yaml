@@ -13,7 +13,7 @@ trainer:
 
 model:
   learning_rate: 5.0e-5
-  adaptive_size: 16
+  adaptive_size: 8
   accumulate_n_batches: 1
   super_res_factor: 2
   num_blocks: 10
