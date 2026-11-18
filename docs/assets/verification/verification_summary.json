@@ -1,0 +1,449 @@
+{
+  "elapsed_seconds": 406.0,
+  "subsystem_1_data": {
+    "shift_stats": {
+      "2x": {
+        "legacy_max_abs_shift_hr_vox": 0.4683,
+        "centered_max_abs_shift_hr_vox": 4e-06
+      },
+      "4x": {
+        "legacy_max_abs_shift_hr_vox": 1.3095,
+        "centered_max_abs_shift_hr_vox": 8e-06
+      },
+      "8x": {
+        "legacy_max_abs_shift_hr_vox": 2.6111,
+        "centered_max_abs_shift_hr_vox": 2.3e-05
+      }
+    },
+    "porespy_shapes": {
+      "hr": [
+        64,
+        64,
+        64
+      ],
+      "lr": [
+        32,
+        32,
+        32
+      ]
+    },
+    "paired_25d_shapes": {
+      "lr_ctx": [
+        160,
+        3,
+        32,
+        32
+      ],
+      "hr_slc": [
+        160,
+        64,
+        64
+      ]
+    },
+    "split_depths_hr": {
+      "train": 36,
+      "guard_hr": 4,
+      "val": 8,
+      "test": 12
+    },
+    "train_norm_bounds": [
+      0.136,
+      0.8566
+    ],
+    "registration": {
+      "true_injected_hr_shift": [
+        3,
+        -2,
+        4
+      ],
+      "recovered_hr_shift": [
+        -3,
+        2,
+        -4
+      ],
+      "initial_triplanar_ssim": 0.2176,
+      "registered_triplanar_ssim": 0.733,
+      "aligned_hr_shape": [
+        40,
+        42,
+        40
+      ]
+    }
+  },
+  "subsystem_2_losses": {
+    "throat_pinch_experiment": {
+      "changed_pixels": 23,
+      "total_pixels": 4096,
+      "l1_global_noise": 0.01254,
+      "l1_severed_throat": 0.00449,
+      "soft_cldice_global_noise": 0.00724,
+      "soft_cldice_severed_throat": 0.40745,
+      "cldice_spike_ratio": 56.31
+    },
+    "conservation_zero_bias": 0.0,
+    "conservation_z_psf_2d_vs_25d": {
+      "2d_slice_only_err": 0.04412,
+      "25d_z_laplacian_err": 0.02406,
+      "note": "Approximate slice/2.5D regularizer; exact 3D conservation requires full 3D volume pooling."
+    }
+  },
+  "subsystem_3_models": {
+    "dataset_a_porespy_phantom_models": {
+      "Nearest": {
+        "psnr": 15.19,
+        "ssim_3d": 0.6309,
+        "pore_dice": 0.7905,
+        "porosity_abs_err": 0.1122,
+        "anisotropy_err": 0.0487,
+        "mtf_cutoff_050": 0.1783
+      },
+      "Tricubic-3D": {
+        "psnr": 16.23,
+        "ssim_3d": 0.6958,
+        "pore_dice": 0.8231,
+        "porosity_abs_err": 0.1162,
+        "anisotropy_err": 0.0363,
+        "mtf_cutoff_050": 0.191
+      },
+      "SR3DResNet (Native 3D)": {
+        "psnr": 16.48,
+        "ssim_3d": 0.7182,
+        "pore_dice": 0.8134,
+        "porosity_abs_err": 0.1175,
+        "anisotropy_err": 0.0469,
+        "mtf_cutoff_050": 0.2042
+      },
+      "SRResNet-3Axis": {
+        "psnr": 16.41,
+        "ssim_3d": 0.7478,
+        "pore_dice": 0.8508,
+        "porosity_abs_err": 0.0602,
+        "anisotropy_err": 0.0899,
+        "mtf_cutoff_050": 0.2422
+      },
+      "RRDB-3Axis": {
+        "psnr": 18.3,
+        "ssim_3d": 0.8146,
+        "pore_dice": 0.8907,
+        "porosity_abs_err": 0.0689,
+        "anisotropy_err": 0.0137,
+        "mtf_cutoff_050": 0.2687
+      },
+      "SwinIR-SingleAxis (yz)": {
+        "psnr": 18.22,
+        "ssim_3d": 0.811,
+        "pore_dice": 0.8893,
+        "porosity_abs_err": 0.0715,
+        "anisotropy_err": 0.0452,
+        "mtf_cutoff_050": 0.2552
+      },
+      "SwinIR-2.5D-3Axis": {
+        "psnr": 18.11,
+        "ssim_3d": 0.8063,
+        "pore_dice": 0.8858,
+        "porosity_abs_err": 0.0738,
+        "anisotropy_err": 0.0029,
+        "mtf_cutoff_050": 0.2565
+      }
+    },
+    "dataset_b_limestone_phantom": {
+      "source_kind": "calibrated_carbonate_phantom",
+      "nearest_psnr": 20.03,
+      "tricubic_psnr": 21.06,
+      "swinir_yz_psnr": 21.92,
+      "swinir_3axis_psnr": 21.91
+    },
+    "dataset_c_zn13x_phantom_provenance": {
+      "source_kind": "offline_calibrated_zn13x_phantom",
+      "is_experimental_xct": false,
+      "low_zenodo_doi": null
+    },
+    "dataset_c_zn13x_phantom_metrics": {
+      "tricubic_psnr": 15.46,
+      "swinir_3axis_psnr": 16.63,
+      "tricubic_macro_dice": 0.5576,
+      "swinir_3axis_macro_dice": 0.672,
+      "tricubic_pore_dice": 0.4833,
+      "swinir_pore_dice": 0.7557,
+      "tricubic_na13x_err": 0.1518,
+      "swinir_na13x_err": 0.0747,
+      "tricubic_zn13x_err": 0.0002,
+      "swinir_zn13x_err": 0.0111,
+      "swinir_zn_exchange_err": 0.0681
+    }
+  },
+  "subsystem_4_analytical": {
+    "diffusion_analytical_cases": [
+      {
+        "case": "1. Open Bulk Space (\u03c6=1.000)",
+        "phi": 1.0,
+        "exact_d_eff": 1.0,
+        "num_d_eff": 0.999999,
+        "exact_tau": 1.0,
+        "num_tau": 1.000001,
+        "solver_converged": true,
+        "rel_err_pct": 0.0001
+      },
+      {
+        "case": "2. Parallel Straight Ducts z (\u03c6=0.250)",
+        "phi": 0.25,
+        "exact_d_eff": 0.25,
+        "num_d_eff": 0.25,
+        "exact_tau": 1.0,
+        "num_tau": 1.000001,
+        "transverse_d_eff_x": 0.0,
+        "solver_converged": true,
+        "rel_err_pct": 0.0001
+      },
+      {
+        "case": "3. Trunk + Dead-End Cavity",
+        "phi": 0.1266,
+        "exact_d_eff": 0.0625,
+        "num_d_eff": 0.06267,
+        "exact_tau": 2.026,
+        "num_tau": 2.0206,
+        "flux_rel_discrepancy": 2.61e-09,
+        "solver_converged": true,
+        "rel_err_pct": 0.27
+      },
+      {
+        "case": "4. Maxwell Sphere (R=6/40\u00b3)",
+        "phi": 0.9858,
+        "exact_d_eff": 0.97878,
+        "num_d_eff": 0.97663,
+        "exact_tau": 1.0071,
+        "num_tau": 1.0093,
+        "solver_converged": true,
+        "rel_err_pct": 0.219
+      },
+      {
+        "case": "5. Maxwell Sphere (R=9/40\u00b3)",
+        "phi": 0.9514,
+        "exact_d_eff": 0.92879,
+        "num_d_eff": 0.92401,
+        "exact_tau": 1.0243,
+        "num_tau": 1.0296,
+        "solver_converged": true,
+        "rel_err_pct": 0.515
+      },
+      {
+        "case": "6. Maxwell Sphere (R=11/40\u00b3)",
+        "phi": 0.9123,
+        "exact_d_eff": 0.87391,
+        "num_d_eff": 0.8669,
+        "exact_tau": 1.0439,
+        "num_tau": 1.0523,
+        "solver_converged": true,
+        "rel_err_pct": 0.802
+      }
+    ],
+    "topology_analytical": {
+      "sphere_porosity_exact": 0.03788,
+      "sphere_porosity_measured": 0.03819,
+      "sphere_euler_exact": 1.0,
+      "sphere_euler_measured": 1.0,
+      "torus_euler_exact": 0.0,
+      "torus_euler_measured": 0.0
+    },
+    "spectral_mtf_analytical": {
+      "sigma_0.8": {
+        "curve_rmse": 0.00298,
+        "exact_k05_cyc_vox": 0.2342,
+        "measured_k05_cyc_vox": 0.2348,
+        "measured_fsc05_cyc_vox": 0.5
+      },
+      "sigma_1.4": {
+        "curve_rmse": 0.00527,
+        "exact_k05_cyc_vox": 0.1339,
+        "measured_k05_cyc_vox": 0.1338,
+        "measured_fsc05_cyc_vox": 0.5
+      },
+      "sigma_2.2": {
+        "curve_rmse": 0.01096,
+        "exact_k05_cyc_vox": 0.0852,
+        "measured_k05_cyc_vox": 0.0853,
+        "measured_fsc05_cyc_vox": 0.3904
+      }
+    },
+    "bernoulli_s2": {
+      "phi": 0.2979,
+      "s2_lag0_measured": 0.2979,
+      "s2_asymptote_exact": 0.0888,
+      "s2_lag1_to_18_mean": 0.0885,
+      "s2_rmse_vs_exact": 0.0003
+    },
+    "openimpala_export": {
+      "tif_exists": true,
+      "inputs_exists": true,
+      "tif_bytes": 98890,
+      "inputs_preview": [
+        "# Generated by OpenLSR-X for BASE-Laboratory/OpenImpala (AMReX Tortuosity)",
+        "# Sample: bimodal_tubes | Shape (Z, Y, X) = (40, 48, 48) | Porosity = 0.077257",
+        "eb2.geom_type = \"tiff\"",
+        "torteff.tiff_filename = \"bimodal_tubes.tif\"",
+        "torteff.phase = 1",
+        "torteff.direction = \"z\""
+      ]
+    }
+  },
+  "bentheimer_synthetic_degradation_multiseed": {
+    "bentheimer_sandstone": {
+      "source_kind": "downloaded_zenodo_5542624",
+      "pairing_mode": "synthetic_2x_psf_noise_degradation_from_real_6um_xct",
+      "test_slab_shape": [
+        22,
+        80,
+        80
+      ],
+      "n_seeds": 3,
+      "seeds": [
+        {
+          "seed": 42,
+          "tricubic_psnr": 23.48,
+          "yz_psnr": 25.82,
+          "ortho_psnr": 25.55,
+          "true_d_eff": 0.0396,
+          "tricubic_d_eff_rel_err_pct": 17.89,
+          "yz_d_eff_rel_err_pct": 16.03,
+          "ortho_d_eff_rel_err_pct": 15.52,
+          "spearman_r": 0.2803,
+          "bracketed_1sigma": false
+        },
+        {
+          "seed": 43,
+          "tricubic_psnr": 23.48,
+          "yz_psnr": 26.26,
+          "ortho_psnr": 25.93,
+          "true_d_eff": 0.0396,
+          "tricubic_d_eff_rel_err_pct": 17.3,
+          "yz_d_eff_rel_err_pct": 15.24,
+          "ortho_d_eff_rel_err_pct": 14.06,
+          "spearman_r": 0.26,
+          "bracketed_1sigma": false
+        },
+        {
+          "seed": 44,
+          "tricubic_psnr": 23.48,
+          "yz_psnr": 25.99,
+          "ortho_psnr": 25.79,
+          "true_d_eff": 0.0396,
+          "tricubic_d_eff_rel_err_pct": 17.13,
+          "yz_d_eff_rel_err_pct": 15.36,
+          "ortho_d_eff_rel_err_pct": 15.02,
+          "spearman_r": 0.2705,
+          "bracketed_1sigma": false
+        }
+      ],
+      "summary": {
+        "tricubic_psnr": {
+          "mean": 23.48,
+          "std": 0.0
+        },
+        "yz_psnr": {
+          "mean": 26.02,
+          "std": 0.22
+        },
+        "ortho_psnr": {
+          "mean": 25.76,
+          "std": 0.19
+        },
+        "tricubic_d_eff_rel_err_pct": {
+          "mean": 17.44,
+          "std": 0.4
+        },
+        "yz_d_eff_rel_err_pct": {
+          "mean": 15.54,
+          "std": 0.43
+        },
+        "ortho_d_eff_rel_err_pct": {
+          "mean": 14.87,
+          "std": 0.74
+        },
+        "spearman_r": {
+          "mean": 0.27,
+          "std": 0.01
+        },
+        "bracketed_count": "0/3"
+      }
+    },
+    "bentheimer_laminated": {
+      "source_kind": "downloaded_zenodo_5542624",
+      "pairing_mode": "synthetic_2x_psf_noise_degradation_from_real_6um_xct",
+      "test_slab_shape": [
+        22,
+        80,
+        80
+      ],
+      "n_seeds": 3,
+      "seeds": [
+        {
+          "seed": 42,
+          "tricubic_psnr": 24.98,
+          "yz_psnr": 26.96,
+          "ortho_psnr": 26.87,
+          "true_d_eff": 0.07654,
+          "tricubic_d_eff_rel_err_pct": 6.36,
+          "yz_d_eff_rel_err_pct": 2.92,
+          "ortho_d_eff_rel_err_pct": 2.06,
+          "spearman_r": 0.2385,
+          "bracketed_1sigma": true
+        },
+        {
+          "seed": 43,
+          "tricubic_psnr": 25.0,
+          "yz_psnr": 27.38,
+          "ortho_psnr": 27.22,
+          "true_d_eff": 0.07654,
+          "tricubic_d_eff_rel_err_pct": 6.55,
+          "yz_d_eff_rel_err_pct": 1.1,
+          "ortho_d_eff_rel_err_pct": 0.81,
+          "spearman_r": 0.2324,
+          "bracketed_1sigma": true
+        },
+        {
+          "seed": 44,
+          "tricubic_psnr": 25.03,
+          "yz_psnr": 27.15,
+          "ortho_psnr": 27.06,
+          "true_d_eff": 0.07654,
+          "tricubic_d_eff_rel_err_pct": 6.63,
+          "yz_d_eff_rel_err_pct": 3.75,
+          "ortho_d_eff_rel_err_pct": 3.4,
+          "spearman_r": 0.2256,
+          "bracketed_1sigma": true
+        }
+      ],
+      "summary": {
+        "tricubic_psnr": {
+          "mean": 25.0,
+          "std": 0.03
+        },
+        "yz_psnr": {
+          "mean": 27.16,
+          "std": 0.21
+        },
+        "ortho_psnr": {
+          "mean": 27.05,
+          "std": 0.18
+        },
+        "tricubic_d_eff_rel_err_pct": {
+          "mean": 6.51,
+          "std": 0.14
+        },
+        "yz_d_eff_rel_err_pct": {
+          "mean": 2.59,
+          "std": 1.36
+        },
+        "ortho_d_eff_rel_err_pct": {
+          "mean": 2.09,
+          "std": 1.3
+        },
+        "spearman_r": {
+          "mean": 0.232,
+          "std": 0.006
+        },
+        "bracketed_count": "3/3"
+      }
+    }
+  }
+}
