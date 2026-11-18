@@ -52,7 +52,7 @@ dm.setup()
 
 # 2. Configure compact 2D SRGAN with generator warmup
 model = SRGAN(
-    adaptive_size=6,
+    adaptive_size=8,
     super_res_factor=2,
     num_blocks=4,
     out_channels=32,
@@ -77,7 +77,7 @@ ortho = super_resolve_volume_orthogonal(
 )
 sr_volume = ortho["fused"]
 
-# 4. Evaluate volumetric fidelity and porous-media petrophysics
+# 4. Evaluate volumetric fidelity and reference-locked porous-media petrophysics
 img_metrics = evaluate_image_metrics(sr_volume, hr_test)
 petro_metrics = evaluate_petrophysical_metrics(sr_volume, hr_test, threshold_method="otsu")
 print(img_metrics["psnr"], petro_metrics["porosity_abs_error"])
@@ -93,13 +93,13 @@ For YAML-driven reproducible experiments on laboratory TIFF stacks or synchrotro
 # Train with automatic checkpointing
 openlsrx fit -c configs/base/config.yaml
 
-# Reconstruct 3D super-resolved BigTIFF volume
+# Reconstruct 3D super-resolved BigTIFF volume (3-axis orthogonal fusion + uncertainty)
 openlsrx predict -c configs/base/config.yaml \
   --ckpt_path lightning_logs/version_0/checkpoints/last.ckpt
 
 # Evaluate image + petrophysical metrics against ground truth
 openlsrx evaluate \
-  --pred outputs/predictions/predicted_stack.tiff \
-  --target high_res_reference.tiff \
+  --pred outputs/base_run/predicted_orthogonal/base_srgan_predicted_stack.tiff \
+  --target outputs/base_run/predicted_orthogonal/base_srgan_high_res_stack.tiff \
   --output outputs/evaluation_report.json
 ```

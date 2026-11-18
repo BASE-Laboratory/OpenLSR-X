@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -11,6 +12,7 @@ import tifffile
 from ..metrics.petrophysics import ThresholdMethod, segment_pore_space
 
 ImpalaDirection = Literal["x", "y", "z"]
+_SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
 def export_for_openimpala(
@@ -33,6 +35,13 @@ def export_for_openimpala(
     2. ``<output_dir>/<name>_openimpala.inputs``: Ready-to-run AMReX ``ParmParse`` input deck for
        ``OpenImpala``'s ``Tortuosity`` / ``Diffusion`` executable.
     """
+    clean_name = str(name).strip()
+    if not clean_name or ".." in clean_name or _SAFE_NAME_RE.fullmatch(clean_name) is None:
+        raise ValueError(
+            f"Invalid OpenImpala sample name {name!r}: expected alphanumeric/underscore/hyphen/dot "
+            "identifier without path separators, '..', quotes, or whitespace."
+        )
+
     arr = np.asarray(volume_or_mask)
     if arr.ndim != 3:
         raise ValueError(f"OpenImpala requires a 3D volume (D, H, W), got shape {arr.shape}.")
@@ -57,8 +66,8 @@ def export_for_openimpala(
     out_root = Path(output_dir)
     out_root.mkdir(parents=True, exist_ok=True)
 
-    tiff_path = out_root / f"{name}.tif"
-    inputs_path = out_root / f"{name}_openimpala.inputs"
+    tiff_path = out_root / f"{clean_name}.tif"
+    inputs_path = out_root / f"{clean_name}_openimpala.inputs"
 
     tifffile.imwrite(
         tiff_path,

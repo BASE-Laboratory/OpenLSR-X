@@ -2,16 +2,24 @@
 
 from __future__ import annotations
 
+import math
 import re
+import warnings
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
+import numpy as np
 import pytorch_lightning as pl
 import tifffile
 import torch
 from torch import Tensor, nn, optim
 
+from ..inference.orthogonal import (
+    AXIS_TO_DIM,
+    FusionMode,
+    super_resolve_volume_orthogonal,
+)
 from ..losses import (
     AttenuationConservationLoss,
     FocalFrequencyLoss,
@@ -56,7 +64,7 @@ class SRGAN(pl.LightningModule):
     def __init__(
         self,
         learning_rate: float = 1e-4,
-        adaptive_size: int = 40,
+        adaptive_size: int = 8,
         accumulate_n_batches: int = 1,
         super_res_factor: int | float = 2,
         num_blocks: int = 10,
@@ -78,6 +86,7 @@ class SRGAN(pl.LightningModule):
         vgg_loss_weight: float = 0.006,
         vgg_layers: int = 18,
         vgg_pretrained: bool = True,
+        pore_is_low: bool = True,
         conservation_loss_weight: float = 0.0,
         conservation_psf_sigma: float = 0.0,
         topology_loss_weight: float = 0.0,
@@ -142,11 +151,13 @@ class SRGAN(pl.LightningModule):
         self.vgg_loss_weight = float(vgg_loss_weight)
         self.vgg_layers = int(vgg_layers)
         self.vgg_pretrained = bool(vgg_pretrained)
+        self.pore_is_low = bool(pore_is_low)
         self.conservation_loss_weight = float(conservation_loss_weight)
         self.conservation_psf_sigma = float(conservation_psf_sigma)
         self.topology_loss_weight = float(topology_loss_weight)
         self.gradient_loss_weight = float(gradient_loss_weight)
         self.ffl_loss_weight = float(ffl_loss_weight)
+        self.disc_features = list(disc_features) if disc_features is not None else None
         self.lr_scheduler_type = lr_scheduler_type
         self.lr_scheduler_args = dict(
             lr_scheduler_args or {"T_0": 50, "T_mult": 1, "eta_min": 1e-6}
@@ -195,11 +206,17 @@ class SRGAN(pl.LightningModule):
                 output_activation=self.output_activation,
                 out_img_channels=1,
             )
-        self.disc = Discriminator(
-            in_channels=1,
-            features=disc_features,
-            adaptive_size=self.adaptive_size,
-            norm_type=self.norm_type,
+
+        # Allocate Discriminator ONLY when adversarial training is enabled (avoids multi-GB unused FC weights/Adam states)
+        self.disc: Discriminator | None = (
+            Discriminator(
+                in_channels=1,
+                features=self.disc_features,
+                adaptive_size=self.adaptive_size,
+                norm_type=self.norm_type,
+            )
+            if self.use_adversarial_loss
+            else None
         )
 
         self.bce = nn.BCEWithLogitsLoss()
@@ -214,7 +231,7 @@ class SRGAN(pl.LightningModule):
         self.conservation_criterion = AttenuationConservationLoss(
             psf_sigma=self.conservation_psf_sigma
         )
-        self.topology_criterion = SoftCLDiceLoss()
+        self.topology_criterion = SoftCLDiceLoss(pore_is_low=self.pore_is_low)
         self.gradient_criterion = SobelGradientLoss()
         self.ffl_criterion = FocalFrequencyLoss()
 
@@ -236,7 +253,11 @@ class SRGAN(pl.LightningModule):
         return root
 
     def _is_adversarial_active(self) -> bool:
-        return self.use_adversarial_loss and (self.current_epoch >= self.pretrain_epochs)
+        return (
+            self.use_adversarial_loss
+            and self.disc is not None
+            and (self.current_epoch >= self.pretrain_epochs)
+        )
 
     def _compute_physics_loss(self, fake: Tensor, high_res: Tensor, low_res: Tensor) -> Tensor:
         phys = torch.zeros((), device=self.device, dtype=torch.float32)
@@ -248,7 +269,32 @@ class SRGAN(pl.LightningModule):
             phys = phys + self.gradient_loss_weight * self.gradient_criterion(fake, high_res)
         if self.ffl_loss_weight > 0.0:
             phys = phys + self.ffl_loss_weight * self.ffl_criterion(fake, high_res)
-        return phys.to(fake.dtype)
+        return phys
+
+    def _effective_accum_divisor(self, batch_idx: int) -> int:
+        if self.accumulate_n_batches <= 1:
+            return 1
+        num_batches = getattr(self.trainer, "num_training_batches", 0)
+        if (
+            isinstance(num_batches, (int, float))
+            and math.isfinite(num_batches)
+            and int(num_batches) > 0
+        ):
+            total = int(num_batches)
+            rem = total % self.accumulate_n_batches
+            if rem != 0 and batch_idx >= (total - rem):
+                return rem
+        return self.accumulate_n_batches
+
+    def _maybe_clip_gradients(self, optimizer: Any) -> None:
+        clip_val = getattr(self.trainer, "gradient_clip_val", None)
+        clip_algo = getattr(self.trainer, "gradient_clip_algorithm", None)
+        if clip_val is not None and float(clip_val) > 0.0:
+            self.clip_gradients(
+                optimizer,
+                gradient_clip_val=clip_val,
+                gradient_clip_algorithm=clip_algo,
+            )
 
     def training_step(self, train_batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
         low_res, high_res = train_batch
@@ -256,22 +302,22 @@ class SRGAN(pl.LightningModule):
         high_res = _ensure_4d(high_res)
 
         optimizers = self.optimizers()
-        assert isinstance(optimizers, list)
-        opt_gen, opt_disc = optimizers
-        schedulers = self.lr_schedulers()
-        assert isinstance(schedulers, list)
-        gen_scheduler, disc_scheduler = schedulers
-        assert isinstance(gen_scheduler, optim.lr_scheduler.LRScheduler)
-        assert isinstance(disc_scheduler, optim.lr_scheduler.LRScheduler)
+        if isinstance(optimizers, list):
+            opt_gen = optimizers[0]
+            opt_disc = optimizers[1] if len(optimizers) > 1 else None
+        else:
+            opt_gen = optimizers
+            opt_disc = None
 
         should_step = (
             (batch_idx + 1) % self.accumulate_n_batches == 0
         ) or self.trainer.is_last_batch
+        eff_accum = float(self._effective_accum_divisor(batch_idx))
         adv_active = self._is_adversarial_active()
 
         # 1) Discriminator update (only when adversarial loss is active)
-        disc_loss_val = torch.zeros((), device=self.device)
-        if adv_active:
+        disc_loss_val = torch.zeros((), device=self.device, dtype=torch.float32)
+        if adv_active and opt_disc is not None and self.disc is not None:
             self.toggle_optimizer(opt_disc)
             with torch.no_grad():
                 fake_detached = self.gen(low_res)
@@ -290,21 +336,21 @@ class SRGAN(pl.LightningModule):
                 disc_loss_real = self.bce(disc_real, smooth_real)
                 disc_loss_fake = self.bce(disc_fake, torch.zeros_like(disc_fake))
                 disc_loss = disc_loss_real + disc_loss_fake
-            disc_loss_val = disc_loss.detach()
+            disc_loss_val = disc_loss.detach().to(torch.float32)
 
-            self.manual_backward(disc_loss / self.accumulate_n_batches)
+            self.manual_backward(disc_loss.to(torch.float32) / eff_accum)
             if should_step:
+                self._maybe_clip_gradients(opt_disc)
                 opt_disc.step()
                 opt_disc.zero_grad(set_to_none=True)
-                disc_scheduler.step()
             self.untoggle_optimizer(opt_disc)
 
         # 2) Generator update
         self.toggle_optimizer(opt_gen)
         fake = self.gen(low_res)
-        pixel_loss = self.pixel_criterion(fake, high_res)
+        pixel_loss = self.pixel_criterion(fake, high_res).to(torch.float32)
 
-        if adv_active:
+        if adv_active and self.disc is not None:
             disc_fake_for_gen = self.disc(fake)
             if self.gan_loss_type == "ragan":
                 with torch.no_grad():
@@ -315,27 +361,28 @@ class SRGAN(pl.LightningModule):
                     self.bce(rel_fake_g, torch.ones_like(rel_fake_g))
                     + self.bce(rel_real_g, torch.zeros_like(rel_real_g))
                 )
-                adv_loss = self.adversarial_weight * raw_adv
+                adv_loss = (self.adversarial_weight * raw_adv).to(torch.float32)
             else:
-                adv_loss = self.adversarial_weight * self.bce(
-                    disc_fake_for_gen, torch.ones_like(disc_fake_for_gen)
-                )
+                adv_loss = (
+                    self.adversarial_weight
+                    * self.bce(disc_fake_for_gen, torch.ones_like(disc_fake_for_gen))
+                ).to(torch.float32)
         else:
-            adv_loss = torch.zeros((), device=self.device, dtype=pixel_loss.dtype)
+            adv_loss = torch.zeros((), device=self.device, dtype=torch.float32)
 
         if self.use_vgg_loss and self.vgg is not None:
-            vgg_loss = self.vgg_loss_weight * self.vgg(fake, high_res)
+            vgg_loss = (self.vgg_loss_weight * self.vgg(fake, high_res)).to(torch.float32)
         else:
-            vgg_loss = torch.zeros((), device=self.device, dtype=pixel_loss.dtype)
+            vgg_loss = torch.zeros((), device=self.device, dtype=torch.float32)
 
         physics_loss = self._compute_physics_loss(fake, high_res, low_res)
 
         gen_loss = pixel_loss + adv_loss + vgg_loss + physics_loss
-        self.manual_backward(gen_loss / self.accumulate_n_batches)
+        self.manual_backward(gen_loss / eff_accum)
         if should_step:
+            self._maybe_clip_gradients(opt_gen)
             opt_gen.step()
             opt_gen.zero_grad(set_to_none=True)
-            gen_scheduler.step()
         self.untoggle_optimizer(opt_gen)
 
         batch_size = int(low_res.shape[0])
@@ -383,6 +430,18 @@ class SRGAN(pl.LightningModule):
             on_epoch=True,
             batch_size=batch_size,
         )
+
+    def on_train_epoch_end(self) -> None:
+        schedulers = self.lr_schedulers()
+        if schedulers is None:
+            return
+        sched_list = schedulers if isinstance(schedulers, list) else [schedulers]
+        for sched in sched_list:
+            if (
+                isinstance(sched, optim.lr_scheduler.LRScheduler)
+                and int(getattr(sched.optimizer, "_step_count", 0)) > 1
+            ):
+                sched.step()
 
     @torch.no_grad()
     def validation_step(self, val_batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
@@ -490,8 +549,35 @@ class SRGAN(pl.LightningModule):
         folder_name = f"predicted_{pred_axis}" if pred_axis else "predicted"
         return self._resolve_root_dir() / folder_name
 
+    def _clean_stale_predict_slices(self, base_dir: Path) -> None:
+        if not base_dir.is_dir():
+            return
+        prefix = f"{self.sample_id}_" if self.sample_id else ""
+        escaped = re.escape(prefix)
+        patterns = {
+            "predicted": re.compile(rf"^{escaped}predicted_(\d+)\.tiff$"),
+            "low_res": re.compile(rf"^{escaped}low_(\d+)\.tiff$"),
+            "high_res": re.compile(rf"^{escaped}high_(\d+)\.tiff$"),
+        }
+        for subdir_name, pat in patterns.items():
+            sdir = base_dir / subdir_name
+            if not sdir.is_dir():
+                continue
+            for p in sdir.iterdir():
+                if pat.match(p.name) is not None:
+                    p.unlink(missing_ok=True)
+
     def on_predict_epoch_start(self) -> None:
         self._predict_slice_counter = 0
+        if self._trainer is not None and int(getattr(self.trainer, "world_size", 1)) > 1:
+            warnings.warn(
+                "SRGAN.predict writes TIFF stacks on rank 0 only; run predict with devices=1 "
+                "or `openlsrx predict-volume` so slices are not sharded across ranks.",
+                UserWarning,
+                stacklevel=2,
+            )
+        if self.global_rank == 0:
+            self._clean_stale_predict_slices(self._predict_base_dir())
 
     @torch.no_grad()
     def predict_step(
@@ -522,6 +608,7 @@ class SRGAN(pl.LightningModule):
 
             prefix = f"{self.sample_id}_" if self.sample_id else ""
             batch_size = int(low_4d.shape[0])
+            c_mid = low_f32.shape[1] // 2
             for i in range(batch_size):
                 idx = self._predict_slice_counter
                 self._predict_slice_counter += 1
@@ -531,7 +618,7 @@ class SRGAN(pl.LightningModule):
                 )
                 tifffile.imwrite(
                     low_dir / f"{prefix}low_{idx:05d}.tiff",
-                    low_f32[i, 0].cpu().numpy(),
+                    low_f32[i, c_mid].cpu().numpy(),
                 )
                 if high_f32 is not None:
                     tifffile.imwrite(
@@ -546,8 +633,8 @@ class SRGAN(pl.LightningModule):
             return
 
         base_dir = self._predict_base_dir()
-        if not base_dir.is_dir():
-            return
+        dm = getattr(self.trainer, "datamodule", None) if self._trainer is not None else None
+        pred_axis = getattr(dm, "predict_axis", None)
 
         prefix = f"{self.sample_id}_" if self.sample_id else ""
         escaped_prefix = re.escape(prefix)
@@ -569,44 +656,113 @@ class SRGAN(pl.LightningModule):
             ),
         ]
 
-        for subdir_name, stack_filename, pattern in stack_specs:
-            slice_dir = base_dir / subdir_name
-            if not slice_dir.is_dir():
-                continue
+        if base_dir.is_dir():
+            for subdir_name, stack_filename, pattern in stack_specs:
+                slice_dir = base_dir / subdir_name
+                if not slice_dir.is_dir():
+                    continue
 
-            matched: list[tuple[int, Path]] = []
-            for p in slice_dir.iterdir():
-                m = pattern.match(p.name)
-                if m is not None:
-                    matched.append((int(m.group(1)), p))
-            if not matched:
-                continue
+                matched: list[tuple[int, Path]] = []
+                for p in slice_dir.iterdir():
+                    m = pattern.match(p.name)
+                    if m is not None:
+                        matched.append((int(m.group(1)), p))
+                if not matched:
+                    continue
 
-            matched.sort(key=lambda item: item[0])
-            output_stack = base_dir / stack_filename
-            with tifffile.TiffWriter(output_stack, bigtiff=True) as writer:
-                for _, img_path in matched:
-                    writer.write(
-                        tifffile.imread(img_path),
-                        photometric="minisblack",
-                        contiguous=True,
+                matched.sort(key=lambda item: item[0])
+                output_stack = base_dir / stack_filename
+
+                if pred_axis in AXIS_TO_DIM:
+                    # Restore canonical (D, H, W) axis order after single-axis sweep along pred_axis
+                    ordered_vol = np.stack([tifffile.imread(img_p) for _, img_p in matched], axis=0)
+                    canonical_vol = np.ascontiguousarray(
+                        np.moveaxis(ordered_vol, 0, AXIS_TO_DIM[pred_axis])
                     )
+                    tifffile.imwrite(
+                        output_stack,
+                        canonical_vol,
+                        bigtiff=True,
+                        photometric="minisblack",
+                    )
+                else:
+                    with tifffile.TiffWriter(output_stack, bigtiff=True) as writer:
+                        for _, img_path in matched:
+                            writer.write(
+                                tifffile.imread(img_path),
+                                photometric="minisblack",
+                                contiguous=True,
+                            )
+
+        # True 3-axis orthogonal volumetric reconstruction + epistemic uncertainty when DataModule provides 3D LR
+        pred_lr_vol = getattr(dm, "predict_lr_volume", None) if dm is not None else None
+        pred_mode = (
+            getattr(dm, "predict_mode", "orthogonal_3axis") if dm is not None else "single_axis"
+        )
+        if pred_lr_vol is not None and pred_mode == "orthogonal_3axis":
+            fusion_mode = cast(FusionMode, str(getattr(dm, "predict_fusion", "confidence_fourier")))
+            eval_bs = int(getattr(dm, "eval_batch_size", 4))
+            ortho = super_resolve_volume_orthogonal(
+                generator=self.gen,
+                low_volume=np.asarray(pred_lr_vol, dtype=np.float32),
+                scale_factor=self.super_res_factor,
+                axes=("yz", "xz", "xy"),
+                fusion=fusion_mode,
+                batch_size=eval_bs,
+                device=self.device,
+                context_slices=self.context_slices,
+                return_uncertainty=True,
+            )
+            ortho_dir = self._resolve_root_dir() / "predicted_orthogonal"
+            ortho_dir.mkdir(parents=True, exist_ok=True)
+            fused_vol = np.ascontiguousarray(ortho["fused"], dtype=np.float32)
+            unc_vol = np.ascontiguousarray(ortho["uncertainty_std"], dtype=np.float32)
+            tifffile.imwrite(
+                ortho_dir / f"{prefix}predicted_stack.tiff",
+                fused_vol,
+                bigtiff=True,
+                photometric="minisblack",
+            )
+            tifffile.imwrite(
+                ortho_dir / f"{prefix}uncertainty_std_stack.tiff",
+                unc_vol,
+                bigtiff=True,
+                photometric="minisblack",
+            )
+            if base_dir.is_dir():
+                tifffile.imwrite(
+                    base_dir / f"{prefix}predicted_orthogonal_fused.tiff",
+                    fused_vol,
+                    bigtiff=True,
+                    photometric="minisblack",
+                )
+                tifffile.imwrite(
+                    base_dir / f"{prefix}predicted_epistemic_std.tiff",
+                    unc_vol,
+                    bigtiff=True,
+                    photometric="minisblack",
+                )
 
     def configure_optimizers(self):
         opt_gen = optim.Adam(self.gen.parameters(), lr=self.learning_rate, betas=(0.9, 0.999))
-        opt_disc = optim.Adam(self.disc.parameters(), lr=self.learning_rate, betas=(0.9, 0.999))
-
         if self.lr_scheduler_type == "constant":
             gen_scheduler: optim.lr_scheduler.LRScheduler = optim.lr_scheduler.LambdaLR(
                 opt_gen, lr_lambda=lambda _step: 1.0
-            )
-            disc_scheduler: optim.lr_scheduler.LRScheduler = optim.lr_scheduler.LambdaLR(
-                opt_disc, lr_lambda=lambda _step: 1.0
             )
         else:
             gen_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 opt_gen, **self.lr_scheduler_args
             )
+
+        if self.disc is None:
+            return [{"optimizer": opt_gen, "lr_scheduler": gen_scheduler}]
+
+        opt_disc = optim.Adam(self.disc.parameters(), lr=self.learning_rate, betas=(0.9, 0.999))
+        if self.lr_scheduler_type == "constant":
+            disc_scheduler: optim.lr_scheduler.LRScheduler = optim.lr_scheduler.LambdaLR(
+                opt_disc, lr_lambda=lambda _step: 1.0
+            )
+        else:
             disc_scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(
                 opt_disc, **self.lr_scheduler_args
             )

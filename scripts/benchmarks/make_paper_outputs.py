@@ -38,13 +38,20 @@ def _aggregate_csv(
             g = str(row[group_col])
             m = str(row["method"])
             for col, _, _ in KEY_METRICS:
-                if col in row and row[col] != "":
-                    buckets[(g, m)][col].append(float(row[col]))
+                raw_v = row.get(col, "")
+                if raw_v not in ("", None, "None", "nan", "NaN", "inf", "-inf"):
+                    fv = float(raw_v)
+                    if np.isfinite(fv):
+                        buckets[(g, m)][col].append(fv)
 
     summary: dict[tuple[str, str], dict[str, tuple[float, float]]] = {}
     for key, metric_lists in buckets.items():
         summary[key] = {
-            col: (float(np.mean(vals)), float(np.std(vals))) for col, vals in metric_lists.items()
+            col: (
+                float(np.mean(vals)),
+                float(np.std(vals, ddof=1 if len(vals) >= 2 else 0)),
+            )
+            for col, vals in metric_lists.items()
         }
     return summary
 

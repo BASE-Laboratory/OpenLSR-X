@@ -8,17 +8,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from ..losses import custom_sigmoid
-from .blocks import UpsampleBlock
-from .submodels import OutputActivation
+from .blocks import UpsampleBlock, _safe_conv2d
+from .submodels import OutputActivation, apply_bounded_output
 
 
 class DenseResidualBlock(nn.Module):
-    """5-layer densely connected convolutional block without batch/pixel normalization.
-
-    Omitting feature normalization preserves absolute X-ray attenuation contrasts across
-    batches (Wang et al., ESRGAN, ECCV Workshops 2018).
-    """
+    """5-layer densely connected convolutional block without batch/pixel normalization."""
 
     def __init__(
         self,
@@ -45,11 +40,11 @@ class DenseResidualBlock(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        x1 = self.act(self.conv1(x))
-        x2 = self.act(self.conv2(torch.cat([x, x1], dim=1)))
-        x3 = self.act(self.conv3(torch.cat([x, x1, x2], dim=1)))
-        x4 = self.act(self.conv4(torch.cat([x, x1, x2, x3], dim=1)))
-        x5 = self.conv5(torch.cat([x, x1, x2, x3, x4], dim=1))
+        x1 = self.act(_safe_conv2d(self.conv1, x))
+        x2 = self.act(_safe_conv2d(self.conv2, torch.cat([x, x1], dim=1)))
+        x3 = self.act(_safe_conv2d(self.conv3, torch.cat([x, x1, x2], dim=1)))
+        x4 = self.act(_safe_conv2d(self.conv4, torch.cat([x, x1, x2, x3], dim=1)))
+        x5 = _safe_conv2d(self.conv5, torch.cat([x, x1, x2, x3, x4], dim=1))
         return x + self.res_scale * x5
 
 
@@ -74,13 +69,7 @@ class RRDB(nn.Module):
 
 
 class ArbitraryScaleUpsample(nn.Module):
-    """Hybrid sub-pixel + resize-convolution upsampler supporting any scale >= 1.0.
-
-    - Exact powers of two (``1, 2, 4, 8``) use learned ``UpsampleBlock`` (``PixelShuffle``) stages.
-    - Non-power-of-two beamline ratios (e.g., ``2.5`` for I13-2 ``0.8125 -> 0.325 um`` or ``5.0``
-      for ``1.625 -> 0.325 um``) combine ``floor(log2(s))`` sub-pixel stages with an exact
-      bicubic resize-convolution refinement stage.
-    """
+    """Hybrid sub-pixel + resize-convolution upsampler supporting any scale >= 1.0."""
 
     def __init__(self, channels: int = 64, scale_factor: float | int = 2) -> None:
         super().__init__()
@@ -97,22 +86,22 @@ class ArbitraryScaleUpsample(nn.Module):
             *[UpsampleBlock(in_channels=channels, scale_factor=2) for _ in range(n_pow2)]
         )
         self.has_residual = not math.isclose(self.residual_scale, 1.0, rel_tol=1e-5, abs_tol=1e-5)
-        self.refine_conv: nn.Module | None = (
-            nn.Sequential(
-                nn.Conv2d(channels, channels, 3, 1, 1, padding_mode="reflect"),
-                nn.LeakyReLU(0.2, inplace=True),
-            )
+        self.refine_conv: nn.Conv2d | None = (
+            nn.Conv2d(channels, channels, 3, 1, 1, padding_mode="reflect")
             if self.has_residual
             else None
         )
+        self.refine_act: nn.Module | None = (
+            nn.LeakyReLU(0.2, inplace=True) if self.has_residual else None
+        )
 
     def forward(self, x: Tensor) -> Tensor:
-        target_h = int(round(x.shape[-2] * self.scale_factor))
-        target_w = int(round(x.shape[-1] * self.scale_factor))
+        target_h = max(1, int(round(x.shape[-2] * self.scale_factor)))
+        target_w = max(1, int(round(x.shape[-1] * self.scale_factor)))
         out = self.pow2_blocks(x)
-        if self.has_residual and self.refine_conv is not None:
+        if self.has_residual and self.refine_conv is not None and self.refine_act is not None:
             out = F.interpolate(out, size=(target_h, target_w), mode="bicubic", align_corners=False)
-            out = self.refine_conv(out)
+            out = self.refine_act(_safe_conv2d(self.refine_conv, out))
         return out
 
 
@@ -161,41 +150,35 @@ class RRDBGenerator(nn.Module):
         self.upsample = ArbitraryScaleUpsample(
             channels=self.out_channels, scale_factor=self.super_res_factor
         )
-        final_conv = nn.Conv2d(
+        self.hr_conv1 = nn.Conv2d(
+            self.out_channels, self.out_channels, 3, 1, 1, padding_mode="reflect"
+        )
+        self.hr_act = nn.LeakyReLU(0.2, inplace=True)
+        self.hr_conv2 = nn.Conv2d(
             self.out_channels, self.out_img_channels, 3, 1, 1, padding_mode="reflect"
         )
-        if final_conv.bias is not None:
-            nn.init.zeros_(final_conv.bias)
-        final_conv.weight.data.mul_(0.1)
-        self.hr_head = nn.Sequential(
-            nn.Conv2d(self.out_channels, self.out_channels, 3, 1, 1, padding_mode="reflect"),
-            nn.LeakyReLU(0.2, inplace=True),
-            final_conv,
-        )
-
-    def _apply_output_activation(self, x: Tensor) -> Tensor:
-        if self.output_activation == "custom_sigmoid":
-            return custom_sigmoid(x, k=self.sigmoid_k)
-        if self.output_activation == "sigmoid":
-            return torch.sigmoid(x)
-        if self.output_activation == "clamp":
-            return torch.clamp(x, 0.0, 1.0)
-        return x
+        if self.hr_conv2.bias is not None:
+            nn.init.zeros_(self.hr_conv2.bias)
+        self.hr_conv2.weight.data.mul_(0.1)
 
     def forward(self, x: Tensor) -> Tensor:
-        target_h = int(round(x.shape[-2] * self.super_res_factor))
-        target_w = int(round(x.shape[-1] * self.super_res_factor))
+        target_h = max(1, int(round(x.shape[-2] * self.super_res_factor)))
+        target_w = max(1, int(round(x.shape[-1] * self.super_res_factor)))
         if x.shape[1] == self.out_img_channels:
             center = x
         else:
             c_mid = x.shape[1] // 2
             center = x[:, c_mid : c_mid + self.out_img_channels, :, :]
         base = F.interpolate(center, size=(target_h, target_w), mode="bicubic", align_corners=False)
-        feat = self.conv_first(x)
-        trunk = self.trunk_conv(self.trunk(feat))
+        feat = _safe_conv2d(self.conv_first, x)
+        trunk = _safe_conv2d(self.trunk_conv, self.trunk(feat))
         feat = feat + trunk
         up = self.upsample(feat)
-        residual = self.hr_head(up)
-        if self.output_activation in ("clamp", "identity"):
-            return self._apply_output_activation(base + residual)
-        return self._apply_output_activation(residual)
+        residual = _safe_conv2d(self.hr_conv2, self.hr_act(_safe_conv2d(self.hr_conv1, up)))
+        return apply_bounded_output(
+            residual,
+            activation=self.output_activation,
+            sigmoid_k=self.sigmoid_k,
+            training=self.training,
+            base=base,
+        )

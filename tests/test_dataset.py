@@ -122,6 +122,7 @@ def test_public_rock_offline_fallback(tmp_path: Path) -> None:
         dest_dir=tmp_path / "rocks",
         shape=(32, 32, 32),
         allow_offline_fallback=True,
+        prefer_offline=True,
         seed=11,
     )
     assert tif_path.is_file()

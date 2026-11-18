@@ -34,6 +34,7 @@ from .transport import (
     compute_drainage_rmse,
     compute_tortuosity_uncertainty_bounds,
     evaluate_transport_metrics,
+    precompute_reference_transport,
     solve_steady_state_diffusion_axis,
 )
 
@@ -63,6 +64,7 @@ __all__ = [
     "evaluate_spectral_metrics",
     "evaluate_transport_metrics",
     "evaluate_triphase_zn13x_metrics",
+    "precompute_reference_transport",
     "segment_pore_space",
     "solve_steady_state_diffusion_axis",
     "two_point_correlation_radial",

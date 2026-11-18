@@ -20,8 +20,9 @@
 #   Array 3..5 -> Public Micro-CT Rock Suite (Bentheimer & Indiana, seeds 42, 43, 44)
 #   Array 6..8 -> Diamond I13-2 Multi-Resolution Zn-13X Synchrotron Study (2x & 8x)
 #
-# Usage:
-#   mkdir -p logs
+# Usage (stage Zenodo benchmarks on the login node first if compute nodes are air-gapped):
+#   mkdir -p logs data/benchmarks
+#   openlsrx download-benchmarks --datasets bentheimer_sandstone indiana_limestone zn13x_2x zn13x_8x --dest data/benchmarks
 #   export I13_RAW_H5_DIR=/lus/lfs1aip1/projects/openlsrx/i13_zn13x_h5  # optional
 #   sbatch scripts/hpc/isambard_ai_array.slurm
 #
@@ -31,7 +32,7 @@
 
 set -euo pipefail
 
-mkdir -p logs results/campaign
+mkdir -p logs results/campaign data/benchmarks
 
 # Activate project virtual environment (uv / venv)
 if [ -f ".venv/bin/activate" ]; then
@@ -56,8 +57,7 @@ if [ "${SUITE_IDX}" -eq 0 ]; then
         --volume-size 128 \
         --scale-factor 2 \
         --epochs 120 \
-        --seeds "${SEED}" \
-        --use-vgg
+        --seeds "${SEED}"
 elif [ "${SUITE_IDX}" -eq 1 ]; then
     python scripts/benchmarks/public_rock_xct.py \
         --output-dir "results/campaign/public_rock_s${SEED}" \
@@ -75,7 +75,7 @@ elif [ "${SUITE_IDX}" -eq 2 ]; then
         --output-dir "results/campaign/zn13x_s${SEED}" \
         --data-dir "data/benchmarks" \
         --pairs 2x 8x \
-        --lr-size 64 \
+        --lr-size 48 \
         --epochs 150 \
         --seeds "${SEED}" \
         "${EXTRA_H5_ARGS[@]}"

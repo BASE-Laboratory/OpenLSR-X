@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Literal
 
 import torch
@@ -19,14 +20,21 @@ def custom_sigmoid(x: torch.Tensor, k: float = 1.0) -> torch.Tensor:
 
 
 class PixelNorm(nn.Module):
-    """Channel-wise pixel feature vector normalization (Karras et al., 2018)."""
+    """Channel-wise pixel feature vector normalization (Karras et al., 2018).
 
-    def __init__(self, epsilon: float = 1e-8) -> None:
+    Upcasts internally to ``float32`` before computing ``x^2`` and ``rsqrt`` so
+    mixed-precision (``16-mixed`` / FP16) training never overflows ``65504`` or
+    underflows ``epsilon`` to ``0.0`` (``0 / 0 = NaN``).
+    """
+
+    def __init__(self, epsilon: float = 1e-6) -> None:
         super().__init__()
-        self.epsilon = float(epsilon)
+        self.epsilon = max(float(epsilon), 1e-8)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return x * torch.rsqrt(torch.mean(x.square(), dim=1, keepdim=True) + self.epsilon)
+        x_f32 = x.to(torch.float32)
+        normed = x_f32 * torch.rsqrt(torch.mean(x_f32.square(), dim=1, keepdim=True) + self.epsilon)
+        return normed.to(dtype=x.dtype)
 
 
 class VGGLoss(nn.Module):
@@ -47,17 +55,21 @@ class VGGLoss(nn.Module):
         reduction: Literal["mse", "l1"] = "mse",
         pretrained: bool = True,
         normalize_inputs: bool = True,
+        allow_offline_fallback: bool = True,
     ) -> None:
         super().__init__()
         self.vgg_layers = int(vgg_layers)
         self.pretrained = bool(pretrained)
         self.normalize_inputs = bool(normalize_inputs)
 
-        weights = VGG19_Weights.DEFAULT if self.pretrained else None
-        backbone = vgg19(weights=weights).features[: self.vgg_layers].eval()
+        backbone = self._load_vgg_features(
+            pretrained=self.pretrained,
+            vgg_layers=self.vgg_layers,
+            allow_offline_fallback=allow_offline_fallback,
+        )
         for param in backbone.parameters():
             param.requires_grad = False
-        # Store outside _modules so frozen ImageNet weights (~550 MB) never bloat checkpoints
+        # Store outside _modules so frozen ImageNet weights never bloat checkpoints
         self._vgg_holder: tuple[nn.Module] = (backbone,)
 
         self.criterion: nn.Module = nn.MSELoss() if reduction == "mse" else nn.L1Loss()
@@ -67,26 +79,60 @@ class VGGLoss(nn.Module):
         self.register_buffer("mean", mean, persistent=False)
         self.register_buffer("std", std, persistent=False)
 
+    @staticmethod
+    def _load_vgg_features(
+        pretrained: bool,
+        vgg_layers: int,
+        allow_offline_fallback: bool,
+    ) -> nn.Module:
+        if pretrained:
+            try:
+                full = vgg19(weights=VGG19_Weights.DEFAULT)
+            except Exception as exc:
+                if not allow_offline_fallback:
+                    raise
+                warnings.warn(
+                    f"Unable to load pretrained VGG19 weights ({exc}); "
+                    "falling back to random frozen VGG19 features on air-gapped node.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                full = vgg19(weights=None)
+        else:
+            full = vgg19(weights=None)
+        features = full.features[:vgg_layers].eval()
+        del full  # Immediately release ~500 MB dense classifier parameters
+        return features
+
     def _apply(self, fn):  # type: ignore[override]
         super()._apply(fn)
         self._vgg_holder[0]._apply(fn)
         return self
 
-    def _prepare(self, x: torch.Tensor) -> torch.Tensor:
-        if x.shape[1] == 1:
-            x = x.repeat(1, 3, 1, 1)
+    def _prepare(self, x: torch.Tensor, target_dtype: torch.dtype) -> torch.Tensor:
+        out = x.to(dtype=target_dtype)
+        if out.shape[1] == 1:
+            out = out.repeat(1, 3, 1, 1)
+        elif out.shape[1] != 3:
+            c_mid = out.shape[1] // 2
+            out = out[:, c_mid : c_mid + 1].repeat(1, 3, 1, 1)
         if self.normalize_inputs:
-            x = (x - self.mean.to(dtype=x.dtype, device=x.device)) / self.std.to(
-                dtype=x.dtype, device=x.device
+            out = (out - self.mean.to(dtype=target_dtype, device=out.device)) / self.std.to(
+                dtype=target_dtype, device=out.device
             )
-        return x
+        return out
 
     def forward(self, generated: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
         backbone = self._vgg_holder[0]
         backbone.eval()
-        gen_in = self._prepare(generated)
-        tgt_in = self._prepare(target)
+        param = next(backbone.parameters(), None)
+        if param is not None and param.device != generated.device:
+            backbone.to(device=generated.device)
+        weight_dtype = param.dtype if param is not None else torch.float32
+
+        gen_in = self._prepare(generated, target_dtype=weight_dtype)
+        tgt_in = self._prepare(target, target_dtype=weight_dtype)
         gen_features = backbone(gen_in)
         with torch.no_grad():
             tgt_features = backbone(tgt_in)
-        return self.criterion(gen_features, tgt_features)
+        return self.criterion(gen_features.to(torch.float32), tgt_features.to(torch.float32))

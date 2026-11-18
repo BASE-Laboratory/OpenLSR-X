@@ -41,16 +41,7 @@ def segment_pore_space(
     fixed_value: float | None = None,
     pore_is_low: bool = True,
 ) -> tuple[np.ndarray, float]:
-    """Segment a greyscale XCT volume into a boolean pore mask and return ``(mask, threshold)``.
-
-    Args:
-        volume: 2D or 3D greyscale array.
-        method: Thresholding algorithm (``'otsu'``, ``'yen'``, or ``'fixed'``).
-        fixed_value: Threshold value when ``method == 'fixed'``.
-        pore_is_low: ``True`` when pores correspond to lower X-ray attenuation
-            (standard absorption XCT); ``False`` when pores have higher intensity
-            (e.g., PoreSpy local-thickness maps or inverted greyscale).
-    """
+    """Segment a greyscale XCT volume into a boolean pore mask and return ``(mask, threshold)``."""
     arr = np.asarray(volume, dtype=np.float32)
     thr = compute_threshold(arr, method=method, fixed_value=fixed_value)
     mask = (arr < thr) if pore_is_low else (arr > thr)
@@ -78,6 +69,9 @@ def compute_dice_iou(pred_mask: np.ndarray, true_mask: np.ndarray) -> tuple[floa
 def compute_specific_surface_area(pore_mask: np.ndarray, voxel_size: float = 1.0) -> float:
     """Specific surface area ``S_v`` (interfacial area per bulk volume, or perimeter per area in 2D)."""
     mask = np.asarray(pore_mask, dtype=bool)
+    if mask.ndim == 3 and min(mask.shape) < 2:
+        sq_ax = next(ax for ax, sz in enumerate(mask.shape) if sz < 2)
+        mask = np.squeeze(mask, axis=sq_ax)
     if mask.all() or (~mask).all():
         return 0.0
     if mask.ndim == 2:
@@ -99,6 +93,8 @@ def compute_specific_surface_area(pore_mask: np.ndarray, voxel_size: float = 1.0
 def compute_euler_density(pore_mask: np.ndarray, voxel_size: float = 1.0) -> float:
     """Euler characteristic per unit volume/area (measure of pore-network connectivity)."""
     mask = np.asarray(pore_mask, dtype=bool)
+    if mask.ndim == 3 and 1 in mask.shape:
+        mask = np.squeeze(mask, axis=mask.shape.index(1))
     chi = float(euler_number(mask))
     bulk = float(mask.size) * (voxel_size**mask.ndim)
     return chi / bulk
@@ -127,28 +123,53 @@ def compute_pore_radius_wasserstein(
 
 
 def two_point_correlation_radial(pore_mask: np.ndarray, max_lag: int | None = None) -> np.ndarray:
-    """FFT-accelerated radially averaged two-point correlation function ``S_2(r)``."""
-    f = np.asarray(pore_mask, dtype=np.float64)
-    fft = np.fft.fftn(f)
-    power = np.abs(fft) ** 2
-    autocorr = np.fft.ifftn(power).real / float(f.size)
+    """Unbiased, zero-padded, full-sphere/circle radially averaged two-point correlation ``S_2(r)``.
 
-    # Shift zero-lag to origin and compute integer radial bins up to max_lag.
+    Zero-pads by ``limit`` along every spatial dimension before ``rfftn`` autocorrelation to
+    eliminate periodic wrap-around, normalizes each lag vector ``r`` by the exact count of
+    in-bounds overlapping voxel pairs ``prod(L_d - |r_d|)``, and radially averages over all
+    ``2^d`` signed octants/quadrants for full ``O_h`` rotational invariance.
+    """
+    mask = np.asarray(pore_mask, dtype=bool)
+    if mask.ndim == 3 and 1 in mask.shape:
+        mask = np.squeeze(mask, axis=mask.shape.index(1))
+    f = mask.astype(np.float64)
     min_dim = min(f.shape)
-    limit = min(min_dim // 2, 64 if max_lag is None else int(max_lag))
-    slices = tuple(slice(0, limit) for _ in range(f.ndim))
-    octant = autocorr[slices]
+    limit = max(1, min(min_dim // 2, 64 if max_lag is None else int(max_lag)))
 
-    grids = np.ogrid[slices]
-    dist_sq = sum(g * g for g in grids)
+    pad_shape = tuple(int(dim + limit) for dim in f.shape)
+    fft_axes = tuple(range(f.ndim))
+    fft = np.fft.rfftn(f, s=pad_shape, axes=fft_axes)
+    autocorr_full = np.fft.irfftn(np.abs(fft) ** 2, s=pad_shape, axes=fft_axes)
+
+    # Extract centered signed lags in [-(limit - 1), ..., +(limit - 1)]^ndim across all 2^d octants
+    lag_1d = np.arange(-(limit - 1), limit, dtype=np.int64)
+    idx_per_dim = [np.mod(lag_1d, p_dim) for p_dim in pad_shape]
+    sub_corr = autocorr_full[np.ix_(*idx_per_dim)]
+
+    # Exact count of valid non-padded voxel pairs for each signed displacement vector
+    overlap_1d = [(float(dim) - np.abs(lag_1d).astype(np.float64)) for dim in f.shape]
+    overlap_counts = overlap_1d[0]
+    for ov in overlap_1d[1:]:
+        overlap_counts = overlap_counts[..., np.newaxis] * ov
+    unbiased_corr = sub_corr / np.maximum(overlap_counts, 1.0)
+
+    sq_1d = (lag_1d * lag_1d).astype(np.float64)
+    dist_sq = sq_1d
+    for sq in sq_1d[np.newaxis, :] if f.ndim == 1 else [sq_1d for _ in range(f.ndim - 1)]:
+        dist_sq = dist_sq[..., np.newaxis] + sq
     radii = np.rint(np.sqrt(dist_sq)).astype(np.int32)
 
-    radial_sum = np.bincount(radii.ravel(), weights=octant.ravel(), minlength=limit)
-    radial_cnt = np.bincount(radii.ravel(), minlength=limit)
+    in_shell = radii < limit
+    r_valid = radii[in_shell]
+    c_valid = unbiased_corr[in_shell]
+
+    radial_sum = np.bincount(r_valid, weights=c_valid, minlength=limit)
+    radial_cnt = np.bincount(r_valid, minlength=limit)
     valid = radial_cnt[:limit] > 0
     s2 = np.zeros(limit, dtype=np.float64)
     s2[valid] = radial_sum[:limit][valid] / radial_cnt[:limit][valid]
-    return s2
+    return np.clip(s2, 0.0, 1.0)
 
 
 def compute_s2_rmse(pred_mask: np.ndarray, true_mask: np.ndarray, max_lag: int = 48) -> float:
@@ -165,15 +186,11 @@ def compute_through_plane_anisotropy_error(
     stack_axis: int = 0,
     eps: float = 1e-8,
 ) -> float:
-    """Relative error in through-plane vs. in-plane gradient energy for 3D reconstructions.
-
-    Directly measures slice-stacking ("venetian blind") discontinuities along ``stack_axis``
-    normalized against the natural structural anisotropy of the ground-truth volume.
-    """
+    """Relative error in through-plane vs. in-plane gradient energy for 3D reconstructions."""
     p = np.asarray(pred_vol, dtype=np.float32)
     t = np.asarray(true_vol, dtype=np.float32)
-    if p.ndim != 3 or t.ndim != 3:
-        raise ValueError("Through-plane anisotropy error requires 3D volumes.")
+    if p.ndim != 3 or t.ndim != 3 or min(p.shape) < 2 or min(t.shape) < 2:
+        raise ValueError("Through-plane anisotropy error requires 3D volumes with dims >= 2.")
 
     def _grad_ratio(vol: np.ndarray) -> float:
         grads = [float(np.mean(np.abs(np.diff(vol, axis=ax)))) for ax in range(3)]
@@ -197,18 +214,30 @@ def evaluate_petrophysical_metrics(
     voxel_size: float = 1.0,
     stack_axis: int = 0,
 ) -> dict[str, float]:
-    """Compute a comprehensive dictionary of porous-media XCT metrics."""
+    """Compute a comprehensive dictionary of porous-media XCT metrics.
+
+    Headline morphological metrics (``porosity_abs_error``, ``pore_dice``, ``pore_iou``,
+    ``specific_surface_rel_error``, ``euler_density_abs_error``, ``pore_radius_wasserstein``,
+    ``two_point_corr_rmse``) apply the physical ground-truth HR threshold ``threshold_true``
+    consistently to both ``target`` and ``pred`` (matching ``evaluate_transport_metrics``), so
+    greyscale drift or attenuation bias is rigorously penalized. Secondary contrast-invariant
+    diagnostics under independent Otsu thresholding are reported with ``*_auto_otsu`` keys.
+    """
     pred_arr = np.asarray(pred, dtype=np.float32)
     true_arr = np.asarray(target, dtype=np.float32)
 
+    if (
+        pred_arr.ndim == 3
+        and true_arr.ndim == 3
+        and pred_arr.shape == true_arr.shape
+        and 1 in pred_arr.shape
+    ):
+        sq_ax = pred_arr.shape.index(1)
+        pred_arr = np.squeeze(pred_arr, axis=sq_ax)
+        true_arr = np.squeeze(true_arr, axis=sq_ax)
+
     true_mask, hr_thr = segment_pore_space(
         true_arr,
-        method=threshold_method,
-        fixed_value=fixed_threshold,
-        pore_is_low=pore_is_low,
-    )
-    pred_mask_auto, sr_thr = segment_pore_space(
-        pred_arr,
         method=threshold_method,
         fixed_value=fixed_threshold,
         pore_is_low=pore_is_low,
@@ -219,35 +248,45 @@ def evaluate_petrophysical_metrics(
         fixed_value=hr_thr,
         pore_is_low=pore_is_low,
     )
+    pred_mask_auto, sr_thr = segment_pore_space(
+        pred_arr,
+        method=threshold_method,
+        fixed_value=fixed_threshold,
+        pore_is_low=pore_is_low,
+    )
 
     phi_true = compute_porosity(true_mask)
-    phi_pred = compute_porosity(pred_mask_auto)
-    phi_pred_locked = compute_porosity(pred_mask_locked)
+    phi_pred = compute_porosity(pred_mask_locked)
+    phi_pred_auto = compute_porosity(pred_mask_auto)
 
-    dice, iou = compute_dice_iou(pred_mask_auto, true_mask)
-    dice_locked, _ = compute_dice_iou(pred_mask_locked, true_mask)
+    dice_locked, iou_locked = compute_dice_iou(pred_mask_locked, true_mask)
+    dice_auto, _ = compute_dice_iou(pred_mask_auto, true_mask)
 
     sv_true = compute_specific_surface_area(true_mask, voxel_size=voxel_size)
-    sv_pred = compute_specific_surface_area(pred_mask_auto, voxel_size=voxel_size)
+    sv_pred = compute_specific_surface_area(pred_mask_locked, voxel_size=voxel_size)
     sv_rel_err = abs(sv_pred - sv_true) / max(sv_true, 1e-8)
 
     euler_true = compute_euler_density(true_mask, voxel_size=voxel_size)
-    euler_pred = compute_euler_density(pred_mask_auto, voxel_size=voxel_size)
+    euler_pred = compute_euler_density(pred_mask_locked, voxel_size=voxel_size)
 
-    psd_w1 = compute_pore_radius_wasserstein(pred_mask_auto, true_mask, voxel_size=voxel_size)
-    s2_rmse = compute_s2_rmse(pred_mask_auto, true_mask)
+    psd_w1 = compute_pore_radius_wasserstein(pred_mask_locked, true_mask, voxel_size=voxel_size)
+    s2_rmse = compute_s2_rmse(pred_mask_locked, true_mask)
 
     metrics: dict[str, float] = {
         "threshold_true": hr_thr,
-        "threshold_pred": sr_thr,
+        "threshold_pred": hr_thr,
+        "threshold_pred_auto_otsu": sr_thr,
         "porosity_true": phi_true,
         "porosity_pred": phi_pred,
         "porosity_abs_error": abs(phi_pred - phi_true),
         "porosity_rel_error": abs(phi_pred - phi_true) / max(phi_true, 1e-8),
-        "porosity_locked_abs_error": abs(phi_pred_locked - phi_true),
-        "pore_dice": dice,
-        "pore_iou": iou,
+        "porosity_locked_abs_error": abs(phi_pred - phi_true),
+        "porosity_auto_otsu_pred": phi_pred_auto,
+        "porosity_auto_otsu_abs_error": abs(phi_pred_auto - phi_true),
+        "pore_dice": dice_locked,
+        "pore_iou": iou_locked,
         "pore_dice_locked": dice_locked,
+        "pore_dice_auto_otsu": dice_auto,
         "specific_surface_true": sv_true,
         "specific_surface_pred": sv_pred,
         "specific_surface_rel_error": sv_rel_err,
@@ -257,7 +296,7 @@ def evaluate_petrophysical_metrics(
         "pore_radius_wasserstein": psd_w1,
         "two_point_corr_rmse": s2_rmse,
     }
-    if pred_arr.ndim == 3 and true_arr.ndim == 3:
+    if pred_arr.ndim == 3 and true_arr.ndim == 3 and min(pred_arr.shape) >= 2:
         metrics["through_plane_anisotropy_error"] = compute_through_plane_anisotropy_error(
             pred_arr, true_arr, stack_axis=stack_axis
         )
@@ -271,15 +310,9 @@ def evaluate_triphase_zn13x_metrics(
 ) -> dict[str, float]:
     """Quantify three-phase reactive microstructure in Zn-doped Zeolite 13X XCT volumes.
 
-    Partitions ``Zn-13X`` absorption micro-CT reconstructions (Green et al., *Sci. Data* 2025)
-    into three physically meaningful chemical/structural domains ordered by 27 keV X-ray
-    linear attenuation:
-    1. **Macropore / Mesopore network** (``I < t_low``)
-    2. **Unexchanged ``Na-13X`` zeolite core** (``t_low <= I < t_high``)
-    3. **Ion-exchanged ``Zn-13X`` outer shell** (``I >= t_high``)
-
-    Reports per-phase Dice similarity, phase volume-fraction errors, and the macroscopic
-    ``Zn / (Zn + Na)`` solid ion-exchange fraction error (directly linkable to DIAD ``XRD-CT``).
+    Locks ``(t_low, t_high)`` on ``target`` (ground-truth HR) and applies those exact physical
+    attenuation thresholds to ``pred`` so greyscale shift across Pore / ``Na-13X`` / ``Zn-13X``
+    phases is faithfully measured.
     """
     from skimage.filters import threshold_multiotsu
 
@@ -290,6 +323,8 @@ def evaluate_triphase_zn13x_metrics(
 
     if thresholds is not None:
         t_lo, t_hi = float(thresholds[0]), float(thresholds[1])
+    elif float(np.ptp(true_arr)) < 1e-4:
+        t_lo, t_hi = 0.40, 0.78
     else:
         try:
             thrs = threshold_multiotsu(true_arr, classes=3)
@@ -297,6 +332,8 @@ def evaluate_triphase_zn13x_metrics(
         except ValueError:
             p33, p67 = np.percentile(true_arr, [33.3, 66.7])
             t_lo, t_hi = float(p33), float(p67)
+        if np.isclose(t_lo, t_hi, atol=1e-5):
+            t_lo, t_hi = 0.40, 0.78
 
     true_pore = true_arr < t_lo
     true_na = (true_arr >= t_lo) & (true_arr < t_hi)

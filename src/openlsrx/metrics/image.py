@@ -103,6 +103,10 @@ def compute_ssim_3d_isotropic(
         raise ValueError(
             f"Expected 3D volumes (D, H, W), got {tuple(p.shape)} and {tuple(t.shape)}."
         )
+    if min(p.shape) < 3:
+        sq_ax = next(ax for ax, sz in enumerate(p.shape) if sz < 3)
+        if p.shape[sq_ax] == 1 and t.shape[sq_ax] == 1:
+            return compute_ssim(p.squeeze(sq_ax), t.squeeze(sq_ax), data_range=data_range)
     ssim_yz = compute_ssim(p, t, data_range=data_range)
     ssim_xz = compute_ssim(p.permute(1, 0, 2), t.permute(1, 0, 2), data_range=data_range)
     ssim_xy = compute_ssim(p.permute(2, 0, 1), t.permute(2, 0, 1), data_range=data_range)
@@ -129,16 +133,31 @@ def evaluate_image_metrics(
     target: Tensor | np.ndarray,
     data_range: float = 1.0,
 ) -> dict[str, float]:
-    """Compute a complete dictionary of image-fidelity metrics."""
+    """Compute a complete dictionary of image-fidelity metrics (safe on both 2D slices and 3D cubes)."""
     p = torch.as_tensor(pred, dtype=torch.float32)
     t = torch.as_tensor(target, dtype=torch.float32, device=p.device)
-    results: dict[str, float] = {
+    if p.ndim == 3 and t.ndim == 3 and p.shape == t.shape and 1 in p.shape:
+        sq_ax = tuple(p.shape).index(1)
+        p_2d = p.squeeze(sq_ax)
+        t_2d = t.squeeze(sq_ax)
+        results: dict[str, float] = {
+            "psnr": compute_psnr(p_2d, t_2d, data_range=data_range),
+            "ssim": compute_ssim(p_2d, t_2d, data_range=data_range),
+            "mae": compute_mae(p_2d, t_2d),
+            "rmse": compute_rmse(p_2d, t_2d),
+        }
+        ms_2d = compute_ms_ssim(p_2d, t_2d, data_range=data_range)
+        if ms_2d is not None:
+            results["ms_ssim"] = ms_2d
+        return results
+
+    results = {
         "psnr": compute_psnr(p, t, data_range=data_range),
         "ssim": compute_ssim(p, t, data_range=data_range),
         "mae": compute_mae(p, t),
         "rmse": compute_rmse(p, t),
     }
-    if p.ndim == 3:
+    if p.ndim == 3 and min(p.shape) >= 3:
         results["ssim_3d_triplanar"] = compute_ssim_3d_isotropic(p, t, data_range=data_range)
     ms_ssim = compute_ms_ssim(p, t, data_range=data_range)
     if ms_ssim is not None:

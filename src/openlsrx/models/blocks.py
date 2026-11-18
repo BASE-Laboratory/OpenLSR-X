@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+import torch.nn.functional as F
 from torch import Tensor, nn
 
 from ..losses import PixelNorm
@@ -23,6 +24,24 @@ def _build_norm(norm_type: NormType, channels: int, enabled: bool) -> nn.Module:
     raise ValueError(
         f"Unsupported norm_type={norm_type!r}. Expected 'pixel', 'batch', 'instance', or 'none'."
     )
+
+
+def _safe_conv2d(conv: nn.Conv2d, x: Tensor) -> Tensor:
+    """Execute ``conv(x)`` falling back from ``reflect`` to ``replicate`` on tiny spatial inputs."""
+    if conv.padding_mode == "reflect" and isinstance(conv.padding, tuple):
+        ph, pw = int(conv.padding[0]), int(conv.padding[1])
+        if (ph > 0 or pw > 0) and (x.shape[-2] <= ph or x.shape[-1] <= pw):
+            padded = F.pad(x, (pw, pw, ph, ph), mode="replicate")
+            return F.conv2d(
+                padded,
+                conv.weight,
+                conv.bias,
+                stride=conv.stride,
+                padding=0,
+                dilation=conv.dilation,
+                groups=conv.groups,
+            )
+    return conv(x)
 
 
 class ConvBlock(nn.Module):
@@ -54,7 +73,7 @@ class ConvBlock(nn.Module):
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        out = self.bn(self.conv(x))
+        out = self.bn(_safe_conv2d(self.conv, x))
         return self.act(out) if self.use_act else out
 
 
@@ -77,7 +96,7 @@ class UpsampleBlock(nn.Module):
         self.act = nn.PReLU(num_parameters=in_channels)
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.act(self.pixel_shuffle(self.conv(x)))
+        return self.act(self.pixel_shuffle(_safe_conv2d(self.conv, x)))
 
 
 class ResidualBlock(nn.Module):

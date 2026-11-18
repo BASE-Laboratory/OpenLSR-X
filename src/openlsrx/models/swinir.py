@@ -1,12 +1,10 @@
 """Lightweight Shifted-Window Transformer (SwinIR) generator for 2D/2.5D XCT super-resolution.
 
-Implements Residual Swin Transformer Blocks (RSTB) with shifted-window 2D self-attention,
-learnable relative position biases, automatic reflect padding for arbitrary slice dimensions,
-central-slice global bicubic residual learning, and ``ArbitraryScaleUpsample`` supporting both
-power-of-two (``2x, 4x, 8x``) and fractional synchrotron magnification ratios (``2.5x, 5x``).
-
-Reference:
-    Liang, J. et al., "SwinIR: Image Restoration Using Swin Transformer", ICCV Workshops (2021).
+Implements Residual Swin Transformer Blocks (RSTB) with per-axis shifted-window 2D self-attention,
+cached shift masks, learnable relative position biases, automatic reflect/replicate padding for
+arbitrary slice dimensions, central-slice global bicubic residual learning, and
+``ArbitraryScaleUpsample`` supporting both power-of-two (``2x, 4x, 8x``) and fractional
+synchrotron magnification ratios (``2.5x, 5x``).
 """
 
 from __future__ import annotations
@@ -17,9 +15,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
-from ..losses import custom_sigmoid
+from .blocks import _safe_conv2d
 from .rrdb import ArbitraryScaleUpsample
-from .submodels import OutputActivation
+from .submodels import OutputActivation, apply_bounded_output
 
 
 def _window_partition(x: Tensor, window_size: int) -> Tensor:
@@ -60,14 +58,14 @@ class WindowAttention2D(nn.Module):
 
         coords_h = torch.arange(ws)
         coords_w = torch.arange(ws)
-        coords = torch.stack(torch.meshgrid(coords_h, coords_w, indexing="ij"))  # (2, ws, ws)
-        coords_flat = torch.flatten(coords, 1)  # (2, ws*ws)
-        rel_coords = coords_flat[:, :, None] - coords_flat[:, None, :]  # (2, N, N)
+        coords = torch.stack(torch.meshgrid(coords_h, coords_w, indexing="ij"))
+        coords_flat = torch.flatten(coords, 1)
+        rel_coords = coords_flat[:, :, None] - coords_flat[:, None, :]
         rel_coords = rel_coords.permute(1, 2, 0).contiguous()
         rel_coords[:, :, 0] += ws - 1
         rel_coords[:, :, 1] += ws - 1
         rel_coords[:, :, 0] *= 2 * ws - 1
-        rel_pos_index = rel_coords.sum(-1)  # (N, N)
+        rel_pos_index = rel_coords.sum(-1)
         self.register_buffer("relative_position_index", rel_pos_index, persistent=False)
 
         self.qkv = nn.Linear(dim, dim * 3)
@@ -100,7 +98,7 @@ class WindowAttention2D(nn.Module):
 
 
 class SwinTransformerLayer(nn.Module):
-    """Single Swin Transformer layer with optional cyclic window shift and pre-LayerNorm MLP."""
+    """Single Swin Transformer layer with per-axis cyclic window shift and cached attention masks."""
 
     def __init__(
         self,
@@ -125,30 +123,46 @@ class SwinTransformerLayer(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, dim),
         )
+        self._mask_cache: dict[tuple[int, int, int, int, torch.device, torch.dtype], Tensor] = {}
 
-    @staticmethod
-    def _build_shift_mask(
-        h: int, w: int, window_size: int, shift_size: int, device: torch.device, dtype: torch.dtype
+    def _get_shift_mask(
+        self,
+        h: int,
+        w: int,
+        shift_h: int,
+        shift_w: int,
+        device: torch.device,
+        dtype: torch.dtype,
     ) -> Tensor:
+        key = (h, w, shift_h, shift_w, device, dtype)
+        cached = self._mask_cache.get(key)
+        if cached is not None:
+            return cached
+
+        ws = self.window_size
         img_mask = torch.zeros((1, h, w, 1), device=device, dtype=dtype)
         h_slices = (
-            slice(0, -window_size),
-            slice(-window_size, -shift_size),
-            slice(-shift_size, None),
+            (slice(0, -ws), slice(-ws, -shift_h), slice(-shift_h, None))
+            if shift_h > 0
+            else (slice(0, None),)
         )
         w_slices = (
-            slice(0, -window_size),
-            slice(-window_size, -shift_size),
-            slice(-shift_size, None),
+            (slice(0, -ws), slice(-ws, -shift_w), slice(-shift_w, None))
+            if shift_w > 0
+            else (slice(0, None),)
         )
         cnt = 0
         for hs in h_slices:
-            for ws in w_slices:
-                img_mask[:, hs, ws, :] = cnt
+            for w_sl in w_slices:
+                img_mask[:, hs, w_sl, :] = cnt
                 cnt += 1
-        mask_windows = _window_partition(img_mask, window_size).view(-1, window_size * window_size)
+        mask_windows = _window_partition(img_mask, ws).view(-1, ws * ws)
         attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-        return attn_mask.masked_fill(attn_mask != 0, -100.0).masked_fill(attn_mask == 0, 0.0)
+        attn_mask = attn_mask.masked_fill(attn_mask != 0, -100.0).masked_fill(attn_mask == 0, 0.0)
+        if len(self._mask_cache) >= 8:
+            self._mask_cache.clear()
+        self._mask_cache[key] = attn_mask
+        return attn_mask
 
     def forward(self, x: Tensor) -> Tensor:
         """Forward on ``(B, H, W, C)`` where ``H, W`` are multiples of ``window_size``."""
@@ -156,11 +170,12 @@ class SwinTransformerLayer(nn.Module):
         shortcut = x
         x_norm = self.norm1(x)
 
-        eff_shift = self.shift_size if min(h, w) > self.window_size else 0
-        if eff_shift > 0:
-            shifted = torch.roll(x_norm, shifts=(-eff_shift, -eff_shift), dims=(1, 2))
-            attn_mask: Tensor | None = self._build_shift_mask(
-                h, w, self.window_size, eff_shift, device=x.device, dtype=x.dtype
+        shift_h = self.shift_size if h > self.window_size else 0
+        shift_w = self.shift_size if w > self.window_size else 0
+        if shift_h > 0 or shift_w > 0:
+            shifted = torch.roll(x_norm, shifts=(-shift_h, -shift_w), dims=(1, 2))
+            attn_mask: Tensor | None = self._get_shift_mask(
+                h, w, shift_h, shift_w, device=x.device, dtype=x.dtype
             )
         else:
             shifted = x_norm
@@ -174,8 +189,8 @@ class SwinTransformerLayer(nn.Module):
         )
         merged = _window_reverse(attn_windows, self.window_size, h, w)
 
-        if eff_shift > 0:
-            merged = torch.roll(merged, shifts=(eff_shift, eff_shift), dims=(1, 2))
+        if shift_h > 0 or shift_w > 0:
+            merged = torch.roll(merged, shifts=(shift_h, shift_w), dims=(1, 2))
 
         x = shortcut + merged
         return x + self.mlp(self.norm2(x))
@@ -224,7 +239,7 @@ class ResidualSwinBlock(nn.Module):
         feat = tokens.permute(0, 3, 1, 2).contiguous()
         if pad_h > 0 or pad_w > 0:
             feat = feat[:, :, :h, :w]
-        return x + self.res_scale * self.conv(feat)
+        return x + self.res_scale * _safe_conv2d(self.conv, feat)
 
 
 class SwinIRGenerator(nn.Module):
@@ -250,7 +265,6 @@ class SwinIRGenerator(nn.Module):
                 f"Unsupported output_activation={output_activation!r}. "
                 "Expected 'custom_sigmoid', 'sigmoid', 'clamp', or 'identity'."
             )
-        # Ensure embed_dim is divisible by num_heads
         eff_heads = int(num_heads)
         if out_channels % eff_heads != 0:
             eff_heads = max(1, math.gcd(int(out_channels), eff_heads))
@@ -287,30 +301,20 @@ class SwinIRGenerator(nn.Module):
         self.upsample = ArbitraryScaleUpsample(
             channels=self.out_channels, scale_factor=self.super_res_factor
         )
-        final_conv = nn.Conv2d(
+        self.hr_conv1 = nn.Conv2d(
+            self.out_channels, self.out_channels, 3, 1, 1, padding_mode="reflect"
+        )
+        self.hr_act = nn.LeakyReLU(0.2, inplace=True)
+        self.hr_conv2 = nn.Conv2d(
             self.out_channels, self.out_img_channels, 3, 1, 1, padding_mode="reflect"
         )
-        if final_conv.bias is not None:
-            nn.init.zeros_(final_conv.bias)
-        final_conv.weight.data.mul_(0.1)
-        self.hr_head = nn.Sequential(
-            nn.Conv2d(self.out_channels, self.out_channels, 3, 1, 1, padding_mode="reflect"),
-            nn.LeakyReLU(0.2, inplace=True),
-            final_conv,
-        )
-
-    def _apply_output_activation(self, x: Tensor) -> Tensor:
-        if self.output_activation == "custom_sigmoid":
-            return custom_sigmoid(x, k=self.sigmoid_k)
-        if self.output_activation == "sigmoid":
-            return torch.sigmoid(x)
-        if self.output_activation == "clamp":
-            return torch.clamp(x, 0.0, 1.0)
-        return x
+        if self.hr_conv2.bias is not None:
+            nn.init.zeros_(self.hr_conv2.bias)
+        self.hr_conv2.weight.data.mul_(0.1)
 
     def forward(self, x: Tensor) -> Tensor:
-        target_h = int(round(x.shape[-2] * self.super_res_factor))
-        target_w = int(round(x.shape[-1] * self.super_res_factor))
+        target_h = max(1, int(round(x.shape[-2] * self.super_res_factor)))
+        target_w = max(1, int(round(x.shape[-1] * self.super_res_factor)))
         if x.shape[1] == self.out_img_channels:
             center = x
         else:
@@ -318,10 +322,14 @@ class SwinIRGenerator(nn.Module):
             center = x[:, c_mid : c_mid + self.out_img_channels, :, :]
         base = F.interpolate(center, size=(target_h, target_w), mode="bicubic", align_corners=False)
 
-        feat = self.conv_first(x)
-        feat = feat + self.trunk_conv(self.trunk(feat))
+        feat = _safe_conv2d(self.conv_first, x)
+        feat = feat + _safe_conv2d(self.trunk_conv, self.trunk(feat))
         up = self.upsample(feat)
-        residual = self.hr_head(up)
-        if self.output_activation in ("clamp", "identity"):
-            return self._apply_output_activation(base + residual)
-        return self._apply_output_activation(residual)
+        residual = _safe_conv2d(self.hr_conv2, self.hr_act(_safe_conv2d(self.hr_conv1, up)))
+        return apply_bounded_output(
+            residual,
+            activation=self.output_activation,
+            sigmoid_k=self.sigmoid_k,
+            training=self.training,
+            base=base,
+        )
