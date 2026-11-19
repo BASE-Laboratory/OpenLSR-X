@@ -118,7 +118,7 @@ def run_public_rock_benchmark(
             pl.seed_everything(seed, workers=True)
             run_dir = output_dir / "runs" / f"{rock_name}_s{seed}"
             model = SRGAN(
-                backbone="swinir" if (dualscan or eff_scale == 3) else "srresnet",
+                backbone="swinir" if (dualscan or eff_scale == 3) else "srgan",
                 context_slices=3 if dualscan else 1,
                 learning_rate=3e-4 if dualscan else (2e-4 if fast else 5e-5),
                 adaptive_size=4 if fast else 8,
