@@ -40,8 +40,9 @@ jobs:
           uv pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
           uv pip install -e ".[dev,docs]"
 
-      - name: Ruff lint & format check
+      - name: Ruff lint, format & lockfile sync check
         run: |
+          uv lock --check
           uv run --no-sync ruff check src tests scripts examples
           uv run --no-sync ruff format --check src tests scripts examples
 
