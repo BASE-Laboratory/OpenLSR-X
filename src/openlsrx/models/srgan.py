@@ -27,7 +27,7 @@ from ..losses import (
     SoftCLDiceLoss,
     VGGLoss,
 )
-from ..metrics.image import compute_mae, compute_psnr, compute_rmse, compute_ssim
+from ..metrics.image import compute_mae, compute_ssim
 from .blocks import NormType
 from .rrdb import RRDBGenerator
 from .submodels import Discriminator, Generator, OutputActivation
@@ -191,10 +191,14 @@ class SRGAN(pl.LightningModule):
                 out_img_channels=1,
             )
         else:
-            if not isinstance(self.super_res_factor, int):
+            if (
+                not isinstance(self.super_res_factor, int)
+                or self.super_res_factor < 1
+                or (self.super_res_factor & (self.super_res_factor - 1)) != 0
+            ):
                 raise ValueError(
-                    f"backbone='srgan' requires integer power-of-2 super_res_factor, "
-                    f"got {self.super_res_factor}. Use backbone='rrdb' or 'swinir' for fractional scales."
+                    f"backbone='srgan' requires integer power-of-2 super_res_factor (1, 2, 4, 8, ...), "
+                    f"got {self.super_res_factor}. Use backbone='rrdb' or 'swinir' for 3x or fractional scales."
                 )
             self.gen = Generator(
                 in_channels=self.context_slices,
@@ -238,6 +242,34 @@ class SRGAN(pl.LightningModule):
         self.automatic_optimization = False
         self._predict_slice_counter = 0
         self._test_slice_counter = 0
+        self._val_se_sum = 0.0
+        self._val_elem_count = 0
+        self._test_se_sum = 0.0
+        self._test_elem_count = 0
+        self._saved_radiometric_state: dict[str, object] | None = None
+
+    def _capture_datamodule_radiometric_state(self) -> dict[str, object] | None:
+        if self._trainer is not None:
+            dm = getattr(self.trainer, "datamodule", None)
+            export_fn = getattr(dm, "export_radiometric_state", None)
+            if callable(export_fn):
+                exported = export_fn()
+                if isinstance(exported, dict):
+                    self._saved_radiometric_state = dict(exported)
+        return self._saved_radiometric_state
+
+    def on_fit_start(self) -> None:
+        self._capture_datamodule_radiometric_state()
+
+    def on_save_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        state = self._capture_datamodule_radiometric_state()
+        if state is not None:
+            checkpoint["openlsrx_radiometric_state"] = state
+
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        raw_state = checkpoint.get("openlsrx_radiometric_state")
+        if isinstance(raw_state, dict):
+            self._saved_radiometric_state = dict(raw_state)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.gen(_ensure_4d(x))
@@ -443,6 +475,10 @@ class SRGAN(pl.LightningModule):
             ):
                 sched.step()
 
+    def on_validation_epoch_start(self) -> None:
+        self._val_se_sum = 0.0
+        self._val_elem_count = 0
+
     @torch.no_grad()
     def validation_step(self, val_batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
         low_res, high_res = val_batch
@@ -454,14 +490,10 @@ class SRGAN(pl.LightningModule):
         high_f32 = high_4d.to(torch.float32)
 
         batch_size = int(low_4d.shape[0])
-        self.log(
-            "val/psnr",
-            compute_psnr(pred_f32, high_f32),
-            prog_bar=True,
-            on_epoch=True,
-            batch_size=batch_size,
-            sync_dist=True,
-        )
+        num_elems = int(pred_f32.numel())
+        self._val_se_sum += float(torch.sum((pred_f32 - high_f32).square()).item())
+        self._val_elem_count += num_elems
+
         self.log(
             "val/ssim",
             compute_ssim(pred_f32, high_f32),
@@ -474,14 +506,7 @@ class SRGAN(pl.LightningModule):
             "val/mae",
             compute_mae(pred_f32, high_f32),
             on_epoch=True,
-            batch_size=batch_size,
-            sync_dist=True,
-        )
-        self.log(
-            "val/rmse",
-            compute_rmse(pred_f32, high_f32),
-            on_epoch=True,
-            batch_size=batch_size,
+            batch_size=num_elems,
             sync_dist=True,
         )
 
@@ -504,8 +529,31 @@ class SRGAN(pl.LightningModule):
                 low_4d[0, c_mid].to(torch.float32).cpu().numpy(),
             )
 
+    def _reduce_epoch_se(self, se_sum: float, elem_count: int) -> tuple[float, float]:
+        stats = torch.tensor([se_sum, float(elem_count)], device=self.device, dtype=torch.float64)
+        if self._trainer is not None and int(getattr(self.trainer, "world_size", 1)) > 1:
+            gathered = torch.as_tensor(self.all_gather(stats))
+            se_tot = float(gathered[..., 0].sum().item())
+            cnt_tot = float(gathered[..., 1].sum().item())
+        else:
+            se_tot = float(stats[0].item())
+            cnt_tot = float(stats[1].item())
+        mse = se_tot / max(cnt_tot, 1.0)
+        rmse = math.sqrt(max(mse, 0.0))
+        psnr = 100.0 if mse <= 0.0 else -10.0 * math.log10(mse)
+        return psnr, rmse
+
+    def on_validation_epoch_end(self) -> None:
+        if self._val_elem_count <= 0:
+            return
+        psnr, rmse = self._reduce_epoch_se(self._val_se_sum, self._val_elem_count)
+        self.log("val/psnr", psnr, prog_bar=True, sync_dist=False)
+        self.log("val/rmse", rmse, sync_dist=False)
+
     def on_test_epoch_start(self) -> None:
         self._test_slice_counter = 0
+        self._test_se_sum = 0.0
+        self._test_elem_count = 0
 
     @torch.no_grad()
     def test_step(self, test_batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
@@ -518,16 +566,23 @@ class SRGAN(pl.LightningModule):
         high_f32 = high_4d.to(torch.float32)
         low_f32 = low_4d.to(torch.float32)
         batch_size = int(low_4d.shape[0])
+        num_elems = int(pred_f32.numel())
+        self._test_se_sum += float(torch.sum((pred_f32 - high_f32).square()).item())
+        self._test_elem_count += num_elems
 
         self.log(
-            "test/psnr", compute_psnr(pred_f32, high_f32), on_epoch=True, batch_size=batch_size
+            "test/ssim",
+            compute_ssim(pred_f32, high_f32),
+            on_epoch=True,
+            batch_size=batch_size,
+            sync_dist=True,
         )
         self.log(
-            "test/ssim", compute_ssim(pred_f32, high_f32), on_epoch=True, batch_size=batch_size
-        )
-        self.log("test/mae", compute_mae(pred_f32, high_f32), on_epoch=True, batch_size=batch_size)
-        self.log(
-            "test/rmse", compute_rmse(pred_f32, high_f32), on_epoch=True, batch_size=batch_size
+            "test/mae",
+            compute_mae(pred_f32, high_f32),
+            on_epoch=True,
+            batch_size=num_elems,
+            sync_dist=True,
         )
 
         if self.global_rank == 0:
@@ -542,6 +597,13 @@ class SRGAN(pl.LightningModule):
                 )
                 tifffile.imwrite(test_dir / f"high_{idx:05d}.tiff", high_f32[i, 0].cpu().numpy())
                 tifffile.imwrite(test_dir / f"low_{idx:05d}.tiff", low_f32[i, c_mid].cpu().numpy())
+
+    def on_test_epoch_end(self) -> None:
+        if self._test_elem_count <= 0:
+            return
+        psnr, rmse = self._reduce_epoch_se(self._test_se_sum, self._test_elem_count)
+        self.log("test/psnr", psnr, sync_dist=False)
+        self.log("test/rmse", rmse, sync_dist=False)
 
     def _predict_base_dir(self) -> Path:
         dm = getattr(self.trainer, "datamodule", None) if self._trainer is not None else None
@@ -694,8 +756,9 @@ class SRGAN(pl.LightningModule):
                                 contiguous=True,
                             )
 
-        # True 3-axis orthogonal volumetric reconstruction + epistemic uncertainty when DataModule provides 3D LR
+        # True 3-axis orthogonal volumetric reconstruction + inter-view disagreement uncertainty (sigma_ortho)
         pred_lr_vol = getattr(dm, "predict_lr_volume", None) if dm is not None else None
+        pred_hr_vol = getattr(dm, "predict_hr_volume", None) if dm is not None else None
         pred_mode = (
             getattr(dm, "predict_mode", "orthogonal_3axis") if dm is not None else "single_axis"
         )
@@ -729,6 +792,19 @@ class SRGAN(pl.LightningModule):
                 bigtiff=True,
                 photometric="minisblack",
             )
+            tifffile.imwrite(
+                ortho_dir / f"{prefix}low_res_stack.tiff",
+                np.ascontiguousarray(pred_lr_vol, dtype=np.float32),
+                bigtiff=True,
+                photometric="minisblack",
+            )
+            if pred_hr_vol is not None:
+                tifffile.imwrite(
+                    ortho_dir / f"{prefix}high_res_stack.tiff",
+                    np.ascontiguousarray(pred_hr_vol, dtype=np.float32),
+                    bigtiff=True,
+                    photometric="minisblack",
+                )
             if base_dir.is_dir():
                 tifffile.imwrite(
                     base_dir / f"{prefix}predicted_orthogonal_fused.tiff",
@@ -736,6 +812,13 @@ class SRGAN(pl.LightningModule):
                     bigtiff=True,
                     photometric="minisblack",
                 )
+                tifffile.imwrite(
+                    base_dir / f"{prefix}predicted_uncertainty_std.tiff",
+                    unc_vol,
+                    bigtiff=True,
+                    photometric="minisblack",
+                )
+                # Backward-compatible filename alias
                 tifffile.imwrite(
                     base_dir / f"{prefix}predicted_epistemic_std.tiff",
                     unc_vol,

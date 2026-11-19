@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Literal
 
@@ -12,7 +13,7 @@ import torch
 import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter, zoom
 from torch import Tensor
-from torch.utils.data import ConcatDataset, Dataset
+from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler
 
 NormMode = Literal["minmax", "percentile", "fixed", "none"]
 CrossScanCalibrationMode = Literal["none", "affine", "quantile"]
@@ -490,7 +491,12 @@ def split_volume_spatially(
 
 
 def _safe_pad_spatial(arr: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
-    """Reflect/edge pad trailing ``(H, W)`` dimensions of a slice stack up to ``(target_h, target_w)``."""
+    """Symmetric half-sample pad trailing ``(H, W)`` dimensions up to ``(target_h, target_w)``.
+
+    Half-sample ``mode="symmetric"`` reflects across the outer voxel face ``N - 0.5`` rather than
+    voxel center ``N - 1``, preserving exact ``s``-voxel cell-centered alignment between padded
+    LR and HR patches for any integer super-resolution factor ``s``.
+    """
     cur_h, cur_w = int(arr.shape[-2]), int(arr.shape[-1])
     pad_h = max(0, target_h - cur_h)
     pad_w = max(0, target_w - cur_w)
@@ -500,10 +506,7 @@ def _safe_pad_spatial(arr: np.ndarray, target_h: int, target_w: int) -> np.ndarr
         (0, pad_h),
         (0, pad_w),
     ]
-    mode: Literal["reflect", "edge"] = (
-        "reflect" if (cur_h > 1 and cur_w > 1 and pad_h < cur_h and pad_w < cur_w) else "edge"
-    )
-    return np.pad(arr, pad_spec, mode=mode).astype(np.float32, copy=False)
+    return np.pad(arr, pad_spec, mode="symmetric").astype(np.float32, copy=False)
 
 
 def build_strided_context_windows(
@@ -692,6 +695,82 @@ class PairedSliceDataset(Dataset[tuple[Tensor, Tensor]]):
         return lr.contiguous(), hr.contiguous()
 
 
+class ConcatSubdatasetBatchSampler(Sampler[list[int]]):
+    """Yield batches strictly within each sub-dataset of a ``ConcatDataset``.
+
+    Prevents ``DataLoader`` collation errors when orthogonal slice views of a non-cubic slab
+    (e.g. ``yz`` of ``(32, 32)`` vs ``xz`` of ``(5, 32)``) have distinct spatial shapes without
+    corrupting thin-slab validation/test metrics with artificial border padding.
+    """
+
+    def __init__(
+        self,
+        concat_dataset: ConcatDataset[tuple[Tensor, Tensor]],
+        batch_size: int,
+        shuffle: bool = False,
+    ) -> None:
+        self.concat_dataset = concat_dataset
+        self.batch_size = max(1, int(batch_size))
+        self.shuffle = bool(shuffle)
+        self._ranges: list[tuple[int, int]] = []
+        start = 0
+        for end in concat_dataset.cumulative_sizes:
+            if end > start:
+                self._ranges.append((start, int(end)))
+            start = int(end)
+
+    def __len__(self) -> int:
+        return sum(math.ceil((end - start) / self.batch_size) for start, end in self._ranges)
+
+    def __iter__(self) -> Iterator[list[int]]:
+        batches: list[list[int]] = []
+        for start, end in self._ranges:
+            if self.shuffle:
+                perm = torch.randperm(end - start).tolist()
+                idxs = [start + i for i in perm]
+            else:
+                idxs = list(range(start, end))
+            for k in range(0, len(idxs), self.batch_size):
+                batches.append(idxs[k : k + self.batch_size])
+        if self.shuffle and len(batches) > 1:
+            b_perm = torch.randperm(len(batches)).tolist()
+            batches = [batches[i] for i in b_perm]
+        yield from batches
+
+
+def make_slice_dataloader(
+    dataset: Dataset[tuple[Tensor, Tensor]],
+    batch_size: int,
+    shuffle: bool = False,
+    num_workers: int = 0,
+    pin_memory: bool = False,
+    persistent_workers: bool = False,
+) -> DataLoader[tuple[Tensor, Tensor]]:
+    """Construct a ``DataLoader`` that safely batches heterogeneous-shape ``ConcatDataset`` axes."""
+    if isinstance(dataset, ConcatDataset) and len(dataset.datasets) > 1:
+        shapes: set[tuple[int, int]] = set()
+        for sub_ds in dataset.datasets:
+            if isinstance(sub_ds, PairedSliceDataset) and sub_ds.patch_size_lr is None:
+                shapes.add((int(sub_ds.low_res.shape[-2]), int(sub_ds.low_res.shape[-1])))
+        if len(shapes) > 1:
+            sampler = ConcatSubdatasetBatchSampler(dataset, batch_size=batch_size, shuffle=shuffle)
+            return DataLoader(
+                dataset,
+                batch_sampler=sampler,
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                persistent_workers=persistent_workers,
+            )
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=persistent_workers,
+    )
+
+
 def build_multi_axis_slice_dataset(
     lr_sub: np.ndarray,
     hr_sub: np.ndarray,
@@ -701,8 +780,8 @@ def build_multi_axis_slice_dataset(
     augment: bool = False,
     context_slices: int = 1,
 ) -> Dataset[tuple[Tensor, Tensor]]:
-    """Build a multi-axis slice dataset without artificial border padding when ``patch_size_lr`` is set."""
-    if len(axes) <= 1 or patch_size_lr is None:
+    """Build a single- or multi-axis slice dataset with zero artificial border padding."""
+    if len(axes) <= 1:
         lo, hi = extract_paired_slices_from_subvolume(
             lr_sub,
             hr_sub,

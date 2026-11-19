@@ -6,6 +6,7 @@ throughput, and petrophysical fidelity against 2D + 3-Axis Orthogonal Fourier Fu
 
 from __future__ import annotations
 
+import math
 from typing import Literal
 
 import numpy as np
@@ -15,7 +16,7 @@ import torch.nn.functional as F
 from torch import Tensor, nn, optim
 from torch.utils.data import DataLoader, Dataset
 
-from ..metrics import compute_mae, compute_psnr, compute_rmse, compute_ssim_3d_isotropic
+from ..metrics import compute_mae, compute_ssim_3d_isotropic
 
 
 def _safe_conv3d(conv: nn.Conv3d, x: Tensor) -> Tensor:
@@ -261,6 +262,7 @@ class SR3DResNet(pl.LightningModule):
         loss_type: Literal["l1", "mse"] = "l1",
         pore_is_low: bool = True,
         conservation_loss_weight: float = 0.0,
+        conservation_psf_sigma: float = 0.0,
         topology_loss_weight: float = 0.0,
         gradient_loss_weight: float = 0.0,
         ffl_loss_weight: float = 0.0,
@@ -271,9 +273,12 @@ class SR3DResNet(pl.LightningModule):
         self.super_res_factor = int(super_res_factor)
         self.pore_is_low = bool(pore_is_low)
         self.conservation_loss_weight = float(conservation_loss_weight)
+        self.conservation_psf_sigma = float(conservation_psf_sigma)
         self.topology_loss_weight = float(topology_loss_weight)
         self.gradient_loss_weight = float(gradient_loss_weight)
         self.ffl_loss_weight = float(ffl_loss_weight)
+        self._val_se_sum = 0.0
+        self._val_elem_count = 0
         self.gen = Generator3D(
             in_channels=1,
             out_channels=out_channels,
@@ -288,10 +293,36 @@ class SR3DResNet(pl.LightningModule):
             SoftCLDiceLoss,
         )
 
-        self.conservation_criterion = AttenuationConservationLoss()
+        self.conservation_criterion = AttenuationConservationLoss(
+            psf_sigma=self.conservation_psf_sigma
+        )
         self.topology_criterion = SoftCLDiceLoss(pore_is_low=self.pore_is_low)
         self.gradient_criterion = SobelGradientLoss()
         self.ffl_criterion = FocalFrequencyLoss()
+        self._saved_radiometric_state: dict[str, object] | None = None
+
+    def _capture_datamodule_radiometric_state(self) -> dict[str, object] | None:
+        if self._trainer is not None:
+            dm = getattr(self.trainer, "datamodule", None)
+            export_fn = getattr(dm, "export_radiometric_state", None)
+            if callable(export_fn):
+                exported = export_fn()
+                if isinstance(exported, dict):
+                    self._saved_radiometric_state = dict(exported)
+        return self._saved_radiometric_state
+
+    def on_fit_start(self) -> None:
+        self._capture_datamodule_radiometric_state()
+
+    def on_save_checkpoint(self, checkpoint: dict[str, object]) -> None:
+        state = self._capture_datamodule_radiometric_state()
+        if state is not None:
+            checkpoint["openlsrx_radiometric_state"] = state
+
+    def on_load_checkpoint(self, checkpoint: dict[str, object]) -> None:
+        raw_state = checkpoint.get("openlsrx_radiometric_state")
+        if isinstance(raw_state, dict):
+            self._saved_radiometric_state = dict(raw_state)
 
     def forward(self, x: Tensor) -> Tensor:
         return self.gen(x)
@@ -318,26 +349,57 @@ class SR3DResNet(pl.LightningModule):
         )
         return loss
 
+    def on_validation_epoch_start(self) -> None:
+        self._val_se_sum = 0.0
+        self._val_elem_count = 0
+
     @torch.no_grad()
     def validation_step(self, batch: tuple[Tensor, Tensor], batch_idx: int) -> None:
         lr_cube, hr_cube = batch
         pred = self.gen(lr_cube).to(torch.float32)
         target = hr_cube.to(torch.float32)
         bs = int(lr_cube.shape[0])
+        num_elems = int(pred.numel())
+        self._val_se_sum += float(torch.sum((pred - target).square()).item())
+        self._val_elem_count += num_elems
         ssim_mean = float(
             np.mean([compute_ssim_3d_isotropic(pred[i, 0], target[i, 0]) for i in range(bs)])
-        )
-        self.log(
-            "val/psnr", compute_psnr(pred, target), prog_bar=True, on_epoch=True, batch_size=bs
         )
         self.log(
             "val/ssim_3d",
             ssim_mean,
             on_epoch=True,
             batch_size=bs,
+            sync_dist=True,
         )
-        self.log("val/mae", compute_mae(pred, target), on_epoch=True, batch_size=bs)
-        self.log("val/rmse", compute_rmse(pred, target), on_epoch=True, batch_size=bs)
+        self.log(
+            "val/mae",
+            compute_mae(pred, target),
+            on_epoch=True,
+            batch_size=num_elems,
+            sync_dist=True,
+        )
+
+    def on_validation_epoch_end(self) -> None:
+        if self._val_elem_count <= 0:
+            return
+        stats = torch.tensor(
+            [self._val_se_sum, float(self._val_elem_count)],
+            device=self.device,
+            dtype=torch.float64,
+        )
+        if self._trainer is not None and int(getattr(self.trainer, "world_size", 1)) > 1:
+            gathered = torch.as_tensor(self.all_gather(stats))
+            se_tot = float(gathered[..., 0].sum().item())
+            cnt_tot = float(gathered[..., 1].sum().item())
+        else:
+            se_tot = float(stats[0].item())
+            cnt_tot = float(stats[1].item())
+        mse = se_tot / max(cnt_tot, 1.0)
+        rmse = math.sqrt(max(mse, 0.0))
+        psnr = 100.0 if mse <= 0.0 else -10.0 * math.log10(mse)
+        self.log("val/psnr", psnr, prog_bar=True, sync_dist=False)
+        self.log("val/rmse", rmse, sync_dist=False)
 
     def configure_optimizers(self) -> optim.Optimizer:
         return optim.Adam(self.parameters(), lr=self.learning_rate)

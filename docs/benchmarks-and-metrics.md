@@ -7,13 +7,13 @@ Standard computer-vision metrics (PSNR and 2D SSIM) can favor overly smooth reco
 ## Implemented Metrics
 
 ### 1. Image-Fidelity Metrics (`openlsrx.metrics.image`)
-- **PSNR (dB):** Volumetric Peak Signal-to-Noise Ratio.
-- **2D Slice SSIM & 3D Tri-Planar SSIM:** Structural Similarity averaged across `yz`, `xz`, and `xy` planes.
-- **MS-SSIM, MAE, and RMSE:** Multi-scale structural similarity (for slices $\ge 161$ px) and pixelwise error norms.
+- **PSNR (dB):** Volumetric Peak Signal-to-Noise Ratio (aggregated over total MSE across validation/test epochs).
+- **2D Slice SSIM & 3D Tri-Planar SSIM:** Gaussian-weighted Structural Similarity averaged across valid `yz`, `xz`, and `xy` planes.
+- **MS-SSIM, MAE, and RMSE:** Multi-scale structural similarity (for slices $\ge 176$ px across 5 dyadic scales with $11 \times 11$ kernels) and pixelwise error norms.
 
 ### 2. Spectral Agreement Metrics (`openlsrx.metrics.spectral`)
-- **3D Fourier Shell Correlation (FSC) & 2D Fourier Ring Correlation (FRC):** Hann-apodized, window-weighted zero-DC radial spectral correlation (`rfftn`-multiplicity weighted, excluding $k=0$).
-- **Prediction-vs-Reference `FSC = 0.5` Crossover (`fsc_cutoff_050_cyc_vox`, `fsc_half_pitch_050_um`) & Spectral AUC (`fsc_auc`):** Reports the spatial frequency where prediction-to-reference correlation drops below `0.5`—a blur-sensitive agreement metric appropriate for full-reference super-resolution (unlike cryo-EM `0.143` half-map thresholds, which assume two independent noisy reconstructions).
+- **3D Fourier Shell Correlation (FSC) & 2D Fourier Ring Correlation (FRC):** Cell-centered `Tukey(alpha=0.15)`-apodized, window-DOF-corrected zero-DC radial spectral correlation (`rfftn`-multiplicity weighted, excluding $k=0$, with `max(shape) // 2` radial shells so thin test slabs preserve full in-plane frequency resolution).
+- **Prediction-vs-Reference `FSC = 0.5` Crossover (`fsc_cutoff_050_cyc_vox`, `fsc_half_pitch_050_um`, `fsc_nyquist_fraction`) & Spectral AUC (`fsc_auc`):** Reports the spatial frequency where prediction-to-reference correlation drops below `0.5`—the Rosenthal–Henderson map-vs-ground-truth criterion corresponding to half-map `FSC_half = 0.143` (half-map `0.143` and `half-bit` diagnostics are retained separately for reference).
 
 ### 3. Petrophysical & Topological Metrics (`openlsrx.metrics.petrophysics`)
 - **Reference-Locked Thresholding (`threshold_true`):** Headline petrophysical and transport metrics apply the ground-truth HR threshold (`otsu`, `yen`, or `fixed`) to both `pred_vol` and `true_vol` so greyscale gain/offset bias is exposed rather than hidden (with independent `*_auto_otsu` diagnostics reported separately).
@@ -23,8 +23,8 @@ Standard computer-vision metrics (PSNR and 2D SSIM) can favor overly smooth reco
 - **Through-Plane Anisotropy Error:** Measures slice-stacking gradient discontinuities along the non-trained axis relative to ground-truth structural anisotropy.
 
 ### 4. 3D Pore-Scale Transport Physics (`openlsrx.metrics.transport`)
-- **Residual-Verified Directional Effective Diffusivity ($D_{\text{eff}}/D_0$) & Tortuosity ($\tau_z, \tau_y, \tau_x$):** Solves steady-state 3D Fickian Laplace diffusion ($\nabla \cdot \nabla c = 0$) across all three Cartesian directions on the 6-connected percolating pore network using a cell-centered finite-volume discretization matching `OpenImpala` and `TauFactor`, verifying `cg` convergence (`info == 0`), relative residual norm, inlet/outlet flux conservation, and variational bounds ($0 \le D_{\text{eff}}/D_0 \le \phi_{\text{perc}}$, $\tau \ge 1$).
-- **View-Disagreement Transport Sensitivity Bounds (`compute_tortuosity_uncertainty_bounds`):** Evaluates `[D_eff^-, D_eff^+]` under $\hat{V} \pm k\sigma_{\text{ortho}}$ alongside voxel-wise Spearman rank correlation between $\sigma_{\text{ortho}}$ and $|\hat{V} - V_{\text{HR}}|$.
+- **Residual-Verified Directional Effective Diffusivity ($D_{\text{eff}}/D_0$) & Tortuosity ($\tau_z, \tau_y, \tau_x$):** Solves steady-state 3D Fickian Laplace diffusion ($\nabla \cdot \nabla c = 0$) across all three Cartesian directions on the 6-connected percolating pore network using a cell-centered finite-volume discretization matching `OpenImpala` and `TauFactor`, verifying `cg` convergence (`pred_solver_converged`, `true_solver_converged`), relative residual norm, inlet/outlet flux conservation, and variational bounds ($0 \le D_{\text{eff}}/D_0 \le \phi_{\text{perc}}$, $\tau \ge 1$).
+- **View-Disagreement Transport Sensitivity Bounds (`compute_tortuosity_uncertainty_bounds`):** Evaluates `[D_eff^-, D_eff^+]` under $\hat{V} \pm k\sigma_{\text{ortho}}$ alongside voxel-wise Spearman rank correlation between inter-view standard deviation $\sigma_{\text{ortho}}$ ($n=3$ orthogonal sweeps, a geometric self-consistency proxy distinct from Bayesian posterior variance) and $|\hat{V} - V_{\text{HR}}|$.
 - **Simulated Capillary Drainage Curve RMSE ($S_{\text{nwp}}(P_c)$):** Simulates inlet-connected morphological drainage via `PoreSpy` to quantify throat-entry capillary pressure errors.
 
 ---
@@ -35,13 +35,13 @@ For full-volume HPC transport simulations on `AMReX` grids using [`BASE-Laborato
 
 ```bash
 openlsrx export-openimpala \
-  --volume outputs/predicted_orthogonal/predicted_stack.tiff \
+  --volume outputs/ps_predict/predicted_orthogonal/ps_predict_predicted_stack.tiff \
   --output-dir outputs/openimpala_ready \
   --name zn13x_sr \
   --direction x
 ```
 
-This writes both an uncompressed 8-bit phase-labeled 3D TIFF (`zn13x_sr.tif`) and a ready-to-run AMReX `ParmParse` input deck (`zn13x_sr_openimpala.inputs`). You can also combine transport evaluation and export in a single step via `openlsrx evaluate --include-transport --export-openimpala-dir outputs/openimpala_ready`.
+This writes both an uncompressed 8-bit phase-labeled 3D TIFF (`zn13x_sr.tif`) and a ready-to-run AMReX `ParmParse` input deck (`zn13x_sr_openimpala.inputs`) with `amr.blocking_factor = gcd(nx, ny, nz, 8)` so odd/non-power-of-two grids (`225^3`, `27 x 96 x 96`) decompose cleanly. You can also combine transport evaluation and export in a single step via `openlsrx evaluate --include-transport --export-openimpala-dir outputs/openimpala_ready`.
 
 ---
 
@@ -50,12 +50,12 @@ This writes both an uncompressed 8-bit phase-labeled 3D TIFF (`zn13x_sr.tif`) an
 Given an isotropic low-resolution 3D scan $V_{\text{LR}} \in \mathbb{R}^{d \times h \times w}$ and a 2D or `2.5D` generator $G_\theta$:
 
 1. OpenLSR-X generates three cell-centered candidate super-resolved 3D volumes ($\hat{V}_{yz}, \hat{V}_{xz}, \hat{V}_{xy} \in \mathbb{R}^{D \times H \times W}$) via `zoom_cell_centered` (`grid_mode=True`) along each slicing axis and native-LR-strided `2.5D` context windows across the two orthogonal in-plane dimensions.
-2. In 3D Fourier space (`rfftn` in streaming `float32`/`complex64`), each candidate volume is weighted proportionally to its two super-resolved in-plane wavevector components (`mode="fourier"`), optionally preceded by spatial Winsorization of single-view out-of-plane blur outliers (`mode="confidence_fourier"`).
+2. In symmetric-padded 3D Fourier space (`rfftn` in streaming `float32`/`complex64` with scale-aware default OTF cutoff `psf_cutoff = 0.25 / scale_factor`), each candidate volume is weighted proportionally to its two super-resolved in-plane wavevector components (`mode="fourier"`), optionally preceded by stack-axis high-pass outlier Winsorization (`mode="confidence_fourier"`) that suppresses slice-to-slice chatter while preserving sharp single-view in-plane edges.
 
 OpenLSR-X includes four neural model families for controlled ablation:
 - **Shifted-Window `SwinIRGenerator` (`2D` / `2.5D`)** (`backbone="swinir"`): Windowed self-attention with native-LR-strided multi-slice context (`context_slices=3`) and multi-axis training (`train_axes=("yz", "xz", "xy")`).
-- **Classical `SRGAN` / `SRResNet`** (`backbone="srgan"`): Residual blocks with optional pixel/instance/batch normalization.
-- **Normalization-Free `RRDBGenerator` + `RaGAN`** (`backbone="rrdb"`, `gan_loss_type="ragan"`): Preserves greyscale X-ray attenuation contrasts and supports arbitrary fractional beamline magnification ratios (e.g., $2.5\times$ and $5\times$).
+- **Classical `SRGAN` / `SRResNet`** (`backbone="srgan"`): Residual blocks with optional pixel/instance/batch normalization (`2x`, `4x`, `8x`).
+- **Normalization-Free `RRDBGenerator` + `RaGAN`** (`backbone="rrdb"`, `gan_loss_type="ragan"`): Preserves greyscale X-ray attenuation contrasts and supports both $2^a 3^b$ (`2x`, `3x`, `4x`, `6x`, `8x`) and arbitrary fractional beamline magnification ratios (e.g., $2.5\times$ and $5\times$).
 - **Native 3D CNN Baseline (`SR3DResNet`)**: Volumetric 3D residual network with 48-element $O_h$ cubic symmetry augmentation and raised-cosine sliding-window inference (`super_resolve_volume_3d`).
 
 ---
@@ -66,17 +66,18 @@ OpenLSR-X includes four neural model families for controlled ablation:
    ```bash
    python scripts/benchmarks/porespy_study.py --output-dir results/porespy_study
    ```
-2. **Open Rock Micro-CT Study** (`bentheimer_sandstone` & `indiana_limestone`):
+2. **Open Rock Micro-CT & Physical $3\times$ Dual-Scan Studies** (`bentheimer_sandstone`, `indiana_limestone`, and `Zenodo 5542624` `18 um -> 6 um` dual-scan):
    ```bash
    python scripts/benchmarks/public_rock_xct.py --output-dir results/public_rock
+   python scripts/benchmarks/public_rock_xct.py --dualscan --output-dir results/public_rock_dualscan
    ```
 3. **Diamond Light Source I13-2 Multi-Resolution `Zn-13X` Synchrotron & Transport Study** ($2\times$ & $8\times$):
    ```bash
    python scripts/benchmarks/zn13x_synchrotron_study.py --output-dir results/zn13x_study
    ```
-4. **Isambard-AI (`GH200`) Multi-Seed SLURM Array & Campaign Aggregator:**
+4. **Isambard-AI (`GH200`) 12-Job Multi-Seed SLURM Array & Campaign Aggregator:**
    ```bash
    sbatch scripts/hpc/isambard_ai_array.slurm
    python scripts/benchmarks/aggregate_campaign.py --inputs results/campaign --output-dir results/campaign_summary
    ```
-   Generates multi-seed `mean ± std` `booktabs` LaTeX tables (`campaign_table.tex`), Markdown summaries (`campaign_summary.md`), and PSNR-vs-transport Pareto plots (`campaign_tradeoffs.png`).
+   Generates provenance-annotated multi-seed `mean ± std` `booktabs` LaTeX tables (`campaign_table.tex`), Markdown summaries (`campaign_summary.md`), and PSNR-vs-transport Pareto plots (`campaign_tradeoffs.png`).

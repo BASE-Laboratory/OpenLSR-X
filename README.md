@@ -40,7 +40,7 @@ openlsrx download-zn13x --dest data/benchmarks
 openlsrx fit -c configs/i13-xct/zn13x_2x_swinir_25d_physics.yaml
 ```
 
-Run standalone 3-axis orthogonal `confidence_fourier` super-resolution + view-disagreement uncertainty export on any 3D LR volume:
+Run standalone 3-axis orthogonal `confidence_fourier` super-resolution + view-disagreement uncertainty export on any 3D LR volume (automatically restoring train-fitted normalization and cross-scan calibration from the checkpoint):
 
 ```bash
 openlsrx predict-volume \
@@ -51,10 +51,10 @@ openlsrx predict-volume \
   --fusion confidence_fourier
 ```
 
-Prepare open rock micro-CT benchmark stacks (including physical $18\ \mu\text{m} \to 6\ \mu\text{m}$ $3\times$ dual-scan Bentheimer Sandstone from Zenodo `5542624`) and train:
+Prepare open rock micro-CT benchmark stacks (including physical $18\ \mu\text{m} \to 6\ \mu\text{m}$ $3\times$ dual-scan Bentheimer Sandstone from Zenodo `5542624`, sliced on the integer HR voxel grid to exact `(0, 0, 0)` alignment) and train:
 
 ```bash
-openlsrx download-benchmarks --datasets bentheimer_dualscan_core1 bentheimer_dualscan_core2 --dest data/benchmarks --size 75
+openlsrx download-benchmarks --datasets bentheimer_dualscan_core1 bentheimer_dualscan_core2 --dest data/benchmarks
 openlsrx fit -c configs/labxct/bs_dualscan_3x_swinir_25d.yaml
 ```
 

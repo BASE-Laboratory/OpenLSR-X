@@ -15,9 +15,9 @@ from scipy.ndimage import distance_transform_edt
 def _tukey_window_1d(n: int, alpha: float = 0.15) -> np.ndarray:
     if n <= 2 or alpha <= 0.0:
         return np.ones(n, dtype=np.float64)
-    eff_alpha = max(float(alpha), 0.35) if n < 20 else float(alpha)
-    eff_alpha = min(eff_alpha, 1.0)
-    x = np.linspace(0.0, 1.0, n, dtype=np.float64)
+    eff_alpha = min(1.0, max(float(alpha), 4.0 / float(n)))
+    # Cell-centered coordinates keep boundary slices tapered (> 0) rather than zeroed out
+    x = (np.arange(n, dtype=np.float64) + 0.5) / float(n)
     w = np.ones(n, dtype=np.float64)
     left = x < (eff_alpha / 2.0)
     right = x > (1.0 - eff_alpha / 2.0)
@@ -31,8 +31,8 @@ def _prepare_windowed_zero_dc(
     apodize: bool = True,
     alpha: float = 0.15,
     mask: np.ndarray | None = None,
-) -> np.ndarray:
-    """Subtract exact window-weighted mean so ``F(0) == 0`` identically without FOV step-edge leakage."""
+) -> tuple[np.ndarray, float]:
+    """Subtract exact window-weighted mean so ``F(0) == 0`` identically and return effective DoF factor."""
     data = np.asarray(arr, dtype=np.float64)
     win = np.ones(data.shape, dtype=np.float64)
     if apodize:
@@ -52,18 +52,20 @@ def _prepare_windowed_zero_dc(
             smooth_mask = 0.5 * (1.0 - np.cos(np.pi * np.clip(dt / taper_width, 0.0, 1.0)))
             win = win * smooth_mask
         elif not bool(m_bool.any()):
-            return np.zeros_like(data, dtype=np.float64)
+            return np.zeros_like(data, dtype=np.float64), 1.0
 
     w_sum = float(np.sum(win))
     if w_sum <= 1e-12:
-        return np.zeros_like(data, dtype=np.float64)
+        return np.zeros_like(data, dtype=np.float64), 1.0
+    w_sq_sum = float(np.sum(win * win))
+    f_win = float(np.clip((w_sum * w_sum) / max(float(win.size) * w_sq_sum, 1e-12), 0.05, 1.0))
     mu_w = float(np.sum(data * win) / w_sum)
-    return (data - mu_w) * win
+    return (data - mu_w) * win, f_win
 
 
-def _half_bit_threshold(shell_counts: np.ndarray) -> np.ndarray:
+def _half_bit_threshold(shell_counts: np.ndarray, dof_scale: float = 1.0) -> np.ndarray:
     """van Heel & Schatz (2005) 1/2-bit information threshold per Fourier ring/shell."""
-    n_eff = np.maximum(shell_counts.astype(np.float64), 2.0)
+    n_eff = np.maximum(shell_counts.astype(np.float64) * float(dof_scale), 2.0)
     sqrt_n = np.sqrt(n_eff)
     return (0.2071 + 1.9102 / sqrt_n) / (1.2071 + 0.9102 / sqrt_n)
 
@@ -84,12 +86,19 @@ def _find_crossing_frequency(
         return 0.5
     idx = int(below[0])
     if idx == 0:
-        return 0.0
+        # Interpolate from DC limit (k=0, corr=1.0) to first shell (freqs[0], corr[0])
+        y0 = 1.0 - float(thr_arr[0])
+        y1 = float(corr[0] - thr_arr[0])
+        if y0 <= 0.0:
+            return 0.0
+        denom = y0 - y1
+        frac = float(np.clip(y0 / denom, 0.0, 1.0)) if abs(denom) > 1e-12 else 0.0
+        return float(frac * freqs[0])
     # Linear interpolation between (idx - 1) and idx
     y0 = float(corr[idx - 1] - thr_arr[idx - 1])
     y1 = float(corr[idx] - thr_arr[idx])
     denom = y0 - y1
-    frac = np.clip(y0 / denom, 0.0, 1.0) if abs(denom) > 1e-12 else 0.0
+    frac = float(np.clip(y0 / denom, 0.0, 1.0)) if abs(denom) > 1e-12 else 0.0
     return float(freqs[idx - 1] + frac * (freqs[idx] - freqs[idx - 1]))
 
 
@@ -108,8 +117,8 @@ def _compute_fourier_correlation_nd(
     if min(p.shape) < 4:
         raise ValueError(f"All spatial dimensions must be >= 4, got {p.shape}.")
 
-    w_p = _prepare_windowed_zero_dc(p, apodize=apodize, mask=mask)
-    w_t = _prepare_windowed_zero_dc(t, apodize=apodize, mask=mask)
+    w_p, f_win = _prepare_windowed_zero_dc(p, apodize=apodize, mask=mask)
+    w_t, _ = _prepare_windowed_zero_dc(t, apodize=apodize, mask=mask)
 
     # Real half-spectrum FFT avoids redundant conjugate storage while accounting for exact multiplicity
     f_p = np.fft.rfftn(w_p)
@@ -128,12 +137,14 @@ def _compute_fourier_correlation_nd(
     if last_n % 2 == 0 and f_p.shape[-1] > 1:
         mult[..., -1] = 1.0
 
-    n_shells = max(2, min(p.shape) // 2)
+    # Use max(p.shape) // 2 so anisotropic thin test slabs (e.g. 24 x 96 x 96) retain fine
+    # radial wavenumber resolution along the high-resolution axes instead of collapsing shells.
+    n_shells = max(4, max(p.shape) // 2)
     edges = np.linspace(0.0, 0.5, n_shells + 1, dtype=np.float64)
     centers = 0.5 * (edges[:-1] + edges[1:])
 
     # Exclude k == 0 (DC origin) and bin (edges[i], edges[i + 1]] with right=True so fundamental
-    # modes k = 1/N always populate shell 0 (never leaving a single-voxel DC shell!).
+    # modes k = 1/N_max always populate shell 0 (never leaving a single-voxel DC shell!).
     k_flat = k_mag.ravel()
     shell_idx = np.digitize(k_flat, edges, right=True) - 1
     valid_mask = (k_flat > 0.0) & (shell_idx >= 0) & (shell_idx < n_shells)
@@ -149,6 +160,14 @@ def _compute_fourier_correlation_nd(
     den_t = np.bincount(bins, weights=pow_t, minlength=n_shells)
     counts = np.rint(np.bincount(bins, weights=m_valid, minlength=n_shells)).astype(np.int64)
 
+    nonempty = counts > 0
+    if not np.all(nonempty) and np.any(nonempty):
+        centers = centers[nonempty]
+        num = num[nonempty]
+        den_p = den_p[nonempty]
+        den_t = den_t[nonempty]
+        counts = counts[nonempty]
+
     denom = np.sqrt(den_p * den_t)
     corr = np.where(denom > eps, num / np.maximum(denom, eps), 0.0)
     corr = np.clip(corr, -1.0, 1.0)
@@ -157,7 +176,7 @@ def _compute_fourier_correlation_nd(
     mtf_eff = np.where(den_t > eps, num / np.maximum(den_t, eps), 0.0)
     mtf_eff = np.clip(mtf_eff, -1.0, 2.0)
 
-    half_bit = _half_bit_threshold(counts)
+    half_bit = _half_bit_threshold(counts, dof_scale=f_win)
     k_half_bit = _find_crossing_frequency(centers, corr, half_bit)
     k_0143 = _find_crossing_frequency(centers, corr, 0.143)
     k_050 = _find_crossing_frequency(centers, corr, 0.5)
@@ -192,6 +211,7 @@ def _compute_fourier_correlation_nd(
         "effective_mtf": mtf_eff.astype(np.float32),
         "half_bit_threshold": half_bit.astype(np.float32),
         "shell_counts": counts,
+        "window_dof_scale": f_win,
         "cutoff_freq_half_bit": k_half_bit,
         "cutoff_freq_0143": k_0143,
         "cutoff_freq_050": k_050,
@@ -201,6 +221,7 @@ def _compute_fourier_correlation_nd(
         "nyquist_fraction_half_bit": float(np.clip(k_half_bit / 0.5, 0.0, 1.0)),
         "spatial_half_pitch_050_um": float(res_050_um),
         "spatial_half_pitch_mtf_050_um": float(res_mtf_050_um),
+        "effective_resolution_050_um": float(res_050_um),
         "effective_resolution_half_bit_um": float(res_half_bit_um),
         "effective_resolution_0143_um": float(res_0143_um),
         "spectral_auc": float(np.clip(auc, 0.0, 1.0)),
@@ -250,11 +271,11 @@ def evaluate_spectral_metrics(
 ) -> dict[str, float]:
     """Return JSON-serializable scalar summary of 3D FSC/MTF (or 2D FRC/MTF) agreement with ground truth.
 
-    Reports both ``fsc_cutoff_050_cyc_vox`` / ``fsc_half_pitch_050_um`` (phase/SNR=1 shell
-    correlation ``FSC = 0.5``; Rosenthal & Henderson, *J. Mol. Biol.* 2003) and
-    ``mtf_cutoff_050_cyc_vox`` / ``mtf_half_pitch_050_um`` (reference-normalized amplitude
-    modulation transfer ``MTF_eff = 0.5``, sensitive even to noiseless zero-phase Gaussian blur)
-    alongside legacy ``1/2-bit`` / ``0.143`` shell thresholds.
+    For map-vs-reference comparisons (super-resolved volume vs ground-truth HR scan), Rosenthal &
+    Henderson (*J. Mol. Biol.* 2003) show that ``FSC_ref = 0.5`` is the exact theoretical counterpart
+    of the half-map ``FSC_half = 0.143`` criterion; accordingly ``fsc_nyquist_fraction`` reports
+    ``nyquist_fraction_050``, while ``fsc_nyquist_fraction_half_bit`` and ``fsc_cutoff_0143_cyc_vox``
+    are also retained for completeness.
     """
     p = np.asarray(pred_vol)
     t = np.asarray(true_vol)
@@ -275,14 +296,16 @@ def evaluate_spectral_metrics(
         "fsc_auc": float(res["spectral_auc"]),
         "mtf_auc": float(res["mtf_auc"]),
         "fsc_cutoff_050_cyc_vox": float(res["cutoff_freq_050"]),
+        "fsc_nyquist_fraction": float(res["nyquist_fraction_050"]),
         "fsc_nyquist_fraction_050": float(res["nyquist_fraction_050"]),
         "fsc_half_pitch_050_um": float(res["spatial_half_pitch_050_um"]),
+        "effective_resolution_050_um": float(res["effective_resolution_050_um"]),
         "mtf_cutoff_050_cyc_vox": float(res["cutoff_freq_mtf_050"]),
         "mtf_nyquist_fraction_050": float(res["nyquist_fraction_mtf_050"]),
         "mtf_half_pitch_050_um": float(res["spatial_half_pitch_mtf_050_um"]),
         "fsc_cutoff_half_bit_cyc_vox": float(res["cutoff_freq_half_bit"]),
+        "fsc_nyquist_fraction_half_bit": float(res["nyquist_fraction_half_bit"]),
         "fsc_cutoff_0143_cyc_vox": float(res["cutoff_freq_0143"]),
-        "fsc_nyquist_fraction": float(res["nyquist_fraction_half_bit"]),
         "effective_resolution_half_bit_um": float(res["effective_resolution_half_bit_um"]),
         "effective_resolution_0143_um": float(res["effective_resolution_0143_um"]),
     }

@@ -170,6 +170,50 @@ def _triplanar_mid_ssim(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
     return scores[0], float(np.mean(scores))
 
 
+def apply_hr_grid_shift_pair_3d(
+    lr_vol: np.ndarray,
+    hr_vol: np.ndarray,
+    shift_hr_zyx: tuple[int, int, int],
+    scale_factor: int,
+    min_overlap_lr: int = 1,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Slice ``(lr_vol, hr_vol)`` by an exact integer HR-voxel shift without interpolation or intensity scaling."""
+    s = int(scale_factor)
+    if s < 1:
+        raise ValueError(f"scale_factor must be >= 1, got {scale_factor}.")
+    dz_h, dy_h, dx_h = (int(shift_hr_zyx[0]), int(shift_hr_zyx[1]), int(shift_hr_zyx[2]))
+    hz = (-dz_h) % s
+    hy = (-dy_h) % s
+    hx = (-dx_h) % s
+    qz = (dz_h + hz) // s
+    qy = (dy_h + hy) // s
+    qx = (dx_h + hx) // s
+
+    avail_z_c = (int(hr_vol.shape[0]) - hz) // s
+    avail_y_c = (int(hr_vol.shape[1]) - hy) // s
+    avail_x_c = (int(hr_vol.shape[2]) - hx) // s
+
+    z0_c = max(0, -qz)
+    y0_c = max(0, -qy)
+    x0_c = max(0, -qx)
+
+    z1_c = min(avail_z_c, int(lr_vol.shape[0]) - qz)
+    y1_c = min(avail_y_c, int(lr_vol.shape[1]) - qy)
+    x1_c = min(avail_x_c, int(lr_vol.shape[2]) - qx)
+
+    req_min = max(1, int(min_overlap_lr))
+    if (z1_c - z0_c) < req_min or (y1_c - y0_c) < req_min or (x1_c - x0_c) < req_min:
+        return None
+
+    lr_sub = lr_vol[z0_c + qz : z1_c + qz, y0_c + qy : y1_c + qy, x0_c + qx : x1_c + qx].copy()
+    hr_sub = hr_vol[
+        hz + z0_c * s : hz + z1_c * s,
+        hy + y0_c * s : hy + y1_c * s,
+        hx + x0_c * s : hx + x1_c * s,
+    ].copy()
+    return lr_sub, hr_sub
+
+
 def register_multires_pair_3d(
     low_vol: np.ndarray,
     high_vol: np.ndarray,
@@ -207,47 +251,16 @@ def register_multires_pair_3d(
     def _extract_hr_grid_overlap(
         shift_hr: tuple[int, int, int],
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
-        dz_h, dy_h, dx_h = shift_hr
-        # Represent shift_hr = s * q_lr - r_hr with r_hr in [0, s - 1] so HR start is r_hr + s * z0_c
-        qz, rz = divmod(dz_h, s)
-        qy, ry = divmod(dy_h, s)
-        qx, rx = divmod(dx_h, s)
-        # Convert: lr_idx = c + q + (1 if r > 0? Wait: hr_slice starts at h_off in [0, s-1]:
-        # Specifically, if we offset HR by h_off in [0, s-1], block c of hr[h_off:] covers HR [h_off + c*s, h_off + (c+1)*s),
-        # which corresponds to LR index c + q_lr where s * q_lr - h_off == shift_hr => h_off = (-shift_hr) % s, q_lr = (shift_hr + h_off) // s!
-        hz = (-dz_h) % s
-        hy = (-dy_h) % s
-        hx = (-dx_h) % s
-        qz = (dz_h + hz) // s
-        qy = (dy_h + hy) // s
-        qx = (dx_h + hx) // s
-
-        avail_z_c = (hr.shape[0] - hz) // s
-        avail_y_c = (hr.shape[1] - hy) // s
-        avail_x_c = (hr.shape[2] - hx) // s
-
-        z0_c = max(0, -qz)
-        y0_c = max(0, -qy)
-        x0_c = max(0, -qx)
-
-        z1_c = min(avail_z_c, lr.shape[0] - qz)
-        y1_c = min(avail_y_c, lr.shape[1] - qy)
-        x1_c = min(avail_x_c, lr.shape[2] - qx)
-
-        min_overlap = min(8, int(min(common_lr_shape)))
-        if (
-            (z1_c - z0_c) < min_overlap
-            or (y1_c - y0_c) < min_overlap
-            or (x1_c - x0_c) < min_overlap
-        ):
+        sliced = apply_hr_grid_shift_pair_3d(
+            lr,
+            hr,
+            shift_hr_zyx=shift_hr,
+            scale_factor=s,
+            min_overlap_lr=min(8, int(min(common_lr_shape))),
+        )
+        if sliced is None:
             return None
-
-        lr_sub = lr[z0_c + qz : z1_c + qz, y0_c + qy : y1_c + qy, x0_c + qx : x1_c + qx]
-        hr_sub = hr[
-            hz + z0_c * s : hz + z1_c * s,
-            hy + y0_c * s : hy + y1_c * s,
-            hx + x0_c * s : hx + x1_c * s,
-        ]
+        lr_sub, hr_sub = sliced
         hr_c_sub = _block_downsample_3d(hr_sub, s)
         return lr_sub, hr_c_sub, hr_sub
 
@@ -494,9 +507,9 @@ def _read_centered_preview_h5_pair(
         lo_x0 = max(0, (int(d_lo.shape[2]) - eff_dx) // 2)
 
         hi_dz, hi_dy, hi_dx = eff_dz * scale, eff_dy * scale, eff_dx * scale
-        hi_z0 = max(0, (int(d_hi.shape[0]) - hi_dz) // 2)
-        hi_y0 = max(0, (int(d_hi.shape[1]) - hi_dy) // 2)
-        hi_x0 = max(0, (int(d_hi.shape[2]) - hi_dx) // 2)
+        hi_z0 = min(scale * lo_z0, max(0, int(d_hi.shape[0]) - hi_dz))
+        hi_y0 = min(scale * lo_y0, max(0, int(d_hi.shape[1]) - hi_dy))
+        hi_x0 = min(scale * lo_x0, max(0, int(d_hi.shape[2]) - hi_dx))
 
         lo_arr = sanitize_xct_volume(
             np.asarray(d_lo[lo_z0 : lo_z0 + eff_dz, lo_y0 : lo_y0 + eff_dy, lo_x0 : lo_x0 + eff_dx])
@@ -505,6 +518,36 @@ def _read_centered_preview_h5_pair(
             np.asarray(d_hi[hi_z0 : hi_z0 + hi_dz, hi_y0 : hi_y0 + hi_dy, hi_x0 : hi_x0 + hi_dx])
         )
     return normalize_volume(lo_arr, mode="none"), normalize_volume(hi_arr, mode="none")
+
+
+def _register_preview_pair_preserving_intensity(
+    raw_lo: np.ndarray,
+    raw_hi: np.ndarray,
+    scale: int,
+) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
+    """Estimate HR-grid shift on contrast-matched copies and slice ``(raw_lo, raw_hi)`` without intensity mutation."""
+    lo_reg = normalize_volume(raw_lo, mode="percentile", lower_pct=0.5, upper_pct=99.5)
+    hi_reg = normalize_volume(raw_hi, mode="percentile", lower_pct=0.5, upper_pct=99.5)
+    _, _, pre_info = register_multires_pair_3d(lo_reg, hi_reg, scale_factor=scale)
+    shift_list = pre_info.get("hr_shift_zyx", [0, 0, 0])
+    assert isinstance(shift_list, list)
+    shift_zyx = (int(shift_list[0]), int(shift_list[1]), int(shift_list[2]))
+    sliced = apply_hr_grid_shift_pair_3d(
+        raw_lo,
+        raw_hi,
+        shift_hr_zyx=shift_zyx,
+        scale_factor=scale,
+        min_overlap_lr=min(8, int(min(raw_lo.shape))),
+    )
+    if sliced is None:
+        return raw_lo, raw_hi, pre_info
+    lr_aligned, hr_aligned = sliced
+    lo_chk = normalize_volume(lr_aligned, mode="percentile", lower_pct=0.5, upper_pct=99.5)
+    hi_chk = normalize_volume(hr_aligned, mode="percentile", lower_pct=0.5, upper_pct=99.5)
+    _, _, post_info = register_multires_pair_3d(lo_chk, hi_chk, scale_factor=scale)
+    post_info["raw_detected_hr_shift_zyx"] = list(shift_zyx)
+    post_info["initial_unaligned_triplanar_ssim"] = pre_info.get("initial_triplanar_ssim")
+    return lr_aligned, hr_aligned, post_info
 
 
 def _is_zn13x_cache_valid(
@@ -526,8 +569,6 @@ def _is_zn13x_cache_valid(
         return False
     if not prefer_offline and not is_exp:
         # Cached artifact is a synthetic phantom, whereas caller requested real experimental data!
-        if not allow_offline_fallback or raw_h5_dir is not None:
-            return False
         return False
     return True
 
@@ -604,11 +645,16 @@ def prepare_zn13x_benchmark(
                 source_kind = "local_i13_hdf5_slab"
             elif lo_prev.is_file() and hi_prev.is_file():
                 raw_lo, raw_hi = _read_centered_preview_h5_pair(
-                    lo_prev, hi_prev, lr_size=lr_size, scale=scale
+                    lo_prev, hi_prev, lr_size=lr_size + 2, scale=scale
                 )
-                lr_vol, hr_vol, reg_info = register_multires_pair_3d(
-                    raw_lo, raw_hi, scale_factor=scale
+                lr_reg, hr_reg, reg_info = _register_preview_pair_preserving_intensity(
+                    raw_lo, raw_hi, scale=scale
                 )
+                d_f = min(int(lr_size), int(lr_reg.shape[0]))
+                h_f = min(int(lr_size), int(lr_reg.shape[1]))
+                w_f = min(int(lr_size), int(lr_reg.shape[2]))
+                lr_vol = lr_reg[:d_f, :h_f, :w_f].copy()
+                hr_vol = hr_reg[: d_f * scale, : h_f * scale, : w_f * scale].copy()
                 source_kind = "local_i13_preview_h5_registered"
 
         # 2. Try Zenodo 8-bit preview HDF5 record API if online and tier == 'preview'
@@ -651,13 +697,18 @@ def prepare_zn13x_benchmark(
                         _download_https_file(str(lo_candidates[0]), tmp_lo, timeout_s=60.0)
                         _download_https_file(str(hi_candidates[0]), tmp_hi, timeout_s=60.0)
                         raw_lo_arr, raw_hi_arr = _read_centered_preview_h5_pair(
-                            tmp_lo, tmp_hi, lr_size=lr_size, scale=scale
+                            tmp_lo, tmp_hi, lr_size=lr_size + 2, scale=scale
                         )
-                        lr_vol, hr_vol, reg_info = register_multires_pair_3d(
+                        lr_reg, hr_reg, reg_info = _register_preview_pair_preserving_intensity(
                             raw_lo_arr,
                             raw_hi_arr,
-                            scale_factor=scale,
+                            scale=scale,
                         )
+                        d_f = min(int(lr_size), int(lr_reg.shape[0]))
+                        h_f = min(int(lr_size), int(lr_reg.shape[1]))
+                        w_f = min(int(lr_size), int(lr_reg.shape[2]))
+                        lr_vol = lr_reg[:d_f, :h_f, :w_f].copy()
+                        hr_vol = hr_reg[: d_f * scale, : h_f * scale, : w_f * scale].copy()
                         source_kind = "zenodo_14245751_preview"
                     finally:
                         tmp_lo.unlink(missing_ok=True)
