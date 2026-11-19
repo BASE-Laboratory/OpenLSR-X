@@ -7,7 +7,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=120G
 #SBATCH --time=08:00:00
-#SBATCH --array=0-8
+#SBATCH --array=0-11
 #SBATCH --output=logs/slurm_%A_%a.out
 #SBATCH --error=logs/slurm_%A_%a.err
 
@@ -15,14 +15,17 @@
 # OpenLSR-X Reproducible Multi-Seed HPC Campaign for Isambard-AI (NVIDIA GH200)
 # Acknowledgements: UKRI Isambard-AI National AIRR (FIELF001) & Diamond I13-2
 #
-# Submits 9 independent GPU jobs (3 benchmark suites x 3 random seeds: 42,43,44):
-#   Array 0..2 -> Factorial PoreSpy 3D XCT Study (seeds 42, 43, 44)
-#   Array 3..5 -> Public Micro-CT Rock Suite (Bentheimer & Indiana, seeds 42, 43, 44)
-#   Array 6..8 -> Diamond I13-2 Multi-Resolution Zn-13X Synchrotron Study (2x & 8x)
+# Submits 12 independent GPU jobs (4 benchmark suites x 3 random seeds: 42,43,44):
+#   Array 0..2  -> Factorial PoreSpy 3D XCT Study (seeds 42, 43, 44)
+#   Array 3..5  -> Public Micro-CT Rock Suite (Bentheimer & Indiana, seeds 42, 43, 44)
+#   Array 6..8  -> Diamond I13-2 Multi-Resolution Zn-13X Synchrotron Study (2x & 8x)
+#   Array 9..11 -> Physical 18 um -> 6 um (3x) Bentheimer Dual-Scan Suite (Core 1 & Core 2)
 #
 # Usage (stage Zenodo benchmarks on the login node first if compute nodes are air-gapped):
 #   mkdir -p logs data/benchmarks
-#   openlsrx download-benchmarks --datasets bentheimer_sandstone indiana_limestone zn13x_2x zn13x_8x --dest data/benchmarks
+#   openlsrx download-benchmarks \
+#       --datasets bentheimer_sandstone indiana_limestone bentheimer_dualscan_core1 bentheimer_dualscan_core2 zn13x_2x zn13x_8x \
+#       --dest data/benchmarks
 #   export I13_RAW_H5_DIR=/lus/lfs1aip1/projects/openlsrx/i13_zn13x_h5  # optional
 #   sbatch scripts/hpc/isambard_ai_array.slurm
 #
@@ -79,6 +82,14 @@ elif [ "${SUITE_IDX}" -eq 2 ]; then
         --epochs 150 \
         --seeds "${SEED}" \
         "${EXTRA_H5_ARGS[@]}"
+elif [ "${SUITE_IDX}" -eq 3 ]; then
+    python scripts/benchmarks/public_rock_xct.py \
+        --dualscan \
+        --output-dir "results/campaign/dualscan_s${SEED}" \
+        --data-dir "data/benchmarks" \
+        --volume-size 225 \
+        --epochs 150 \
+        --seeds "${SEED}"
 fi
 
 echo "[OpenLSR-X] Completed Task ${SLURM_ARRAY_TASK_ID} cleanly."

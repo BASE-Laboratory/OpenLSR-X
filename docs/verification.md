@@ -28,7 +28,7 @@ Block-averaging an HR grid of spacing `Δx_HR = 1` by factor `s` places coarse v
 | Scale Factor `s` | Analytical Corner-Pinned Limit `(s - 1) / 2` | Legacy `grid_mode=False` Max Shift (HR vox) | `zoom_cell_centered` Max Shift (HR vox) |
 | :---: | :---: | :---: | :---: |
 | `2×` | `0.5000` | `±0.4683` | **`±0.000004`** (`4e-6`) |
-| `3×` | `1.0000` | `±0.9032` | **`< 0.000010`** (`< 1e-5`) |
+| `3×` | `1.0000` | `±0.9032` | **`±0.000004`** (`4e-6`) |
 | `4×` | `1.5000` | `±1.3095` | **`±0.000008`** (`8e-6`) |
 | `8×` | `3.5000` | `±2.6111` | **`±0.000023`** (`2.3e-5`) |
 
@@ -82,18 +82,18 @@ Across Gaussian blur widths `σ ∈ [0, 3.0]` HR voxels, `SobelGradientLoss`, `F
 All three datasets in Figure 3 are **synthetic or calibrated 3D phantoms** (`8–10` CPU training epochs on the PSF-guarded `train` slab, evaluated on the unseen `test` slab):
 
 - **Dataset A (`Synthetic PoreSpy 3D Phantom`, `generate_porespy_volume`):** Connected two-phase blobs (`16 × 48 × 48` HR test slab).
-- **Dataset B (`Calibrated Indiana Limestone Phantom`, `source_kind="calibrated_carbonate_phantom"`):** Bimodal vuggy carbonate phantom (`PSNR`: `Nearest 20.03 dB` → `Tricubic 21.06 dB` → `SwinIR-2.5D 21.92 dB`).
-- **Dataset C (`Calibrated 3-Phase Zn-13X Phantom`, `source_kind="offline_calibrated_zn13x_phantom"`, `is_experimental_xct=False`):** `32³ → 64³` 3-phase phantom (`Tricubic` → `SwinIR-2.5D-3Axis`: `PSNR` `15.46 → 16.63 dB`, 3-phase macro-Dice `0.5576 → 0.6720`, macropore Dice `0.4833 → 0.7557`).
+- **Dataset B (`Calibrated Indiana Limestone Phantom`, `source_kind="calibrated_carbonate_phantom"`):** Bimodal vuggy carbonate phantom (`PSNR`: `Nearest 20.03 dB` → `Tricubic 21.06 dB` → `SwinIR-2.5D-3Axis 22.09 dB`).
+- **Dataset C (`Calibrated 3-Phase Zn-13X Phantom`, `source_kind="offline_calibrated_zn13x_phantom"`, `is_experimental_xct=False`):** `32³ → 64³` 3-phase phantom (`Tricubic` → `SwinIR-2.5D-3Axis`: `PSNR` `15.46 → 16.62 dB`, 3-phase macro-Dice `0.5576 → 0.6721`, macropore Dice `0.4833 → 0.7548`).
 
 | Method (`Dataset A: Synthetic PoreSpy 3D`) | PSNR (dB) ↑ | 3D Triplanar SSIM ↑ | Pore Dice ↑ | Abs. Porosity Err ↓ | Through-Plane Anisotropy Err ↓ | Optical MTF_0.5 (cyc/vox) ↑ |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| `upsample_3d(..., "nearest")` | `15.19` | `0.6309` | `0.7905` | `0.1122` | `0.0487` | `0.1783` |
-| `upsample_3d(..., "tricubic")` | `16.23` | `0.6958` | `0.8231` | `0.1162` | `0.0363` | `0.1910` |
-| `SR3DResNet` (Native 3D CNN) | `16.48` | `0.7182` | `0.8134` | `0.1175` | `0.0469` | `0.2042` |
-| `SRGAN` (`SRResNet-3Axis`) | `16.41` | `0.7478` | `0.8508` | **`0.0602`** | `0.0899` | `0.2422` |
-| `SRGAN` (`RRDB-3Axis`) | **`18.30`** | **`0.8146`** | **`0.8907`** | `0.0689` | `0.0137` | **`0.2687`** |
-| `super_resolve_volume_single_axis` (`SwinIR yz`) | `18.22` | `0.8110` | `0.8893` | `0.0715` | `0.0452` | `0.2552` |
-| `super_resolve_volume_orthogonal` (`SwinIR-2.5D-3Axis`) | `18.11` | `0.8063` | `0.8858` | `0.0738` | **`0.0029`** (`15.6×` lower) | `0.2565` |
+| `upsample_3d(..., "nearest")` | `15.19` | `0.6309` | `0.7905` | `0.1122` | `0.0487` | `0.1757` |
+| `upsample_3d(..., "tricubic")` | `16.23` | `0.6958` | `0.8231` | `0.1162` | `0.0363` | `0.1876` |
+| `SR3DResNet` (Native 3D CNN) | `16.48` | `0.7182` | `0.8134` | `0.1175` | `0.0469` | `0.1962` |
+| `SRGAN` (`SRResNet-3Axis`) | `16.19` | `0.7334` | `0.8233` | `0.0912` | `0.0924` | `0.2265` |
+| `SRGAN` (`RRDB-3Axis`) | **`18.34`** | **`0.8175`** | **`0.8897`** | **`0.0705`** | `0.0174` | **`0.2603`** |
+| `super_resolve_volume_single_axis` (`SwinIR yz`) | `18.25` | `0.8123` | `0.8846` | `0.0765` | `0.0465` | `0.2522` |
+| `super_resolve_volume_orthogonal` (`SwinIR-2.5D-3Axis`) | `18.11` | `0.8064` | `0.8810` | `0.0782` | **`0.0015`** (`31.0×` lower) | `0.2504` |
 
 ### 3.2 Real `6 µm` Bentheimer Micro-CT (`Zenodo 5542624`) Under Synthetic `2×` Degradation
 
@@ -105,28 +105,28 @@ All three datasets in Figure 3 are **synthetic or calibrated 3D phantoms** (`8�
 
 | Core (`Zenodo 5542624`, Real `6 µm` HR + Synthetic `2×` LR, `n = 3` seeds) | Tricubic PSNR (dB) | `SwinIR-3Axis` PSNR (dB) | Tricubic `D_eff` Rel. Err (%) | Single-Axis `yz` `D_eff` Rel. Err (%) | `3-Axis` `D_eff` Rel. Err (%) | Voxel `σ_ortho` vs Error Spearman `r_s` | `±1 σ_ortho` Envelope Coverage |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| `bentheimer_sandstone` (Core 1 Subvol 1, `D_eff = 0.0396`) | `23.48 ± 0.00` | `25.76 ± 0.19` | `17.44 ± 0.40%` | `15.54 ± 0.43%` | **`14.87 ± 0.74%`** | `+0.270 ± 0.010` (weak positive) | `0 / 3` |
-| `bentheimer_laminated` (Core 2 Subvol 2, `D_eff = 0.0765`) | `25.00 ± 0.03` | `27.05 ± 0.18` | `6.51 ± 0.14%` | `2.59 ± 1.36%` | **`2.09 ± 1.30%`** | `+0.232 ± 0.006` (weak positive) | `3 / 3` |
+| `bentheimer_sandstone` (Core 1 Subvol 1, `D_eff = 0.0396`) | `23.48 ± 0.00` | `25.71 ± 0.14` | `17.44 ± 0.40%` | `14.59 ± 1.23%` | **`14.08 ± 1.53%`** | `+0.264 ± 0.014` (weak positive) | `0 / 3` |
+| `bentheimer_laminated` (Core 2 Subvol 2, `D_eff = 0.0765`) | `25.00 ± 0.03` | `26.99 ± 0.11` | `6.51 ± 0.14%` | **`4.05 ± 1.54%`** | `4.10 ± 2.13%` | `+0.227 ± 0.013` (weak positive) | `3 / 3` |
 
-Across all `6/6` core-seed runs, `D_eff` relative error decreases monotonically from `Tricubic-3D` → `Single-Axis SwinIR (yz)` → `3-Axis SwinIR-2.5D`, even though `3-Axis` PSNR is `0.1–0.3 dB` lower than single-axis `yz`. Inter-view standard deviation `σ_ortho` (`n = 3` orthogonal sweeps) exhibits a **weak but consistently positive** Spearman rank correlation (`r_s = 0.23–0.27`) with voxelwise error `|SR - HR|`, and its `±1 σ_ortho` threshold shift brackets true `D_eff` in `3/6` short-epoch runs (`0/3` on Core 1 where `8`-epoch bias exceeds `1 σ_ortho`, `3/3` on Core 2, and `1/1` at `12` epochs on a `128 × 96 × 96` Core 1 slab where `D_eff` error drops from `8.92%` Nearest / `4.97%` Tricubic to `1.64%`).
+Across all `6/6` core-seed runs, both `Single-Axis SwinIR (yz)` and `3-Axis SwinIR-2.5D` reduce `D_eff` relative error below `Tricubic-3D` (`3-Axis` further improves over single-axis `yz` on all `3/3` Core 1 runs and matches `yz` within `1 SD` on Core 2, even though `3-Axis` PSNR is `0.1–0.3 dB` lower than single-axis `yz`). Inter-view standard deviation `σ_ortho` (`n = 3` orthogonal sweeps) exhibits a **weak but consistently positive** Spearman rank correlation (`r_s = 0.23–0.26`) with voxelwise error `|SR - HR|`, and its `±1 σ_ortho` threshold shift brackets true `D_eff` in `3/6` short-epoch runs (`0/3` on Core 1 where `8`-epoch bias exceeds `1 σ_ortho`, and `3/3` on Core 2).
 
 ### 3.3 Physical Independent Dual-Scan `18 µm → 6 µm` (`3×`) Bentheimer Micro-CT (`Zenodo 5542624`)
 
 ![Physical Independent Dual-Scan Bentheimer Micro-CT (Zenodo 5542624, True 18 um -> 6 um, 3x)](assets/verification/vr_06_bentheimer_dualscan_3x.png)
 
-To verify `openlsrx` on **two physically independent X-ray micro-CT acquisitions** at an odd integer magnification (`3×`, corresponding to a `27×` voxel-volume upsampling ratio), `prepare_bentheimer_dualscan_benchmark` loads the MD5-verified 16-bit little-endian `.raw` scan pairs from `Zenodo 5542624` (`Core1_Subvol1` and `Core2_Subvol2`, `75³` at `18 µm` paired with `225³` at `6 µm`; `source_kind="downloaded_zenodo_5542624_dualscan"`, `is_experimental_xct=True`).
+To verify `openlsrx` on **two physically independent X-ray micro-CT acquisitions** at an odd integer magnification (`3×`, corresponding to a `27×` voxel-volume upsampling ratio), `prepare_bentheimer_dualscan_benchmark` loads the MD5-verified 16-bit little-endian `.raw` scan pairs from `Zenodo 5542624` (`Core1_Subvol1` and `Core2_Subvol2`, `75³` at `18 µm` paired with `225³` at `6 µm`; `source_kind="downloaded_zenodo_5542624_dualscan"`, `is_experimental_xct=True`) and slices each linear `uint16 / 65535.0` pair on the integer HR voxel grid to exact `(0, 0, 0)` alignment (`Core 1` raw `[-1, 0, 0]` → staged `[0, 0, 0]`, `Core 2` `[0, 0, 0]`).
 
-- **3D registration diagnostics:** On coaxial `(36, 32, 32)` LR → `(108, 96, 96)` HR subvolumes, `register_multires_pair_3d(..., scale_factor=3)` confirms hardware alignment within `≤ 1` HR voxel (`hr_shift_zyx = [-1, 0, 0]`, `hr_triplanar_ssim = 0.6501` on Core 1; `hr_shift_zyx = [0, 0, 0]`, `hr_triplanar_ssim = 0.6124` on Core 2; `registration_quality_ok = True`).
-- **Split-isolated cross-scan radiometric calibration:** Independent polychromatic full-core (`18 µm`) vs. interior-ROI (`6 µm`) reconstructions exhibit non-linear beam-hardening greyscale shifts. Fitting `cross_scan_calibration="quantile"` strictly on the `train` slab (`20` LR / `60` HR slices) lifts held-out `test` (`27 × 96 × 96` HR) `Tricubic-3D` PSNR by **`+1.46 dB`** (`14.90 → 16.36 dB`, 3D SSIM `0.3547 → 0.4502`) on Core 1 and **`+0.70 dB`** (`16.52 → 17.22 dB`, 3D SSIM `0.3758 → 0.4452`) on Core 2 with zero `val`/`test` leakage.
-- **Native `PixelShuffle(3)` `SwinIR-2.5D` (`10` CPU epochs, `n = 3` seeds):** Training `SwinIR-2.5D` (`ArbitraryScaleUpsample(scale_factor=3)` using native `nn.PixelShuffle(3)`) further improves unseen `test` PSNR, 3D SSIM, and pore Dice over calibrated `Tricubic-3D` across all `6/6` runs (`16.55 ± 0.03 dB` on Core 1; `17.50 ± 0.02 dB` and `0.0019 ± 0.0021` porosity error on Core 2), while orthogonal view disagreement `σ_ortho` correlates positively with true voxel error `|SR - HR|` (**`r_s = +0.396 ± 0.008`** on Core 1, **`+0.288 ± 0.009`** on Core 2).
+- **3D registration diagnostics:** On `(36, 32, 32)` LR → `(108, 96, 96)` HR subvolumes, `register_multires_pair_3d(..., scale_factor=3)` confirms sub-voxel hardware alignment (`hr_shift_zyx = [-1, 0, 0]`, `hr_triplanar_ssim = 0.6501` on Core 1; `hr_shift_zyx = [0, 0, 0]`, `hr_triplanar_ssim = 0.6124` on Core 2; `registration_quality_ok = True`).
+- **Split-isolated cross-scan radiometric calibration:** Independent polychromatic full-core (`18 µm`) vs. interior-ROI (`6 µm`) reconstructions exhibit non-linear beam-hardening greyscale shifts. Fitting `cross_scan_calibration="quantile"` strictly on the `train` slab lifts held-out `test` (`27 × 96 × 96` HR) `Tricubic-3D` PSNR by **`+1.46 dB`** (`14.90 → 16.36 dB`, 3D SSIM `0.3547 → 0.4502`) on Core 1 and **`+0.70 dB`** (`16.52 → 17.22 dB`, 3D SSIM `0.3758 → 0.4452`) on Core 2 with zero `val`/`test` leakage.
+- **Native `PixelShuffle(3)` `SwinIR-2.5D` (`10` CPU epochs, `n = 3` seeds):** Training `SwinIR-2.5D` (`ArbitraryScaleUpsample(scale_factor=3)` using native `nn.PixelShuffle(3)`) further improves unseen `test` PSNR, 3D SSIM, and pore Dice over calibrated `Tricubic-3D` across all `6/6` runs (`16.55 ± 0.01 dB` on Core 1; `17.45 ± 0.07 dB` and `0.0039 ± 0.0035` porosity error on Core 2), while orthogonal view disagreement `σ_ortho` correlates positively with true voxel error `|SR - HR|` (**`r_s = +0.383 ± 0.007`** on Core 1, **`+0.278 ± 0.008`** on Core 2).
 
 | Core (`Zenodo 5542624`, True `18 µm → 6 µm` `3×` Dual-Scan, `n = 3` seeds, `10` CPU epochs) | Raw Tricubic PSNR (dB) | Calibrated Tricubic PSNR (dB) | `SwinIR-3Axis` PSNR (dB) | Cal. Tricubic → `3-Axis` 3D SSIM | Cal. Tricubic → `3-Axis` Pore Dice | Cal. Tricubic → `3-Axis` `D_eff` Rel. Err (%) | `σ_ortho` vs Error `r_s` |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| `bentheimer_dualscan_core1` (`D_eff = 0.0392`, `27×96×96` HR) | `14.90 ± 0.00` | `16.36 ± 0.00` | **`16.55 ± 0.03`** | `0.4502` → **`0.4640 ± 0.0022`** | `0.7658` → **`0.7743 ± 0.0025`** | `70.19%` → `67.67 ± 1.67%` (`yz`: `63.92 ± 6.54%`) | **`+0.396 ± 0.008`** |
-| `bentheimer_dualscan_core2` (`D_eff = 0.0638`, `27×96×96` HR) | `16.52 ± 0.00` | `17.22 ± 0.00` | **`17.50 ± 0.02`** | `0.4452` → **`0.4628 ± 0.0010`** | `0.7947` → **`0.7997 ± 0.0002`** | **`6.59%`** → `16.00 ± 1.00%` (`yz`: `15.68 ± 1.06%`) | **`+0.288 ± 0.009`** |
+| `bentheimer_dualscan_core1` (`D_eff = 0.0392`, `27×96×96` HR) | `14.90 ± 0.00` | `16.36 ± 0.00` | **`16.55 ± 0.01`** | `0.4502` → **`0.4637 ± 0.0016`** | `0.7658` → **`0.7735 ± 0.0008`** | `70.19%` → `68.58 ± 0.92%` (`yz`: `67.32 ± 0.69%`) | **`+0.383 ± 0.007`** |
+| `bentheimer_dualscan_core2` (`D_eff = 0.0638`, `27×96×96` HR) | `16.52 ± 0.00` | `17.22 ± 0.00` | **`17.45 ± 0.07`** | `0.4452` → **`0.4629 ± 0.0025`** | `0.7947` → **`0.7991 ± 0.0007`** | **`6.59%`** → `14.67 ± 3.21%` (`yz`: `14.38 ± 3.35%`) | **`+0.278 ± 0.008`** |
 
 !!! warning "Restrained Interpretation of Short-CPU-Epoch `3×` Dual-Scan Transport"
-    At `18 µm → 6 µm` (`27×` voxel-volume upsampling) on thin `27 × 96 × 96` (`162 µm` thick) slabs under a `10`-epoch CPU verification budget, sub-`18 µm` pore throats near percolation on Core 1 remain heavily blurred (`63.9–67.7%` `D_eff` error vs. `70.2%` Tricubic), while on Core 2 smooth calibrated `Tricubic-3D` happens to cancel partial-volume throat dilation/erosion at the HR Otsu threshold (`6.59%` `D_eff` error vs. `16.00%` for `10`-epoch `SwinIR-3Axis`, even though `SwinIR-3Axis` improves PSNR, 3D SSIM, pore Dice, and cuts bulk porosity error `8.6×` from `0.0163` to `0.0019`). This contrast illustrates why `OpenLSR-X` evaluates 3D Fickian diffusivity directly rather than treating PSNR, SSIM, or bulk porosity as surrogates for pore-throat transport; full GPU training on full `75³ → 225³` dual-scan volumes is configured in `configs/labxct/bs_dualscan_3x_swinir_25d.yaml`.
+    At `18 µm → 6 µm` (`27×` voxel-volume upsampling) on thin `27 × 96 × 96` (`162 µm` thick) slabs under a `10`-epoch CPU verification budget, sub-`18 µm` pore throats near percolation on Core 1 remain heavily blurred (`67.3–68.6%` `D_eff` error vs. `70.2%` Tricubic), while on Core 2 smooth calibrated `Tricubic-3D` happens to cancel partial-volume throat dilation/erosion at the HR Otsu threshold (`6.59%` `D_eff` error vs. `14.67%` for `10`-epoch `SwinIR-3Axis`, even though `SwinIR-3Axis` improves PSNR, 3D SSIM, pore Dice, and cuts bulk porosity error `4.2×` from `0.0163` to `0.0039`). This contrast illustrates why `OpenLSR-X` evaluates 3D Fickian diffusivity directly rather than treating PSNR, SSIM, or bulk porosity as surrogates for pore-throat transport; full GPU training on full `75³ → 225³` dual-scan volumes is configured in `configs/labxct/bs_dualscan_3x_swinir_25d.yaml`.
 
 ---
 

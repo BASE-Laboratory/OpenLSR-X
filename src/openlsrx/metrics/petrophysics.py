@@ -25,7 +25,7 @@ def compute_threshold(
     vmin = float(arr.min())
     vmax = float(arr.max())
     if np.isclose(vmin, vmax):
-        return vmin
+        return 0.5 if fixed_value is None else float(fixed_value)
     if method == "otsu":
         return float(threshold_otsu(arr))
     if method == "yen":

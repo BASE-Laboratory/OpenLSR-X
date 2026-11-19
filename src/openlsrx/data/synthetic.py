@@ -24,6 +24,7 @@ from .transforms import (
     compute_normalization_bounds,
     degrade_xct_volume,
     extract_paired_slices_from_subvolume,
+    make_slice_dataloader,
     normalize_volume,
     split_volume_spatially,
 )
@@ -104,14 +105,8 @@ def _generate_hr_porespy_field(
         hr_raw = np.clip(clean, 0.0, 1.0).astype(np.float32, copy=False)
         contrast_shift = 0.0
     elif representation == "local_thickness":
-        thk = _porespy_local_thickness(pore_mask, sizes=25)
-        hr_clean = normalize_volume(thk, mode="minmax")
-        if sigma_hr > 0.0:
-            hr_raw = (
-                hr_clean + rng.normal(0.0, sigma_hr, size=hr_clean.shape).astype(np.float32)
-            ).astype(np.float32, copy=False)
-        else:
-            hr_raw = hr_clean
+        thk = _porespy_local_thickness(pore_mask, sizes=25).astype(np.float32, copy=False)
+        hr_raw = thk
         contrast_shift = 0.05 if noise_regime == "high_noise" else 0.02
     else:
         raise ValueError(
@@ -138,6 +133,8 @@ def generate_porespy_volume(
 
     default_lr_sigma = 0.015 if noise_regime == "low_noise" else 0.055
     sigma_lr = default_lr_sigma if lr_noise_std is None else float(lr_noise_std)
+    default_hr_sigma = 0.008 if noise_regime == "low_noise" else 0.018
+    sigma_hr = default_hr_sigma if hr_noise_std is None else float(hr_noise_std)
 
     hr_raw, pore_mask, contrast_shift = _generate_hr_porespy_field(
         vol_shape=vol_shape,
@@ -147,9 +144,19 @@ def generate_porespy_volume(
         hr_noise_std=hr_noise_std,
         seed=seed,
     )
-    hr_vol = (
-        normalize_volume(hr_raw, mode="minmax") if representation == "local_thickness" else hr_raw
-    )
+    if representation == "local_thickness":
+        hr_clean = normalize_volume(hr_raw, mode="minmax")
+        if sigma_hr > 0.0:
+            rng_hr = np.random.default_rng(seed + 37)
+            hr_vol = np.clip(
+                hr_clean + rng_hr.normal(0.0, sigma_hr, size=hr_clean.shape).astype(np.float32),
+                0.0,
+                1.0,
+            ).astype(np.float32, copy=False)
+        else:
+            hr_vol = hr_clean
+    else:
+        hr_vol = hr_raw
 
     lr_vol = degrade_xct_volume(
         hr_volume=hr_vol,
@@ -337,12 +344,19 @@ class SyntheticPoreSpyDataModule(pl.LightningDataModule):
         else:
             tr_lo, tr_hi = 0.0, 1.0
 
+        sigma_hr = 0.008 if self.noise_regime == "low_noise" else 0.018
         for idx_split, (split_name, (_, hr_sub_raw)) in enumerate(raw_splits.items()):
-            hr_sub = (
-                normalize_volume(hr_sub_raw, mode="fixed", vmin=tr_lo, vmax=tr_hi)
-                if self.representation == "local_thickness"
-                else np.clip(hr_sub_raw, 0.0, 1.0).astype(np.float32, copy=False)
-            )
+            if self.representation == "local_thickness":
+                hr_norm = normalize_volume(hr_sub_raw, mode="fixed", vmin=tr_lo, vmax=tr_hi)
+                rng_split = np.random.default_rng(self.seed + 503 + 71 * idx_split)
+                hr_sub = np.clip(
+                    hr_norm
+                    + rng_split.normal(0.0, sigma_hr, size=hr_norm.shape).astype(np.float32),
+                    0.0,
+                    1.0,
+                ).astype(np.float32, copy=False)
+            else:
+                hr_sub = np.clip(hr_sub_raw, 0.0, 1.0).astype(np.float32, copy=False)
             lr_sub = degrade_xct_volume(
                 hr_volume=hr_sub,
                 scale_factor=self.scale_factor,
@@ -383,10 +397,13 @@ class SyntheticPoreSpyDataModule(pl.LightningDataModule):
 
         if stage in (None, "test"):
             lr_te, hr_te = self.splits_3d["test"]
+            dim_to_ax: dict[int, str] = {0: "yz", 1: "xz", 2: "xy"}
+            par_ax = dim_to_ax[int(self.split_axis)]
+            perp_axes = tuple(ax for d, ax in dim_to_ax.items() if d != int(self.split_axis))
             if self.test_axis == "parallel":
-                axes: tuple[str, ...] = ("yz",)
+                axes: tuple[str, ...] = (par_ax,)
             elif self.test_axis == "perpendicular":
-                axes = ("xz", "xy")
+                axes = perp_axes
             else:
                 axes = ("yz", "xz", "xy")
             self.test_dataset = build_multi_axis_slice_dataset(
@@ -402,6 +419,7 @@ class SyntheticPoreSpyDataModule(pl.LightningDataModule):
         if stage in (None, "predict"):
             lr_te, hr_te = self.splits_3d["test"]
             self.predict_lr_volume = lr_te
+            self.predict_hr_volume = hr_te
             self.predict_Spatial_shape_hr = (
                 int(hr_te.shape[0]),
                 int(hr_te.shape[1]),
@@ -431,7 +449,7 @@ class SyntheticPoreSpyDataModule(pl.LightningDataModule):
 
     def train_dataloader(self) -> DataLoader:
         assert self.train_dataset is not None
-        return DataLoader(
+        return make_slice_dataloader(
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
@@ -442,7 +460,7 @@ class SyntheticPoreSpyDataModule(pl.LightningDataModule):
 
     def val_dataloader(self) -> DataLoader:
         assert self.val_dataset is not None
-        return DataLoader(
+        return make_slice_dataloader(
             self.val_dataset,
             batch_size=self.eval_batch_size,
             shuffle=False,
@@ -453,7 +471,7 @@ class SyntheticPoreSpyDataModule(pl.LightningDataModule):
 
     def test_dataloader(self) -> DataLoader:
         assert self.test_dataset is not None
-        return DataLoader(
+        return make_slice_dataloader(
             self.test_dataset,
             batch_size=self.eval_batch_size,
             shuffle=False,
@@ -464,7 +482,7 @@ class SyntheticPoreSpyDataModule(pl.LightningDataModule):
 
     def predict_dataloader(self) -> DataLoader:
         assert self.predict_dataset is not None
-        return DataLoader(
+        return make_slice_dataloader(
             self.predict_dataset,
             batch_size=self.eval_batch_size,
             shuffle=False,

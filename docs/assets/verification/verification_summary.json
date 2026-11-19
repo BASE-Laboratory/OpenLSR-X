@@ -1,9 +1,13 @@
 {
-  "elapsed_seconds": 406.0,
+  "elapsed_seconds": 263.7,
   "subsystem_1_data": {
     "shift_stats": {
       "2x": {
         "legacy_max_abs_shift_hr_vox": 0.4683,
+        "centered_max_abs_shift_hr_vox": 4e-06
+      },
+      "3x": {
+        "legacy_max_abs_shift_hr_vox": 0.9032,
         "centered_max_abs_shift_hr_vox": 4e-06
       },
       "4x": {
@@ -95,7 +99,7 @@
         "pore_dice": 0.7905,
         "porosity_abs_err": 0.1122,
         "anisotropy_err": 0.0487,
-        "mtf_cutoff_050": 0.1783
+        "mtf_cutoff_050": 0.1757
       },
       "Tricubic-3D": {
         "psnr": 16.23,
@@ -103,7 +107,7 @@
         "pore_dice": 0.8231,
         "porosity_abs_err": 0.1162,
         "anisotropy_err": 0.0363,
-        "mtf_cutoff_050": 0.191
+        "mtf_cutoff_050": 0.1876
       },
       "SR3DResNet (Native 3D)": {
         "psnr": 16.48,
@@ -111,47 +115,47 @@
         "pore_dice": 0.8134,
         "porosity_abs_err": 0.1175,
         "anisotropy_err": 0.0469,
-        "mtf_cutoff_050": 0.2042
+        "mtf_cutoff_050": 0.1962
       },
       "SRResNet-3Axis": {
-        "psnr": 16.41,
-        "ssim_3d": 0.7478,
-        "pore_dice": 0.8508,
-        "porosity_abs_err": 0.0602,
-        "anisotropy_err": 0.0899,
-        "mtf_cutoff_050": 0.2422
+        "psnr": 16.19,
+        "ssim_3d": 0.7334,
+        "pore_dice": 0.8233,
+        "porosity_abs_err": 0.0912,
+        "anisotropy_err": 0.0924,
+        "mtf_cutoff_050": 0.2265
       },
       "RRDB-3Axis": {
-        "psnr": 18.3,
-        "ssim_3d": 0.8146,
-        "pore_dice": 0.8907,
-        "porosity_abs_err": 0.0689,
-        "anisotropy_err": 0.0137,
-        "mtf_cutoff_050": 0.2687
+        "psnr": 18.34,
+        "ssim_3d": 0.8175,
+        "pore_dice": 0.8897,
+        "porosity_abs_err": 0.0705,
+        "anisotropy_err": 0.0174,
+        "mtf_cutoff_050": 0.2603
       },
       "SwinIR-SingleAxis (yz)": {
-        "psnr": 18.22,
-        "ssim_3d": 0.811,
-        "pore_dice": 0.8893,
-        "porosity_abs_err": 0.0715,
-        "anisotropy_err": 0.0452,
-        "mtf_cutoff_050": 0.2552
+        "psnr": 18.25,
+        "ssim_3d": 0.8123,
+        "pore_dice": 0.8846,
+        "porosity_abs_err": 0.0765,
+        "anisotropy_err": 0.0465,
+        "mtf_cutoff_050": 0.2522
       },
       "SwinIR-2.5D-3Axis": {
         "psnr": 18.11,
-        "ssim_3d": 0.8063,
-        "pore_dice": 0.8858,
-        "porosity_abs_err": 0.0738,
-        "anisotropy_err": 0.0029,
-        "mtf_cutoff_050": 0.2565
+        "ssim_3d": 0.8064,
+        "pore_dice": 0.881,
+        "porosity_abs_err": 0.0782,
+        "anisotropy_err": 0.0015,
+        "mtf_cutoff_050": 0.2504
       }
     },
     "dataset_b_limestone_phantom": {
       "source_kind": "calibrated_carbonate_phantom",
       "nearest_psnr": 20.03,
       "tricubic_psnr": 21.06,
-      "swinir_yz_psnr": 21.92,
-      "swinir_3axis_psnr": 21.91
+      "swinir_yz_psnr": 22.11,
+      "swinir_3axis_psnr": 22.09
     },
     "dataset_c_zn13x_phantom_provenance": {
       "source_kind": "offline_calibrated_zn13x_phantom",
@@ -160,16 +164,16 @@
     },
     "dataset_c_zn13x_phantom_metrics": {
       "tricubic_psnr": 15.46,
-      "swinir_3axis_psnr": 16.63,
+      "swinir_3axis_psnr": 16.62,
       "tricubic_macro_dice": 0.5576,
-      "swinir_3axis_macro_dice": 0.672,
+      "swinir_3axis_macro_dice": 0.6721,
       "tricubic_pore_dice": 0.4833,
-      "swinir_pore_dice": 0.7557,
+      "swinir_pore_dice": 0.7548,
       "tricubic_na13x_err": 0.1518,
-      "swinir_na13x_err": 0.0747,
+      "swinir_na13x_err": 0.0759,
       "tricubic_zn13x_err": 0.0002,
-      "swinir_zn13x_err": 0.0111,
-      "swinir_zn_exchange_err": 0.0681
+      "swinir_zn13x_err": 0.0102,
+      "swinir_zn_exchange_err": 0.0694
     }
   },
   "subsystem_4_analytical": {
@@ -300,37 +304,37 @@
         {
           "seed": 42,
           "tricubic_psnr": 23.48,
-          "yz_psnr": 25.82,
+          "yz_psnr": 25.85,
           "ortho_psnr": 25.55,
           "true_d_eff": 0.0396,
           "tricubic_d_eff_rel_err_pct": 17.89,
-          "yz_d_eff_rel_err_pct": 16.03,
-          "ortho_d_eff_rel_err_pct": 15.52,
-          "spearman_r": 0.2803,
+          "yz_d_eff_rel_err_pct": 14.99,
+          "ortho_d_eff_rel_err_pct": 14.5,
+          "spearman_r": 0.2748,
           "bracketed_1sigma": false
         },
         {
           "seed": 43,
           "tricubic_psnr": 23.48,
-          "yz_psnr": 26.26,
-          "ortho_psnr": 25.93,
+          "yz_psnr": 26.14,
+          "ortho_psnr": 25.79,
           "true_d_eff": 0.0396,
           "tricubic_d_eff_rel_err_pct": 17.3,
-          "yz_d_eff_rel_err_pct": 15.24,
-          "ortho_d_eff_rel_err_pct": 14.06,
-          "spearman_r": 0.26,
+          "yz_d_eff_rel_err_pct": 13.21,
+          "ortho_d_eff_rel_err_pct": 12.38,
+          "spearman_r": 0.2488,
           "bracketed_1sigma": false
         },
         {
           "seed": 44,
           "tricubic_psnr": 23.48,
-          "yz_psnr": 25.99,
+          "yz_psnr": 26.01,
           "ortho_psnr": 25.79,
           "true_d_eff": 0.0396,
           "tricubic_d_eff_rel_err_pct": 17.13,
-          "yz_d_eff_rel_err_pct": 15.36,
-          "ortho_d_eff_rel_err_pct": 15.02,
-          "spearman_r": 0.2705,
+          "yz_d_eff_rel_err_pct": 15.58,
+          "ortho_d_eff_rel_err_pct": 15.35,
+          "spearman_r": 0.2698,
           "bracketed_1sigma": false
         }
       ],
@@ -340,28 +344,28 @@
           "std": 0.0
         },
         "yz_psnr": {
-          "mean": 26.02,
-          "std": 0.22
+          "mean": 26.0,
+          "std": 0.15
         },
         "ortho_psnr": {
-          "mean": 25.76,
-          "std": 0.19
+          "mean": 25.71,
+          "std": 0.14
         },
         "tricubic_d_eff_rel_err_pct": {
           "mean": 17.44,
           "std": 0.4
         },
         "yz_d_eff_rel_err_pct": {
-          "mean": 15.54,
-          "std": 0.43
+          "mean": 14.59,
+          "std": 1.23
         },
         "ortho_d_eff_rel_err_pct": {
-          "mean": 14.87,
-          "std": 0.74
+          "mean": 14.08,
+          "std": 1.53
         },
         "spearman_r": {
-          "mean": 0.27,
-          "std": 0.01
+          "mean": 0.264,
+          "std": 0.014
         },
         "bracketed_count": "0/3"
       }
@@ -379,37 +383,37 @@
         {
           "seed": 42,
           "tricubic_psnr": 24.98,
-          "yz_psnr": 26.96,
-          "ortho_psnr": 26.87,
+          "yz_psnr": 27.0,
+          "ortho_psnr": 26.89,
           "true_d_eff": 0.07654,
           "tricubic_d_eff_rel_err_pct": 6.36,
-          "yz_d_eff_rel_err_pct": 2.92,
-          "ortho_d_eff_rel_err_pct": 2.06,
-          "spearman_r": 0.2385,
+          "yz_d_eff_rel_err_pct": 2.28,
+          "ortho_d_eff_rel_err_pct": 1.65,
+          "spearman_r": 0.2407,
           "bracketed_1sigma": true
         },
         {
           "seed": 43,
           "tricubic_psnr": 25.0,
-          "yz_psnr": 27.38,
-          "ortho_psnr": 27.22,
+          "yz_psnr": 27.31,
+          "ortho_psnr": 27.1,
           "true_d_eff": 0.07654,
           "tricubic_d_eff_rel_err_pct": 6.55,
-          "yz_d_eff_rel_err_pct": 1.1,
-          "ortho_d_eff_rel_err_pct": 0.81,
-          "spearman_r": 0.2324,
+          "yz_d_eff_rel_err_pct": 4.89,
+          "ortho_d_eff_rel_err_pct": 5.16,
+          "spearman_r": 0.2237,
           "bracketed_1sigma": true
         },
         {
           "seed": 44,
           "tricubic_psnr": 25.03,
-          "yz_psnr": 27.15,
-          "ortho_psnr": 27.06,
+          "yz_psnr": 27.08,
+          "ortho_psnr": 26.98,
           "true_d_eff": 0.07654,
           "tricubic_d_eff_rel_err_pct": 6.63,
-          "yz_d_eff_rel_err_pct": 3.75,
-          "ortho_d_eff_rel_err_pct": 3.4,
-          "spearman_r": 0.2256,
+          "yz_d_eff_rel_err_pct": 4.99,
+          "ortho_d_eff_rel_err_pct": 5.5,
+          "spearman_r": 0.2161,
           "bracketed_1sigma": true
         }
       ],
@@ -419,28 +423,28 @@
           "std": 0.03
         },
         "yz_psnr": {
-          "mean": 27.16,
-          "std": 0.21
+          "mean": 27.13,
+          "std": 0.16
         },
         "ortho_psnr": {
-          "mean": 27.05,
-          "std": 0.18
+          "mean": 26.99,
+          "std": 0.11
         },
         "tricubic_d_eff_rel_err_pct": {
           "mean": 6.51,
           "std": 0.14
         },
         "yz_d_eff_rel_err_pct": {
-          "mean": 2.59,
-          "std": 1.36
+          "mean": 4.05,
+          "std": 1.54
         },
         "ortho_d_eff_rel_err_pct": {
-          "mean": 2.09,
-          "std": 1.3
+          "mean": 4.1,
+          "std": 2.13
         },
         "spearman_r": {
-          "mean": 0.232,
-          "std": 0.006
+          "mean": 0.227,
+          "std": 0.013
         },
         "bracketed_count": "3/3"
       }
@@ -497,7 +501,13 @@
           96,
           96
         ],
-        "scale_factor": 3
+        "scale_factor": 3,
+        "raw_detected_hr_shift_zyx": [
+          0,
+          0,
+          0
+        ],
+        "initial_unaligned_triplanar_ssim": 0.663373284155223
       },
       "n_seeds": 3,
       "seeds": [
@@ -506,71 +516,71 @@
           "raw_tricubic_psnr": 14.9,
           "tricubic_psnr": 16.36,
           "yz_psnr": 16.51,
-          "ortho_psnr": 16.53,
+          "ortho_psnr": 16.54,
           "raw_tricubic_ssim_3d": 0.3547,
           "tricubic_ssim_3d": 0.4502,
-          "yz_ssim_3d": 0.4637,
-          "ortho_ssim_3d": 0.4641,
+          "yz_ssim_3d": 0.4633,
+          "ortho_ssim_3d": 0.4643,
           "raw_tricubic_pore_dice": 0.7746,
           "tricubic_pore_dice": 0.7658,
-          "yz_pore_dice": 0.7729,
-          "ortho_pore_dice": 0.7731,
+          "yz_pore_dice": 0.7733,
+          "ortho_pore_dice": 0.774,
           "raw_tricubic_porosity_abs_err": 0.0166,
           "tricubic_porosity_abs_err": 0.0298,
-          "ortho_porosity_abs_err": 0.0268,
+          "ortho_porosity_abs_err": 0.0271,
           "true_d_eff": 0.03915,
           "tricubic_d_eff_rel_err_pct": 70.19,
-          "yz_d_eff_rel_err_pct": 67.2,
-          "ortho_d_eff_rel_err_pct": 67.77,
-          "spearman_r": 0.3925,
+          "yz_d_eff_rel_err_pct": 66.62,
+          "ortho_d_eff_rel_err_pct": 67.79,
+          "spearman_r": 0.3884,
           "bracketed_1sigma": false
         },
         {
           "seed": 43,
           "raw_tricubic_psnr": 14.9,
           "tricubic_psnr": 16.36,
-          "yz_psnr": 16.58,
-          "ortho_psnr": 16.58,
+          "yz_psnr": 16.54,
+          "ortho_psnr": 16.56,
           "raw_tricubic_ssim_3d": 0.3547,
           "tricubic_ssim_3d": 0.4502,
-          "yz_ssim_3d": 0.4675,
-          "ortho_ssim_3d": 0.4662,
+          "yz_ssim_3d": 0.4654,
+          "ortho_ssim_3d": 0.4648,
           "raw_tricubic_pore_dice": 0.7746,
           "tricubic_pore_dice": 0.7658,
-          "yz_pore_dice": 0.777,
-          "ortho_pore_dice": 0.7772,
+          "yz_pore_dice": 0.7741,
+          "ortho_pore_dice": 0.774,
           "raw_tricubic_porosity_abs_err": 0.0166,
           "tricubic_porosity_abs_err": 0.0298,
-          "ortho_porosity_abs_err": 0.0242,
+          "ortho_porosity_abs_err": 0.0297,
           "true_d_eff": 0.03915,
           "tricubic_d_eff_rel_err_pct": 70.19,
-          "yz_d_eff_rel_err_pct": 56.38,
-          "ortho_d_eff_rel_err_pct": 65.95,
-          "spearman_r": 0.3903,
+          "yz_d_eff_rel_err_pct": 67.34,
+          "ortho_d_eff_rel_err_pct": 68.36,
+          "spearman_r": 0.3756,
           "bracketed_1sigma": false
         },
         {
           "seed": 44,
           "raw_tricubic_psnr": 14.9,
           "tricubic_psnr": 16.36,
-          "yz_psnr": 16.53,
+          "yz_psnr": 16.52,
           "ortho_psnr": 16.54,
           "raw_tricubic_ssim_3d": 0.3547,
           "tricubic_ssim_3d": 0.4502,
-          "yz_ssim_3d": 0.462,
-          "ortho_ssim_3d": 0.4618,
+          "yz_ssim_3d": 0.4615,
+          "ortho_ssim_3d": 0.4619,
           "raw_tricubic_pore_dice": 0.7746,
           "tricubic_pore_dice": 0.7658,
-          "yz_pore_dice": 0.7727,
-          "ortho_pore_dice": 0.7727,
+          "yz_pore_dice": 0.7725,
+          "ortho_pore_dice": 0.7726,
           "raw_tricubic_porosity_abs_err": 0.0166,
           "tricubic_porosity_abs_err": 0.0298,
-          "ortho_porosity_abs_err": 0.0304,
+          "ortho_porosity_abs_err": 0.0311,
           "true_d_eff": 0.03915,
           "tricubic_d_eff_rel_err_pct": 70.19,
-          "yz_d_eff_rel_err_pct": 68.17,
-          "ortho_d_eff_rel_err_pct": 69.29,
-          "spearman_r": 0.4055,
+          "yz_d_eff_rel_err_pct": 68.0,
+          "ortho_d_eff_rel_err_pct": 69.59,
+          "spearman_r": 0.3843,
           "bracketed_1sigma": false
         }
       ],
@@ -584,12 +594,12 @@
           "std": 0.0
         },
         "yz_psnr": {
-          "mean": 16.54,
-          "std": 0.04
+          "mean": 16.52,
+          "std": 0.02
         },
         "ortho_psnr": {
           "mean": 16.55,
-          "std": 0.03
+          "std": 0.01
         },
         "raw_tricubic_ssim_3d": {
           "mean": 0.3547,
@@ -600,12 +610,12 @@
           "std": 0.0
         },
         "yz_ssim_3d": {
-          "mean": 0.4644,
-          "std": 0.0028
+          "mean": 0.4634,
+          "std": 0.002
         },
         "ortho_ssim_3d": {
-          "mean": 0.464,
-          "std": 0.0022
+          "mean": 0.4637,
+          "std": 0.0016
         },
         "raw_tricubic_pore_dice": {
           "mean": 0.7746,
@@ -616,12 +626,12 @@
           "std": 0.0
         },
         "yz_pore_dice": {
-          "mean": 0.7742,
-          "std": 0.0024
+          "mean": 0.7733,
+          "std": 0.0008
         },
         "ortho_pore_dice": {
-          "mean": 0.7743,
-          "std": 0.0025
+          "mean": 0.7735,
+          "std": 0.0008
         },
         "raw_tricubic_porosity_abs_err": {
           "mean": 0.0166,
@@ -632,24 +642,24 @@
           "std": 0.0
         },
         "ortho_porosity_abs_err": {
-          "mean": 0.0271,
-          "std": 0.0031
+          "mean": 0.0293,
+          "std": 0.002
         },
         "tricubic_d_eff_rel_err_pct": {
           "mean": 70.19,
           "std": 0.0
         },
         "yz_d_eff_rel_err_pct": {
-          "mean": 63.92,
-          "std": 6.54
+          "mean": 67.32,
+          "std": 0.69
         },
         "ortho_d_eff_rel_err_pct": {
-          "mean": 67.67,
-          "std": 1.67
+          "mean": 68.58,
+          "std": 0.92
         },
         "spearman_r": {
-          "mean": 0.396,
-          "std": 0.008
+          "mean": 0.383,
+          "std": 0.007
         },
         "bracketed_count": "0/3"
       }
@@ -704,7 +714,13 @@
           96,
           96
         ],
-        "scale_factor": 3
+        "scale_factor": 3,
+        "raw_detected_hr_shift_zyx": [
+          0,
+          0,
+          0
+        ],
+        "initial_unaligned_triplanar_ssim": 0.618513633803564
       },
       "n_seeds": 3,
       "seeds": [
@@ -712,72 +728,72 @@
           "seed": 42,
           "raw_tricubic_psnr": 16.52,
           "tricubic_psnr": 17.22,
-          "yz_psnr": 17.49,
-          "ortho_psnr": 17.5,
+          "yz_psnr": 17.42,
+          "ortho_psnr": 17.42,
           "raw_tricubic_ssim_3d": 0.3758,
           "tricubic_ssim_3d": 0.4452,
-          "yz_ssim_3d": 0.4639,
-          "ortho_ssim_3d": 0.4627,
+          "yz_ssim_3d": 0.4632,
+          "ortho_ssim_3d": 0.4626,
           "raw_tricubic_pore_dice": 0.7962,
           "tricubic_pore_dice": 0.7947,
-          "yz_pore_dice": 0.7987,
-          "ortho_pore_dice": 0.7995,
+          "yz_pore_dice": 0.7983,
+          "ortho_pore_dice": 0.7989,
           "raw_tricubic_porosity_abs_err": 0.0051,
           "tricubic_porosity_abs_err": 0.0163,
-          "ortho_porosity_abs_err": 0.0012,
+          "ortho_porosity_abs_err": 0.0001,
           "true_d_eff": 0.06384,
           "tricubic_d_eff_rel_err_pct": 6.59,
-          "yz_d_eff_rel_err_pct": 15.6,
-          "ortho_d_eff_rel_err_pct": 15.73,
-          "spearman_r": 0.2782,
+          "yz_d_eff_rel_err_pct": 15.2,
+          "ortho_d_eff_rel_err_pct": 15.31,
+          "spearman_r": 0.2872,
           "bracketed_1sigma": false
         },
         {
           "seed": 43,
           "raw_tricubic_psnr": 16.52,
           "tricubic_psnr": 17.22,
-          "yz_psnr": 17.45,
-          "ortho_psnr": 17.49,
+          "yz_psnr": 17.48,
+          "ortho_psnr": 17.53,
           "raw_tricubic_ssim_3d": 0.3758,
           "tricubic_ssim_3d": 0.4452,
-          "yz_ssim_3d": 0.4629,
-          "ortho_ssim_3d": 0.4639,
+          "yz_ssim_3d": 0.4642,
+          "ortho_ssim_3d": 0.4655,
           "raw_tricubic_pore_dice": 0.7962,
           "tricubic_pore_dice": 0.7947,
-          "yz_pore_dice": 0.7979,
+          "yz_pore_dice": 0.7978,
           "ortho_pore_dice": 0.7999,
           "raw_tricubic_porosity_abs_err": 0.0051,
           "tricubic_porosity_abs_err": 0.0163,
-          "ortho_porosity_abs_err": 0.0002,
+          "ortho_porosity_abs_err": 0.0047,
           "true_d_eff": 0.06384,
           "tricubic_d_eff_rel_err_pct": 6.59,
-          "yz_d_eff_rel_err_pct": 14.67,
-          "ortho_d_eff_rel_err_pct": 15.16,
-          "spearman_r": 0.2955,
+          "yz_d_eff_rel_err_pct": 17.24,
+          "ortho_d_eff_rel_err_pct": 17.51,
+          "spearman_r": 0.274,
           "bracketed_1sigma": false
         },
         {
           "seed": 44,
           "raw_tricubic_psnr": 16.52,
           "tricubic_psnr": 17.22,
-          "yz_psnr": 17.51,
-          "ortho_psnr": 17.52,
+          "yz_psnr": 17.39,
+          "ortho_psnr": 17.4,
           "raw_tricubic_ssim_3d": 0.3758,
           "tricubic_ssim_3d": 0.4452,
-          "yz_ssim_3d": 0.462,
-          "ortho_ssim_3d": 0.4619,
+          "yz_ssim_3d": 0.4599,
+          "ortho_ssim_3d": 0.4605,
           "raw_tricubic_pore_dice": 0.7962,
           "tricubic_pore_dice": 0.7947,
-          "yz_pore_dice": 0.7996,
-          "ortho_pore_dice": 0.7998,
+          "yz_pore_dice": 0.7979,
+          "ortho_pore_dice": 0.7985,
           "raw_tricubic_porosity_abs_err": 0.0051,
           "tricubic_porosity_abs_err": 0.0163,
-          "ortho_porosity_abs_err": 0.0043,
+          "ortho_porosity_abs_err": 0.0069,
           "true_d_eff": 0.06384,
           "tricubic_d_eff_rel_err_pct": 6.59,
-          "yz_d_eff_rel_err_pct": 16.78,
-          "ortho_d_eff_rel_err_pct": 17.1,
-          "spearman_r": 0.2906,
+          "yz_d_eff_rel_err_pct": 10.7,
+          "ortho_d_eff_rel_err_pct": 11.19,
+          "spearman_r": 0.2741,
           "bracketed_1sigma": false
         }
       ],
@@ -791,12 +807,12 @@
           "std": 0.0
         },
         "yz_psnr": {
-          "mean": 17.48,
-          "std": 0.03
+          "mean": 17.43,
+          "std": 0.05
         },
         "ortho_psnr": {
-          "mean": 17.5,
-          "std": 0.02
+          "mean": 17.45,
+          "std": 0.07
         },
         "raw_tricubic_ssim_3d": {
           "mean": 0.3758,
@@ -807,12 +823,12 @@
           "std": 0.0
         },
         "yz_ssim_3d": {
-          "mean": 0.4629,
-          "std": 0.001
+          "mean": 0.4624,
+          "std": 0.0023
         },
         "ortho_ssim_3d": {
-          "mean": 0.4628,
-          "std": 0.001
+          "mean": 0.4629,
+          "std": 0.0025
         },
         "raw_tricubic_pore_dice": {
           "mean": 0.7962,
@@ -823,12 +839,12 @@
           "std": 0.0
         },
         "yz_pore_dice": {
-          "mean": 0.7987,
-          "std": 0.0009
+          "mean": 0.798,
+          "std": 0.0003
         },
         "ortho_pore_dice": {
-          "mean": 0.7997,
-          "std": 0.0002
+          "mean": 0.7991,
+          "std": 0.0007
         },
         "raw_tricubic_porosity_abs_err": {
           "mean": 0.0051,
@@ -839,28 +855,28 @@
           "std": 0.0
         },
         "ortho_porosity_abs_err": {
-          "mean": 0.0019,
-          "std": 0.0021
+          "mean": 0.0039,
+          "std": 0.0035
         },
         "tricubic_d_eff_rel_err_pct": {
           "mean": 6.59,
           "std": 0.0
         },
         "yz_d_eff_rel_err_pct": {
-          "mean": 15.68,
-          "std": 1.06
+          "mean": 14.38,
+          "std": 3.35
         },
         "ortho_d_eff_rel_err_pct": {
-          "mean": 16.0,
-          "std": 1.0
+          "mean": 14.67,
+          "std": 3.21
         },
         "spearman_r": {
-          "mean": 0.288,
-          "std": 0.009
+          "mean": 0.278,
+          "std": 0.008
         },
         "bracketed_count": "0/3"
       }
     }
   },
-  "bentheimer_dualscan_3x_elapsed_seconds": 443.4
+  "bentheimer_dualscan_3x_elapsed_seconds": 450.3
 }

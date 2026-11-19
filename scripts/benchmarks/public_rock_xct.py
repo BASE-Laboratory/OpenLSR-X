@@ -18,7 +18,13 @@ from openlsrx.data import (
     prepare_bentheimer_dualscan_benchmark,
 )
 from openlsrx.inference import super_resolve_volume_orthogonal
-from openlsrx.metrics import evaluate_image_metrics, evaluate_petrophysical_metrics
+from openlsrx.metrics import (
+    evaluate_image_metrics,
+    evaluate_petrophysical_metrics,
+    evaluate_spectral_metrics,
+    evaluate_transport_metrics,
+    precompute_reference_transport,
+)
 from openlsrx.models import SRGAN
 
 
@@ -37,6 +43,7 @@ def run_public_rock_benchmark(
     seed_list = seeds or ([42] if fast else [42, 43, 44])
     fallback = bool(fast) if allow_synthetic_fallback is None else bool(allow_synthetic_fallback)
     eff_scale = 3 if dualscan else scale_factor
+    voxel_um = 6.0 if dualscan else 1.0
 
     if fast:
         volume_size = 48 if not dualscan else 72
@@ -101,6 +108,9 @@ def run_public_rock_benchmark(
             )
             dm.setup("fit")
             lr_test, hr_test = dm.test_volumes
+            ref_transport = precompute_reference_transport(
+                hr_test, pore_is_low=True, voxel_size=voxel_um
+            )
 
             for mode, name in (("trilinear", "Trilinear-3D"), ("tricubic", "Tricubic-3D")):
                 pred = upsample_3d(lr_test, scale_factors=eff_scale, mode=mode)  # type: ignore[arg-type]
@@ -112,7 +122,17 @@ def run_public_rock_benchmark(
                     "method": name,
                 }
                 row.update(evaluate_image_metrics(pred, hr_test))
+                row.update(evaluate_spectral_metrics(pred, hr_test, voxel_size_um=voxel_um))
                 row.update(evaluate_petrophysical_metrics(pred, hr_test, pore_is_low=True))
+                row.update(
+                    evaluate_transport_metrics(
+                        pred,
+                        hr_test,
+                        pore_is_low=True,
+                        voxel_size=voxel_um,
+                        precomputed_true=ref_transport,
+                    )
+                )
                 rows.append(row)
 
             pl.seed_everything(seed, workers=True)
@@ -180,9 +200,19 @@ def run_public_rock_benchmark(
                     "method": label,
                 }
                 row.update(evaluate_image_metrics(vols[key], hr_test))
+                row.update(evaluate_spectral_metrics(vols[key], hr_test, voxel_size_um=voxel_um))
                 row.update(
                     evaluate_petrophysical_metrics(
                         vols[key], hr_test, pore_is_low=True, stack_axis=ax_idx
+                    )
+                )
+                row.update(
+                    evaluate_transport_metrics(
+                        vols[key],
+                        hr_test,
+                        pore_is_low=True,
+                        voxel_size=voxel_um,
+                        precomputed_true=ref_transport,
                     )
                 )
                 rows.append(row)
@@ -198,7 +228,11 @@ def run_public_rock_benchmark(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run Open Rock Micro-CT SR Benchmark.")
-    parser.add_argument("--output-dir", default="results/public_rock", help="Output directory.")
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Output directory (defaults to results/public_rock, or results/public_rock_dualscan with --dualscan).",
+    )
     parser.add_argument("--data-dir", default="data/benchmarks", help="Benchmark data cache.")
     parser.add_argument("--volume-size", type=int, default=128, help="Cubic HR side length.")
     parser.add_argument("--scale-factor", type=int, default=2, choices=[2, 3, 4], help="SR factor.")
@@ -216,9 +250,14 @@ def main() -> None:
         help="Allow synthetic fallback if live Zenodo download fails during a full campaign.",
     )
     ns = parser.parse_args()
+    resolved_out = (
+        Path(ns.output_dir)
+        if ns.output_dir is not None
+        else Path("results/public_rock_dualscan" if ns.dualscan else "results/public_rock")
+    )
 
     run_public_rock_benchmark(
-        output_dir=Path(ns.output_dir),
+        output_dir=resolved_out,
         data_dir=Path(ns.data_dir),
         volume_size=ns.volume_size,
         scale_factor=ns.scale_factor,

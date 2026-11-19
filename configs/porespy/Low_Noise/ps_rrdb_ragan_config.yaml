@@ -1,0 +1,58 @@
+# Normalization-free RRDB + Relativistic Average GAN (RaGAN) 3D PoreSpy XCT configuration
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: 32-true
+  max_epochs: 150
+  check_val_every_n_epoch: 10
+  log_every_n_steps: 10
+
+model:
+  backbone: rrdb
+  context_slices: 3
+  learning_rate: 1.0e-4
+  adaptive_size: 8
+  accumulate_n_batches: 1
+  super_res_factor: 2
+  num_blocks: 8
+  out_channels: 64
+  output_activation: clamp
+  pixel_loss_type: l1
+  use_adversarial_loss: true
+  gan_loss_type: ragan
+  adversarial_weight: 5.0e-4
+  pretrain_epochs: 10
+  use_vgg_loss: false
+  conservation_loss_weight: 0.10
+  conservation_psf_sigma: 0.8
+  topology_loss_weight: 0.04
+  gradient_loss_weight: 0.05
+  ffl_loss_weight: 0.02
+  sample_id: ps_rrdb_ragan
+  output_dir: outputs/ps_rrdb_ragan
+
+data:
+  class_path: openlsrx.data.SyntheticPoreSpyDataModule
+  init_args:
+    volume_size: 128
+    feature_regime: high_feature
+    noise_regime: low_noise
+    representation: attenuation
+    scale_factor: 2
+    context_slices: 3
+    train_frac: 0.70
+    val_frac: 0.15
+    guard_slices_lr: 1
+    train_axes: ["yz", "xz", "xy"]
+    test_axis: perpendicular
+    predict_axis: xy
+    patch_size_lr: 32
+    augment: true
+    batch_size: 4
+    eval_batch_size: 4
+    num_workers: 0
+    pin_memory: false
+    seed: 42
+    cache_dir: data/cache

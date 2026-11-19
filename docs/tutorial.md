@@ -1,6 +1,6 @@
 # End-to-End Tutorial
 
-This tutorial walks through a complete reproducible 2D-to-3D super-resolution and petrophysical evaluation cycle in **OpenLSR-X**—from generating a 3D dual-porosity volume with realistic tomographic blur and noise, to leakage-free slab splitting, `SRGAN` training, 3-axis orthogonal Fourier fusion, and quantitative pore-space validation.
+This tutorial walks through a complete reproducible 2D-to-3D super-resolution and petrophysical evaluation cycle in **OpenLSR-X**—from generating a connected 3D synthetic porous volume with realistic tomographic blur and noise, to leakage-free slab splitting, `SRGAN` training, 3-axis orthogonal Fourier fusion, and quantitative pore-space validation.
 
 ---
 

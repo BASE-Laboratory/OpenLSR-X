@@ -38,6 +38,8 @@ def _score_reconstruction(
     )
     row: dict[str, object] = {
         "regime": dataset_tag,
+        "source_kind": "synthetic_porespy_3d",
+        "is_experimental_xct": 0,
         "seed": seed,
         "method": method,
     }

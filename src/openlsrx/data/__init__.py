@@ -16,6 +16,7 @@ from .synthetic import (
     generate_porespy_volume,
 )
 from .transforms import (
+    ConcatSubdatasetBatchSampler,
     CrossScanCalibrationMode,
     DatasetObject,
     NormMode,
@@ -30,6 +31,7 @@ from .transforms import (
     downsample_orthogonal_slabs,
     extract_paired_slices_from_subvolume,
     fit_cross_scan_calibration,
+    make_slice_dataloader,
     minimum_psf_guard_slices_lr,
     normalize_volume,
     sanitize_xct_volume,
@@ -42,6 +44,7 @@ from .zn13x import (
     ZN13X_SUBVOLUMES_ZENODO_RECORD,
     Zn13XPairName,
     Zn13XResolutionSpec,
+    apply_hr_grid_shift_pair_3d,
     extract_aligned_slab_from_h5,
     prepare_zn13x_benchmark,
     register_multires_pair_3d,
@@ -51,6 +54,7 @@ from .zn13x import (
 __all__ = [
     "AVAILABLE_DUALSCAN_DATASETS",
     "AVAILABLE_PUBLIC_DATASETS",
+    "ConcatSubdatasetBatchSampler",
     "CrossScanCalibrationMode",
     "DatasetObject",
     "FeatureRegime",
@@ -69,6 +73,7 @@ __all__ = [
     "Zn13XResolutionSpec",
     "apply_alignment",
     "apply_cross_scan_calibration",
+    "apply_hr_grid_shift_pair_3d",
     "build_circular_fov_mask",
     "build_multi_axis_slice_dataset",
     "compute_normalization_bounds",
@@ -80,6 +85,7 @@ __all__ = [
     "fit_cross_scan_calibration",
     "generate_porespy_volume",
     "load_volume_any",
+    "make_slice_dataloader",
     "minimum_psf_guard_slices_lr",
     "normalize_volume",
     "prepare_bentheimer_dualscan_benchmark",

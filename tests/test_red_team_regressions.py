@@ -620,3 +620,252 @@ def test_p1_4_to_p3_5_models_metrics_fov_straight_through_and_security(tmp_path:
     assert rec["n_seeds"] == 2
     assert rec["n_percolating_seeds"] == 1
     assert rec["source_kinds"] == ["zenodo_14245751_8bit_cropped_h5_registered"]
+
+
+def test_stage5_dualscan_z_shift_symmetric_pad_and_heterogeneous_eval() -> None:
+    """Verify Stage 5 P0-1 & P0-2 fixes: exact HR-grid Z-shift slicing, symmetric pad, and unpadded eval."""
+    from openlsrx.data import (
+        apply_hr_grid_shift_pair_3d,
+        build_multi_axis_slice_dataset,
+        make_slice_dataloader,
+    )
+    from openlsrx.data.transforms import _safe_pad_spatial
+
+    # 1) Exact integer HR-grid shift slicing resolves a -1 HR-voxel Z-offset with zero interpolation
+    _, hr_base = synthesize_zn13x_phantom_pair(pair="2x", lr_shape=(24, 24, 24), seed=19)
+    # Create a 3x pair (18^3 LR, 54^3 HR) where LR is degraded from z=[1:55] and HR is z=[0:54] (hr_shift_zyx == [-1, 0, 0])
+    hr_full = zoom_cell_centered(hr_base, zoom_factors=57.0 / 48.0, order=1).astype(np.float32)
+    lr_from_z1 = degrade_xct_volume(
+        hr_full[1:55, :54, :54], scale_factor=3, psf_sigma=0.8, noise_std=0.0
+    )
+    hr_z0 = hr_full[:54, :54, :54]
+    _, _, info_before = register_multires_pair_3d(lr_from_z1, hr_z0, scale_factor=3)
+    detected = info_before["hr_shift_zyx"]
+    assert isinstance(detected, list) and detected[0] == -1
+
+    sliced = apply_hr_grid_shift_pair_3d(lr_from_z1, hr_z0, shift_hr_zyx=(-1, 0, 0), scale_factor=3)
+    assert sliced is not None
+    al_lr, al_hr = sliced
+    _, _, info_after = register_multires_pair_3d(al_lr, al_hr, scale_factor=3)
+    assert info_after["hr_shift_zyx"] == [0, 0, 0]
+
+    # 2) Half-sample symmetric spatial padding preserves exact cell-centered alignment at 3x & 8x
+    for s in (3, 8):
+        n_lr = 10
+        n_hr = n_lr * s
+        ramp_hr = np.linspace(0.0, 1.0, n_hr, dtype=np.float32)[np.newaxis, :, np.newaxis]
+        ramp_hr = np.broadcast_to(ramp_hr, (2, n_hr, n_hr)).copy()
+        ramp_lr = ramp_hr.reshape(2, n_lr, s, n_lr, s).mean(axis=(2, 4)).astype(np.float32)
+
+        pad_lr = _safe_pad_spatial(ramp_lr, n_lr + 6, n_lr + 6)
+        pad_hr = _safe_pad_spatial(ramp_hr, (n_lr + 6) * s, (n_lr + 6) * s)
+        up_pad_lr = zoom_cell_centered(pad_lr, zoom_factors=(1.0, float(s), float(s)), order=1)
+        # Inside the reflected linear pad [n_hr + s : n_hr + 4 * s], half-sample symmetric pad
+        # has exact zero (< 1e-5) phase error, whereas whole-sample reflect had a 1-HR-voxel bias!
+        refl_err = np.max(
+            np.abs(
+                up_pad_lr[:, n_hr + s : n_hr + 4 * s, s : 3 * s]
+                - pad_hr[:, n_hr + s : n_hr + 4 * s, s : 3 * s]
+            )
+        )
+        assert float(refl_err) < 1e-5
+
+    # 3) Non-cubic multi-axis evaluation keeps thin slabs unpadded and batches purely per subdataset
+    rng = np.random.default_rng(12)
+    lr_slab = rng.random((5, 16, 16), dtype=np.float32)
+    hr_slab = rng.random((15, 48, 48), dtype=np.float32)
+    eval_ds = build_multi_axis_slice_dataset(
+        lr_slab,
+        hr_slab,
+        scale_factor=3,
+        axes=("yz", "xz", "xy"),
+        patch_size_lr=None,
+        augment=False,
+        context_slices=3,
+    )
+    dl = make_slice_dataloader(eval_ds, batch_size=6, shuffle=False)
+    seen_shapes = {tuple(hi.shape[-2:]) for _, hi in dl}
+    assert (48, 48) in seen_shapes
+    assert (15, 48) in seen_shapes
+
+
+def test_stage5_dark_cap_slice_loader_and_checkpoint_radiometric_restoration(
+    tmp_path: Path,
+) -> None:
+    """Verify Stage 5 P0-3, P0-4, & P0-5 fixes: dark uint16 slice dirs, checkpoint calibration, & SR3D CLI."""
+    from openlsrx.data import load_volume_any
+    from openlsrx.models import SRGAN, SR3DResNet
+
+    # 1) Dark uint16 cap slice (max == 1) in a 2D slice directory must scale by 1/65535, NOT stay 1.0!
+    slice_dir = tmp_path / "uint16_slices"
+    slice_dir.mkdir()
+    dark_cap = np.ones((16, 16), dtype=np.uint16)  # max == 1!
+    mid_slice = np.full((16, 16), 32768, dtype=np.uint16)
+    tifffile.imwrite(slice_dir / "s000.tif", dark_cap)
+    tifffile.imwrite(slice_dir / "s001.tif", mid_slice)
+    loaded = load_volume_any(slice_dir)
+    assert loaded.shape == (2, 16, 16)
+    assert float(loaded[0].max()) == pytest.approx(1.0 / 65535.0, rel=1e-4)
+    assert float(loaded[1].mean()) == pytest.approx(32768.0 / 65535.0, rel=1e-4)
+
+    # 2) Train-fitted quantile calibration persists in checkpoint and auto-applies in predict-volume
+    rng = np.random.default_rng(55)
+    hr_vol = np.clip(0.2 + 0.6 * rng.random((24, 24, 24), dtype=np.float32), 0.0, 1.0)
+    # Non-linear gamma-distorted LR scan (12x12x12) simulating uncalibrated cross-scan contrast
+    lr_raw = np.power(degrade_xct_volume(hr_vol, scale_factor=2, psf_sigma=0.5, noise_std=0.0), 2.2)
+    lr_tif = tmp_path / "lr_gamma.tif"
+    hr_tif = tmp_path / "hr_lin.tif"
+    tifffile.imwrite(lr_tif, lr_raw.astype(np.float32))
+    tifffile.imwrite(hr_tif, hr_vol.astype(np.float32))
+
+    dm = PairedVolumeDataModule(
+        low_path=str(lr_tif),
+        high_path=str(hr_tif),
+        degrade_from_hr=False,
+        scale_factor=2,
+        norm_mode="percentile",
+        cross_scan_calibration="quantile",
+        train_frac=0.60,
+        val_frac=0.20,
+        guard_slices_lr=0,
+        patch_size_lr=8,
+        batch_size=2,
+    )
+    model = SRGAN(
+        backbone="swinir",
+        context_slices=1,
+        super_res_factor=2,
+        out_channels=16,
+        num_blocks=1,
+        swin_num_heads=4,
+        swin_window_size=4,
+        use_adversarial_loss=False,
+        use_vgg_loss=False,
+        save_val_images=False,
+    )
+    ckpt_path = tmp_path / "calibrated_swinir.ckpt"
+    trainer = pl.Trainer(
+        max_epochs=1,
+        limit_train_batches=1,
+        limit_val_batches=1,
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_checkpointing=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+    )
+    trainer.fit(model, datamodule=dm)
+    trainer.save_checkpoint(ckpt_path)
+
+    loaded_model = SRGAN.load_from_checkpoint(ckpt_path, map_location="cpu")
+    assert isinstance(loaded_model._saved_radiometric_state, dict)
+    cal_state = loaded_model._saved_radiometric_state["cross_scan_calibration_params"]
+    assert isinstance(cal_state, dict) and cal_state["mode"] == "quantile"
+
+    out_dir = tmp_path / "cli_pred_out"
+    with pytest.raises(SystemExit) as exc_pv:
+        cli_main(
+            [
+                "predict-volume",
+                "--ckpt",
+                str(ckpt_path),
+                "--input",
+                str(lr_tif),
+                "--output-dir",
+                str(out_dir),
+                "--save-uncertainty",
+                "--device",
+                "cpu",
+            ]
+        )
+    assert exc_pv.value.code == 0
+    assert (out_dir / "predicted_stack.tiff").is_file()
+    assert (out_dir / "uncertainty_std_stack.tiff").is_file()
+
+    # 3) SR3DResNet checkpoint auto-detection in openlsrx predict-volume (12^3 -> 24^3 at 2x)
+    m3d = SR3DResNet(super_res_factor=2, out_channels=8, num_blocks=1)
+    ckpt_3d = tmp_path / "sr3d.ckpt"
+    t3d = pl.Trainer(logger=False, enable_checkpointing=False, accelerator="cpu", devices=1)
+    t3d.strategy.connect(m3d)
+    t3d.save_checkpoint(ckpt_3d)
+    out_3d = tmp_path / "pred_3d.tiff"
+    with pytest.raises(SystemExit) as exc_3d:
+        cli_main(
+            [
+                "predict-volume",
+                "--ckpt",
+                str(ckpt_3d),
+                "--input",
+                str(lr_tif),
+                "--output",
+                str(out_3d),
+                "--device",
+                "cpu",
+            ]
+        )
+    assert exc_3d.value.code == 0
+    assert tifffile.imread(out_3d).shape == (24, 24, 24)
+
+
+def test_stage5_fourier_diagonal_edge_thin_fsc_ms_ssim_and_openimpala_blocking(
+    tmp_path: Path,
+) -> None:
+    """Verify Stage 5 P1-1..P2 fixes: sharp diagonal Fourier fusion, thin-slab FSC, MS-SSIM, & AMReX blocking."""
+    from openlsrx.losses import SobelGradientLoss
+    from openlsrx.metrics.image import compute_ms_ssim, compute_ssim_3d_isotropic
+
+    # 1) Diagonal (kz=0.36, ky=0.36) edge resolved sharply by xy sweep is NOT clamped onto blurry yz/xz sweeps
+    n = 36
+    zz, yy, _ = np.meshgrid(np.arange(n), np.arange(n), np.arange(n), indexing="ij")
+    sharp_diag = (0.5 + 0.35 * np.cos(2.0 * np.pi * 0.36 * zz + 2.0 * np.pi * 0.36 * yy)).astype(
+        np.float32
+    )
+    blur_z = gaussian_filter(sharp_diag, sigma=(2.2, 0.0, 0.0)).astype(np.float32)
+    blur_y = gaussian_filter(sharp_diag, sigma=(0.0, 2.2, 0.0)).astype(np.float32)
+    fused_cf = fuse_orthogonal_volumes(
+        {"yz": blur_z, "xz": blur_y, "xy": sharp_diag},
+        mode="confidence_fourier",
+        scale_factor=3,
+    )
+    interior = (slice(4, -4), slice(4, -4), slice(4, -4))
+    rmse_cf = float(np.sqrt(np.mean((fused_cf[interior] - sharp_diag[interior]) ** 2)))
+    rmse_mean = float(
+        np.sqrt(
+            np.mean((((blur_z + blur_y + sharp_diag) / 3.0)[interior] - sharp_diag[interior]) ** 2)
+        )
+    )
+    assert rmse_cf < 0.03 and rmse_cf < 0.25 * rmse_mean
+
+    # 2) Thin-slab (8, 64, 64) 3D FSC preserves 32 radial shells and uses FSC=0.5 for fsc_nyquist_fraction
+    rng = np.random.default_rng(88)
+    slab_true = rng.random((8, 64, 64), dtype=np.float32)
+    slab_pred = gaussian_filter(slab_true, sigma=0.8).astype(np.float32)
+    fsc = compute_fsc_3d(slab_pred, slab_true)
+    assert len(fsc["frequencies_cyc_per_voxel"]) == 32
+    spec_m = evaluate_spectral_metrics(slab_pred, slab_true)
+    assert spec_m["fsc_nyquist_fraction"] == pytest.approx(fsc["nyquist_fraction_050"], abs=1e-6)
+
+    # 3) compute_ms_ssim returns None cleanly on 168x168 (< 176) and float on 176x176; D=2 3D SSIM works
+    a168 = torch.rand(1, 1, 168, 168)
+    assert compute_ms_ssim(a168, a168) is None
+    a176 = torch.rand(1, 1, 176, 176)
+    ms176 = compute_ms_ssim(a176, a176)
+    assert ms176 is not None and ms176 == pytest.approx(1.0, abs=1e-4)
+    d2_vol = rng.random((2, 24, 24), dtype=np.float32)
+    assert compute_ssim_3d_isotropic(d2_vol, d2_vol) == pytest.approx(1.0, abs=1e-5)
+
+    # 4) Constant all-pore (0.0) volume segments to porosity == 1.0, and SobelGradientLoss works in 2D & 3D
+    all_pore = np.zeros((12, 12, 12), dtype=np.float32)
+    petro_pore = evaluate_petrophysical_metrics(all_pore, all_pore, pore_is_low=True)
+    assert petro_pore["porosity_true"] == pytest.approx(1.0)
+    assert petro_pore["porosity_pred"] == pytest.approx(1.0)
+    sobel = SobelGradientLoss()
+    assert float(sobel(torch.ones(1, 1, 8, 8), torch.ones(1, 1, 8, 8))) == 0.0
+    assert float(sobel(torch.ones(1, 1, 6, 6, 6), torch.ones(1, 1, 6, 6, 6))) == 0.0
+
+    # 5) OpenImpala writes amr.blocking_factor = gcd(nx, ny, nz, 8) so 27^3 / 225^3 never crash AMReX
+    odd_vol = (rng.random((27, 27, 27)) > 0.5).astype(np.float32)
+    _, inp_odd = export_for_openimpala(odd_vol, output_dir=tmp_path / "imp_odd", name="core225")
+    inp_txt = inp_odd.read_text(encoding="utf-8")
+    assert "amr.blocking_factor = 1" in inp_txt

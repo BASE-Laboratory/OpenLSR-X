@@ -50,7 +50,7 @@ openlsrx fit -c configs/base/config.yaml \
 
 ### 2. Reconstruct 3D Volumes from a Checkpoint
 
-Run 3-axis orthogonal fusion (`predict_mode: orthogonal_3axis` by default) via LightningCLI `predict` or the standalone `predict-volume` subcommand:
+Run 3-axis orthogonal fusion (`predict_mode: orthogonal_3axis` by default) via LightningCLI `predict` or the standalone `predict-volume` subcommand (which automatically restores train-fitted normalization and cross-scan calibration from the checkpoint):
 
 ```bash
 openlsrx predict -c configs/porespy/Predict/ps_predict_config.yaml \
@@ -66,14 +66,14 @@ openlsrx predict-volume \
   --save-uncertainty
 ```
 
-In `orthogonal_3axis` mode, predictions are exported under `<output_dir>/predicted_orthogonal/` as assembled 3D `(Z, Y, X)` multi-page BigTIFF stacks (`*_predicted_stack.tiff`, `*_uncertainty_std.tiff`, `*_low_res_stack.tiff`, and `*_high_res_stack.tiff` when paired).
+In `orthogonal_3axis` mode, predictions are exported under `<output_dir>/predicted_orthogonal/` as assembled 3D `(Z, Y, X)` multi-page BigTIFF stacks (`*_predicted_stack.tiff`, `*_uncertainty_std_stack.tiff`, `*_low_res_stack.tiff`, and `*_high_res_stack.tiff` when paired).
 
 ### 3. Evaluate Petrophysical, Spectral & Transport Metrics
 
 ```bash
 openlsrx evaluate \
-  --pred outputs/predicted_orthogonal/ps_predict_predicted_stack.tiff \
-  --target outputs/predicted_orthogonal/ps_predict_high_res_stack.tiff \
+  --pred outputs/ps_predict/predicted_orthogonal/ps_predict_predicted_stack.tiff \
+  --target outputs/ps_predict/predicted_orthogonal/ps_predict_high_res_stack.tiff \
   --include-spectral \
   --include-transport \
   --output results/eval_report.json

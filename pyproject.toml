@@ -5,22 +5,26 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "openlsrx"
 version = "0.2.0"
-description = "Learnable 2D-to-3D Super-Resolution GAN and Petrophysical Benchmark Suite for X-Ray Computed Tomography (XCT)."
+description = "2D/2.5D-to-3D Orthogonal Super-Resolution and Petrophysical Transport Validation Suite for X-Ray Computed Tomography (XCT)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [
     { name = "Calum Green" },
-    { name = "BASE Laboratory" },
+    { name = "Sharif Ahmed" },
+    { name = "James Le Houx" },
 ]
 maintainers = [
+    { name = "James Le Houx" },
     { name = "BASE Laboratory" },
 ]
 keywords = [
     "super-resolution",
     "x-ray-computed-tomography",
     "micro-ct",
+    "synchrotron",
     "porous-media",
+    "swinir",
     "srgan",
     "pytorch-lightning",
     "petrophysics",

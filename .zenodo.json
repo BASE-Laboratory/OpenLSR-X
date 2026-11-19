@@ -1,22 +1,23 @@
 {
-  "title": "OpenLSR-X: Learnable 2D-to-3D Super-Resolution and Petrophysical Benchmark Suite for X-Ray Computed Tomography",
-  "description": "Open-source PyTorch and PyTorch Lightning framework for 2D-to-3D super-resolution (SRGAN + 3-Axis Orthogonal Fourier Fusion) and quantitative petrophysical validation of porous-media and synchrotron X-ray computed tomography (XCT) volumes.",
+  "title": "OpenLSR-X: A Python Framework for 2D-to-3D Orthogonal Super-Resolution and Petrophysical Validation in X-Ray Computed Tomography",
+  "description": "Open-source PyTorch and PyTorch Lightning framework for 2D/2.5D-to-3D super-resolution (SwinIR, RRDB/RaGAN, SRGAN, SR3DResNet, and cell-centered 3-Axis Orthogonal Fourier Fusion) and quantitative petrophysical and diffusive transport validation of porous-media and synchrotron X-ray computed tomography (XCT) volumes.",
   "upload_type": "software",
   "license": "BSD-3-Clause",
   "version": "0.2.0",
   "creators": [
     {
       "name": "Green, Calum",
-      "affiliation": "Department of Mechanical Engineering, Imperial College London; Diamond Light Source"
+      "affiliation": "Department of Mechanical Engineering, Imperial College London; Diamond Light Source, Harwell Science and Innovation Campus, Didcot, United Kingdom"
     },
     {
       "name": "Ahmed, Sharif",
-      "affiliation": "Diamond Light Source, Rutherford Appleton Laboratory"
+      "orcid": "0000-0002-3290-3592",
+      "affiliation": "Diamond Light Source, Harwell Science and Innovation Campus, Didcot, United Kingdom"
     },
     {
       "name": "Le Houx, James",
       "orcid": "0000-0002-1576-0673",
-      "affiliation": "BASE Laboratory, University of Greenwich; ISIS Neutron and Muon Source; The Faraday Institution"
+      "affiliation": "BASE Laboratory, School of Engineering, University of Greenwich; ISIS Neutron and Muon Source, Rutherford Appleton Laboratory; The Faraday Institution"
     }
   ],
   "keywords": [
@@ -26,6 +27,7 @@
     "synchrotron",
     "porous media",
     "petrophysics",
+    "swinir",
     "generative adversarial networks",
     "pytorch-lightning"
   ],
@@ -42,6 +44,16 @@
     },
     {
       "identifier": "10.5281/zenodo.13327692",
+      "relation": "references",
+      "scheme": "doi"
+    },
+    {
+      "identifier": "10.5281/zenodo.14245751",
+      "relation": "references",
+      "scheme": "doi"
+    },
+    {
+      "identifier": "10.5281/zenodo.5542624",
       "relation": "references",
       "scheme": "doi"
     }

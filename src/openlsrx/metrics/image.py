@@ -70,7 +70,8 @@ def compute_ssim(
     if kernel_size < 3:
         return 1.0 if torch.allclose(p, t) else 0.0
 
-    use_gaussian = kernel_size == 11
+    use_gaussian = True
+    sigma = 1.5 * (float(kernel_size) / 11.0)
     scores: list[float] = []
     weights: list[int] = []
     for start in range(0, p.shape[0], chunk_size):
@@ -80,6 +81,7 @@ def compute_ssim(
             p_chunk,
             t_chunk,
             gaussian_kernel=use_gaussian,
+            sigma=sigma,
             data_range=data_range,
             kernel_size=kernel_size,
         )
@@ -96,21 +98,26 @@ def compute_ssim_3d_isotropic(
     target_vol: Tensor | np.ndarray,
     data_range: float = 1.0,
 ) -> float:
-    """Tri-planar SSIM averaged across ``yz``, ``xz``, and ``xy`` slices of a 3D volume."""
+    """Tri-planar SSIM averaged across valid ``yz``, ``xz``, and ``xy`` slice planes of a 3D volume."""
     p = torch.as_tensor(pred_vol, dtype=torch.float32)
     t = torch.as_tensor(target_vol, dtype=torch.float32, device=p.device)
     if p.ndim != 3 or t.ndim != 3:
         raise ValueError(
             f"Expected 3D volumes (D, H, W), got {tuple(p.shape)} and {tuple(t.shape)}."
         )
-    if min(p.shape) < 3:
-        sq_ax = next(ax for ax, sz in enumerate(p.shape) if sz < 3)
-        if p.shape[sq_ax] == 1 and t.shape[sq_ax] == 1:
-            return compute_ssim(p.squeeze(sq_ax), t.squeeze(sq_ax), data_range=data_range)
-    ssim_yz = compute_ssim(p, t, data_range=data_range)
-    ssim_xz = compute_ssim(p.permute(1, 0, 2), t.permute(1, 0, 2), data_range=data_range)
-    ssim_xy = compute_ssim(p.permute(2, 0, 1), t.permute(2, 0, 1), data_range=data_range)
-    return (ssim_yz + ssim_xz + ssim_xy) / 3.0
+    planes = [
+        (p, t),
+        (p.permute(1, 0, 2), t.permute(1, 0, 2)),
+        (p.permute(2, 0, 1), t.permute(2, 0, 1)),
+    ]
+    valid_scores = [
+        compute_ssim(pa, ta, data_range=data_range)
+        for pa, ta in planes
+        if min(int(pa.shape[-2]), int(pa.shape[-1])) >= 3
+    ]
+    if not valid_scores:
+        return 1.0 if torch.allclose(p, t) else 0.0
+    return float(sum(valid_scores) / len(valid_scores))
 
 
 def compute_ms_ssim(
@@ -118,10 +125,10 @@ def compute_ms_ssim(
     target: Tensor | np.ndarray,
     data_range: float = 1.0,
 ) -> float | None:
-    """Multi-Scale SSIM when spatial dimensions are large enough (>= 161 px), else ``None``."""
+    """Multi-Scale SSIM when spatial dimensions are large enough (>= 176 px for 5-level 11px kernel), else ``None``."""
     p = _to_4d_tensor(pred)
     t = _to_4d_tensor(target).to(device=p.device)
-    if min(p.shape[-2], p.shape[-1]) < 161:
+    if min(int(p.shape[-2]), int(p.shape[-1])) < 176:
         return None
     val = multiscale_structural_similarity_index_measure(p, t, data_range=data_range)
     score = float(val.item())
@@ -157,9 +164,15 @@ def evaluate_image_metrics(
         "mae": compute_mae(p, t),
         "rmse": compute_rmse(p, t),
     }
-    if p.ndim == 3 and min(p.shape) >= 3:
+    if p.ndim == 3 and max(p.shape) >= 3:
         results["ssim_3d_triplanar"] = compute_ssim_3d_isotropic(p, t, data_range=data_range)
     ms_ssim = compute_ms_ssim(p, t, data_range=data_range)
     if ms_ssim is not None:
         results["ms_ssim"] = ms_ssim
+    if p.ndim == 3 and min(int(s) for s in p.shape) >= 176:
+        ms_yz = compute_ms_ssim(p, t, data_range=data_range)
+        ms_xz = compute_ms_ssim(p.permute(1, 0, 2), t.permute(1, 0, 2), data_range=data_range)
+        ms_xy = compute_ms_ssim(p.permute(2, 0, 1), t.permute(2, 0, 1), data_range=data_range)
+        if ms_yz is not None and ms_xz is not None and ms_xy is not None:
+            results["ms_ssim_3d_triplanar"] = (ms_yz + ms_xz + ms_xy) / 3.0
     return results

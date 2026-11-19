@@ -27,7 +27,11 @@ data:
     low_path: data/benchmarks/zn13x_8x_lr.tif
     high_path: data/benchmarks/zn13x_8x_hr.tif
     scale_factor: 8
-    norm_mode: none
+    # Default Zenodo 14245751 8-bit preview slabs use independent contrast windows;
+    # set norm_mode: none + cross_scan_calibration: none for raw float32 --raw-h5-dir slabs.
+    norm_mode: percentile
+    cross_scan_calibration: quantile
+    calibration_psf_sigma: 1.2
     train_frac: 0.70
     val_frac: 0.15
     guard_slices_lr: 1

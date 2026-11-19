@@ -18,8 +18,10 @@ from pytorch_lightning.cli import LightningCLI
 from .data import (
     AVAILABLE_DUALSCAN_DATASETS,
     AVAILABLE_PUBLIC_DATASETS,
+    NormMode,
     PairedVolumeDataModule,  # noqa: F401 - registered for LightningCLI subclass discovery
     SyntheticPoreSpyDataModule,  # noqa: F401 - registered for LightningCLI subclass discovery
+    apply_cross_scan_calibration,
     build_circular_fov_mask,
     fetch_or_generate_rock_sample,
     load_volume_any,
@@ -37,7 +39,7 @@ from .metrics import (
     evaluate_transport_metrics,
     evaluate_triphase_zn13x_metrics,
 )
-from .models import SRGAN
+from .models import SRGAN, SR3DResNet, super_resolve_volume_3d
 
 ZN13X_BENCHMARK_KEYS = ("zn13x_2x", "zn13x_8x")
 
@@ -227,8 +229,11 @@ def _run_download_benchmarks(argv: Sequence[str]) -> int:
     parser.add_argument(
         "--size",
         type=int,
-        default=128,
-        help="Cubic HR side length for rock benchmarks, or LR side length for zn13x_*/dualscan if <= 75 (default: 128).",
+        default=None,
+        help=(
+            "Optional cubic side override. Defaults to 128 HR for single-scan rocks, "
+            "75 LR (225 HR) for Bentheimer dual-scan, and 48 LR for zn13x_*."
+        ),
     )
     parser.add_argument(
         "--raw-h5-dir",
@@ -255,12 +260,16 @@ def _run_download_benchmarks(argv: Sequence[str]) -> int:
     parser.add_argument("--seed", type=int, default=42, help="Deterministic RNG seed.")
     ns = parser.parse_args(list(argv))
 
-    shape = (ns.size, ns.size, ns.size)
+    rock_side = 128 if ns.size is None else int(ns.size)
+    shape = (rock_side, rock_side, rock_side)
     for name in ns.datasets:
         if name in ZN13X_BENCHMARK_KEYS:
             pair: Literal["2x", "8x"] = "2x" if name == "zn13x_2x" else "8x"
             scale = 2 if pair == "2x" else 8
-            lr_size = max(16, ns.size // scale) if ns.size >= 64 else max(16, ns.size)
+            if ns.size is None:
+                lr_size = 48
+            else:
+                lr_size = max(16, ns.size // scale) if ns.size >= 64 else max(16, ns.size)
             lr_tif, hr_tif, manifest = prepare_zn13x_benchmark(
                 pair=pair,
                 dest_dir=ns.dest,
@@ -276,11 +285,14 @@ def _run_download_benchmarks(argv: Sequence[str]) -> int:
             )
         elif name in AVAILABLE_DUALSCAN_DATASETS:
             spec_ds = AVAILABLE_DUALSCAN_DATASETS[name]
-            lr_side = (
-                min(spec_ds.low_raw_shape[0], max(12, ns.size))
-                if ns.size <= spec_ds.low_raw_shape[0]
-                else min(spec_ds.low_raw_shape[0], max(12, ns.size // spec_ds.scale_factor))
-            )
+            if ns.size is None:
+                lr_side = min(spec_ds.low_raw_shape[0], 75)
+            else:
+                lr_side = (
+                    min(spec_ds.low_raw_shape[0], max(12, ns.size))
+                    if ns.size <= spec_ds.low_raw_shape[0]
+                    else min(spec_ds.low_raw_shape[0], max(12, ns.size // spec_ds.scale_factor))
+                )
             lr_tif, hr_tif, manifest = prepare_bentheimer_dualscan_benchmark(
                 dataset_name=name,
                 dest_dir=ns.dest,
@@ -331,8 +343,8 @@ def _run_download_zn13x(argv: Sequence[str]) -> int:
     parser.add_argument(
         "--lr-size",
         type=int,
-        default=32,
-        help="Cubic LR side length in voxels (default: 32).",
+        default=48,
+        help="Cubic LR side length in voxels (default: 48).",
     )
     parser.add_argument("--raw-h5-dir", type=str, default=None)
     parser.add_argument(
@@ -370,46 +382,85 @@ def _run_download_zn13x(argv: Sequence[str]) -> int:
     return 0
 
 
+def _detect_checkpoint_model_type(ckpt_path: str, dev: torch.device) -> Literal["srgan", "sr3d"]:
+    raw_ckpt = torch.load(ckpt_path, map_location=dev, weights_only=False)
+    state_dict = raw_ckpt.get("state_dict", {}) if isinstance(raw_ckpt, dict) else {}
+    for k in state_dict:
+        t = state_dict[k]
+        if isinstance(t, torch.Tensor) and t.ndim == 5:
+            return "sr3d"
+    hparams = raw_ckpt.get("hyper_parameters", {}) if isinstance(raw_ckpt, dict) else {}
+    if isinstance(hparams, dict) and "loss_type" in hparams and "backbone" not in hparams:
+        return "sr3d"
+    return "srgan"
+
+
 def _run_predict_volume(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="openlsrx predict-volume",
-        description="Run 3-axis orthogonal 2D/2.5D-to-3D XCT super-resolution and epistemic uncertainty export.",
+        description="Run 3-axis orthogonal 2D/2.5D-to-3D or sliding-window 3D XCT super-resolution.",
     )
     parser.add_argument(
         "--checkpoint",
         "--ckpt",
         dest="checkpoint",
         required=True,
-        help="Path to trained SRGAN/RRDB/SwinIR .ckpt file.",
+        help="Path to trained SRGAN/RRDB/SwinIR/SR3DResNet .ckpt file.",
     )
     parser.add_argument("--input", required=True, help="Path to 3D LR TIFF/HDF5/NPY volume.")
     parser.add_argument(
-        "--output", required=True, help="Output path for super-resolved 3D BigTIFF volume."
+        "--output",
+        default=None,
+        help="Output file path for super-resolved 3D BigTIFF volume (required unless --output-dir is set).",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=None,
+        help="Optional output directory (writes <output-dir>/predicted_stack.tiff when --output is omitted).",
     )
     parser.add_argument(
         "--uncertainty-output",
         default=None,
-        help="Optional output path for 3-axis epistemic uncertainty std map (.tiff).",
+        help="Optional output path for 3-axis orthogonal view-disagreement std map (.tiff).",
+    )
+    parser.add_argument(
+        "--save-uncertainty",
+        action="store_true",
+        help="Write orthogonal view-disagreement std map (<output-dir>/uncertainty_std_stack.tiff or alongside --output).",
+    )
+    parser.add_argument(
+        "--model-type",
+        choices=["auto", "srgan", "sr3d"],
+        default="auto",
+        help="Checkpoint architecture type (default: auto).",
     )
     parser.add_argument(
         "--fusion",
         choices=["mean", "median", "fourier", "confidence", "confidence_fourier"],
         default="confidence_fourier",
-        help="Multi-axis volumetric fusion operator (default: confidence_fourier).",
+        help="Multi-axis volumetric fusion operator for 2D/2.5D models (default: confidence_fourier).",
     )
     parser.add_argument(
         "--axes",
         nargs="+",
         choices=["yz", "xz", "xy"],
         default=["yz", "xz", "xy"],
-        help="Orthogonal sweep axes (default: yz xz xy).",
+        help="Orthogonal sweep axes for 2D/2.5D models (default: yz xz xy).",
     )
     parser.add_argument("--batch-size", type=int, default=8, help="Slice inference batch size.")
     parser.add_argument(
         "--norm-mode",
         choices=["percentile", "minmax", "none", "fixed"],
-        default="percentile",
-        help="Input LR intensity normalization mode (default: percentile).",
+        default=None,
+        help=(
+            "Input LR intensity normalization mode override. Defaults to checkpoint train-fitted "
+            "bounds when available, otherwise 'percentile'."
+        ),
+    )
+    parser.add_argument(
+        "--recompute-input-norm",
+        action="store_true",
+        help="Ignore checkpoint train-fitted normalization/calibration and normalize --input fresh.",
     )
     parser.add_argument(
         "--vmin", type=float, default=None, help="Lower bound when --norm-mode=fixed."
@@ -426,57 +477,114 @@ def _run_predict_volume(argv: Sequence[str]) -> int:
     )
     ns = parser.parse_args(list(argv))
 
+    if ns.output is None and ns.output_dir is None:
+        parser.error("Provide either --output <path.tiff> or --output-dir <dir>.")
+    out_path = (
+        Path(ns.output) if ns.output is not None else (Path(ns.output_dir) / "predicted_stack.tiff")
+    )
+    unc_path: Path | None = None
+    if ns.uncertainty_output is not None:
+        unc_path = Path(ns.uncertainty_output)
+    elif ns.save_uncertainty:
+        unc_dir = Path(ns.output_dir) if ns.output_dir is not None else out_path.parent
+        unc_path = unc_dir / "uncertainty_std_stack.tiff"
+
     dev = (
         torch.device(ns.device)
         if ns.device is not None
         else torch.device("cuda" if torch.cuda.is_available() else "cpu")
     )
-    model = SRGAN.load_from_checkpoint(ns.checkpoint, map_location=dev)
-    model.eval().to(dev)
+    resolved_type: Literal["srgan", "sr3d"] = (
+        _detect_checkpoint_model_type(ns.checkpoint, dev)
+        if ns.model_type == "auto"
+        else cast(Literal["srgan", "sr3d"], ns.model_type)
+    )
+    model_obj: SRGAN | SR3DResNet
+    if resolved_type == "sr3d":
+        model_obj = SR3DResNet.load_from_checkpoint(ns.checkpoint, map_location=dev)
+    else:
+        model_obj = SRGAN.load_from_checkpoint(ns.checkpoint, map_location=dev)
+    model_obj.eval().to(dev)
 
     raw_lr = load_volume_any(ns.input, h5_dataset_key=ns.h5_dataset_key)
-    fov = build_circular_fov_mask(raw_lr.shape) if ns.circular_fov_mask else None
-    lr_norm = normalize_volume(
-        raw_lr,
-        mode=ns.norm_mode,
-        vmin=ns.vmin,
-        vmax=ns.vmax,
-        mask=fov,
+    saved_rad = (
+        None if ns.recompute_input_norm else getattr(model_obj, "_saved_radiometric_state", None)
     )
 
-    axes = [cast(AxisName, ax) for ax in ns.axes]
-    ortho = super_resolve_volume_orthogonal(
-        generator=model.gen,
-        low_volume=lr_norm,
-        scale_factor=model.super_res_factor,
-        axes=axes,
-        fusion=cast(FusionMode, ns.fusion),
-        batch_size=ns.batch_size,
-        device=dev,
-        context_slices=model.context_slices,
-        return_uncertainty=(ns.uncertainty_output is not None),
-    )
-
-    out_path = Path(ns.output)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    fused = np.ascontiguousarray(ortho["fused"], dtype=np.float32)
-    tifffile.imwrite(out_path, fused, bigtiff=True, photometric="minisblack")
-
-    if ns.uncertainty_output is not None and "uncertainty_std" in ortho:
-        unc_path = Path(ns.uncertainty_output)
-        unc_path.parent.mkdir(parents=True, exist_ok=True)
-        tifffile.imwrite(
-            unc_path,
-            np.ascontiguousarray(ortho["uncertainty_std"], dtype=np.float32),
-            bigtiff=True,
-            photometric="minisblack",
+    if isinstance(saved_rad, dict) and ns.norm_mode is None and ns.vmin is None and ns.vmax is None:
+        use_fov = bool(ns.circular_fov_mask or saved_rad.get("circular_fov_mask", False))
+        fov = build_circular_fov_mask(raw_lr.shape) if use_fov else None
+        saved_mode = str(saved_rad.get("norm_mode", "percentile"))
+        b_lr = saved_rad.get("norm_bounds_lr")
+        if saved_mode == "none":
+            lr_norm = normalize_volume(raw_lr, mode="none", mask=fov)
+        elif isinstance(b_lr, (list, tuple)) and len(b_lr) == 2:
+            lr_norm = normalize_volume(
+                raw_lr, mode="fixed", vmin=float(b_lr[0]), vmax=float(b_lr[1]), mask=fov
+            )
+        else:
+            lr_norm = normalize_volume(raw_lr, mode="percentile", mask=fov)
+        cal_params = saved_rad.get("cross_scan_calibration_params")
+        if isinstance(cal_params, dict) and str(cal_params.get("mode", "none")) != "none":
+            lr_norm = apply_cross_scan_calibration(lr_norm, cal_params, mask=fov)
+    else:
+        eff_mode = cast(NormMode, ns.norm_mode if ns.norm_mode is not None else "percentile")
+        fov = build_circular_fov_mask(raw_lr.shape) if ns.circular_fov_mask else None
+        lr_norm = normalize_volume(
+            raw_lr,
+            mode=eff_mode,
+            vmin=ns.vmin,
+            vmax=ns.vmax,
+            mask=fov,
         )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if isinstance(model_obj, SR3DResNet):
+        pred_3d = super_resolve_volume_3d(
+            generator_3d=model_obj.gen,
+            low_volume=lr_norm,
+            scale_factor=int(round(float(model_obj.super_res_factor))),
+            device=dev,
+        )
+        fused = np.ascontiguousarray(pred_3d, dtype=np.float32)
+        tifffile.imwrite(out_path, fused, bigtiff=True, photometric="minisblack")
+        if unc_path is not None:
+            unc_path.parent.mkdir(parents=True, exist_ok=True)
+            tifffile.imwrite(
+                unc_path,
+                np.zeros_like(fused, dtype=np.float32),
+                bigtiff=True,
+                photometric="minisblack",
+            )
+    else:
+        axes = [cast(AxisName, ax) for ax in ns.axes]
+        ortho = super_resolve_volume_orthogonal(
+            generator=model_obj.gen,
+            low_volume=lr_norm,
+            scale_factor=model_obj.super_res_factor,
+            axes=axes,
+            fusion=cast(FusionMode, ns.fusion),
+            batch_size=ns.batch_size,
+            device=dev,
+            context_slices=model_obj.context_slices,
+            return_uncertainty=(unc_path is not None),
+        )
+        fused = np.ascontiguousarray(ortho["fused"], dtype=np.float32)
+        tifffile.imwrite(out_path, fused, bigtiff=True, photometric="minisblack")
+        if unc_path is not None and "uncertainty_std" in ortho:
+            unc_path.parent.mkdir(parents=True, exist_ok=True)
+            tifffile.imwrite(
+                unc_path,
+                np.ascontiguousarray(ortho["uncertainty_std"], dtype=np.float32),
+                bigtiff=True,
+                photometric="minisblack",
+            )
     print(f"[predict-volume] fused shape={fused.shape} saved to {out_path}")
     return 0
 
 
 class OpenLSRXLightningCLI(LightningCLI):
-    """LightningCLI binding ``SRGAN`` to any ``LightningDataModule`` subclass via YAML ``class_path``."""
+    """LightningCLI binding ``SRGAN`` (default) or ``SR3DResNet`` to any ``LightningDataModule``."""
 
 
 def main(args: Sequence[str] | None = None) -> None:

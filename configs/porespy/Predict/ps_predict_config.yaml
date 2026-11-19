@@ -11,18 +11,21 @@ model:
   learning_rate: 1.0e-4
   adaptive_size: 8
   super_res_factor: 2
-  num_blocks: 16
+  num_blocks: 10
   sample_id: ps_predict
+  output_dir: outputs/ps_predict
 
 data:
   class_path: openlsrx.data.SyntheticPoreSpyDataModule
   init_args:
-    volume_size: 256
+    volume_size: 128
     feature_regime: high_feature
-    noise_regime: high_noise
+    noise_regime: low_noise
     representation: attenuation
     scale_factor: 2
     predict_axis: xy
+    predict_mode: orthogonal_3axis
+    predict_fusion: confidence_fourier
     eval_batch_size: 4
     num_workers: 0
     seed: 42

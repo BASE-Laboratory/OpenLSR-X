@@ -159,34 +159,20 @@ def run_subsystem_1_data_alignment(out_dir: Path) -> dict[str, Any]:
     ramp_hr = zz.astype(np.float32) / float(n_hr - 1)
 
     shift_stats: dict[str, dict[str, float]] = {}
-    for s in (2, 4, 8):
-        lr_blk = ramp_hr.reshape(n_hr // s, s, n_hr // s, s, n_hr // s, s).mean(axis=(1, 3, 5))
+    for s in (2, 3, 4, 8):
+        n_s = 63 if s == 3 else n_hr
+        zz_s, _, _ = np.meshgrid(np.arange(n_s), np.arange(n_s), np.arange(n_s), indexing="ij")
+        ramp_s = zz_s.astype(np.float32) / float(n_s - 1)
+        lr_blk = ramp_s.reshape(n_s // s, s, n_s // s, s, n_s // s, s).mean(axis=(1, 3, 5))
         up_legacy = nd_zoom(lr_blk, zoom=s, order=1, grid_mode=False)
         up_centered = zoom_cell_centered(lr_blk, zoom_factors=s, order=1)
-        interior = slice(s, n_hr - s)
-        err_leg_vox = (up_legacy[interior] - ramp_hr[interior]) * (n_hr - 1)
-        err_cen_vox = (up_centered[interior] - ramp_hr[interior]) * (n_hr - 1)
+        interior = slice(s, n_s - s)
+        err_leg_vox = (up_legacy[interior] - ramp_s[interior]) * (n_s - 1)
+        err_cen_vox = (up_centered[interior] - ramp_s[interior]) * (n_s - 1)
         shift_stats[f"{s}x"] = {
             "legacy_max_abs_shift_hr_vox": round(float(np.max(np.abs(err_leg_vox))), 4),
             "centered_max_abs_shift_hr_vox": round(float(np.max(np.abs(err_cen_vox))), 6),
         }
-    n_hr_3x = 63
-    zz3x, _, _ = np.meshgrid(
-        np.arange(n_hr_3x), np.arange(n_hr_3x), np.arange(n_hr_3x), indexing="ij"
-    )
-    ramp_3x = zz3x.astype(np.float32) / float(n_hr_3x - 1)
-    lr_blk_3x = ramp_3x.reshape(21, 3, 21, 3, 21, 3).mean(axis=(1, 3, 5))
-    up_leg_3x = nd_zoom(lr_blk_3x, zoom=3, order=1, grid_mode=False)
-    up_cen_3x = zoom_cell_centered(lr_blk_3x, zoom_factors=3, order=1)
-    int_3x = slice(3, n_hr_3x - 3)
-    shift_stats["3x"] = {
-        "legacy_max_abs_shift_hr_vox": round(
-            float(np.max(np.abs((up_leg_3x[int_3x] - ramp_3x[int_3x]) * (n_hr_3x - 1)))), 4
-        ),
-        "centered_max_abs_shift_hr_vox": round(
-            float(np.max(np.abs((up_cen_3x[int_3x] - ramp_3x[int_3x]) * (n_hr_3x - 1)))), 6
-        ),
-    }
 
     _, ps_hr, _ = generate_porespy_volume(
         shape=64,

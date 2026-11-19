@@ -37,7 +37,7 @@ data:
     low_z_range: [845, 1485]
     low_y_range: [1010, 1650]
     low_x_range: [858, 1498]
-    high_z_range: [701, 1981]
+    high_z_range: [706, 1986]
     high_y_range: [763, 2043]
     high_x_range: [466, 1746]
     train_frac: 0.75

@@ -76,10 +76,12 @@ class AttenuationConservationLoss(nn.Module):
         self,
         psf_sigma: float = 0.0,
         reduction_norm: Literal["l1", "mse"] = "l1",
+        include_slab_variance: bool = False,
     ) -> None:
         super().__init__()
         self.psf_sigma = float(psf_sigma)
         self.reduction_norm: Literal["l1", "mse"] = reduction_norm
+        self.include_slab_variance = bool(include_slab_variance)
 
     def forward(self, pred_hr: Tensor, low_res: Tensor) -> Tensor:
         pred_f32 = pred_hr.to(torch.float32)
@@ -89,15 +91,28 @@ class AttenuationConservationLoss(nn.Module):
         if lr_full.shape[1] != pred_f32.shape[1]:
             mid = lr_full.shape[1] // 2
             lr_f32 = lr_full[:, mid : mid + pred_f32.shape[1]]
-            if pred_f32.ndim == 4 and lr_full.shape[1] >= 3 and self.psf_sigma > 0.0:
+            if (
+                pred_f32.ndim == 4
+                and lr_full.shape[1] >= 3
+                and (self.psf_sigma > 0.0 or self.include_slab_variance)
+            ):
                 scale_est = max(1.0, float(pred_f32.shape[-1]) / max(float(lr_full.shape[-1]), 1.0))
-                sigma_lr_z = self.psf_sigma / scale_est
-                lap_z = (
-                    lr_full[:, mid - 1 : mid]
-                    - 2.0 * lr_full[:, mid : mid + 1]
-                    + lr_full[:, mid + 1 : mid + 2]
+                # Context neighbors are sampled at stride round(scale_est) HR slices = step_lr LR voxels
+                step_lr = max(1, int(round(scale_est))) / scale_est
+                psf_var_lr_z = (self.psf_sigma / scale_est) ** 2
+                slab_var_lr_z = (
+                    max(0.0, (scale_est**2 - 1.0) / (12.0 * (scale_est**2)))
+                    if self.include_slab_variance
+                    else 0.0
                 )
-                z_correction = 0.5 * (sigma_lr_z**2) * lap_z
+                tot_var_lr_z = psf_var_lr_z + slab_var_lr_z
+                if tot_var_lr_z > 0.0:
+                    lap_z = (
+                        lr_full[:, mid - 1 : mid]
+                        - 2.0 * lr_full[:, mid : mid + 1]
+                        + lr_full[:, mid + 1 : mid + 2]
+                    ) / max(step_lr**2, 1e-6)
+                    z_correction = 0.5 * tot_var_lr_z * lap_z
         else:
             lr_f32 = lr_full
 
@@ -218,13 +233,42 @@ class SoftCLDiceLoss(nn.Module):
 
 
 class SobelGradientLoss(nn.Module):
-    """Differentiable 2D/3D spatial gradient L1 loss preserving sharp phase boundaries."""
+    """Differentiable 2D (``3x3``) and 3D (``3x3x3``) Sobel gradient L1 loss preserving sharp phase boundaries."""
 
     def __init__(self) -> None:
         super().__init__()
 
     @staticmethod
-    def _spatial_gradients(x: Tensor) -> list[Tensor]:
+    def _sobel_gradients(x: Tensor) -> list[Tensor]:
+        c = int(x.shape[1])
+        if x.ndim == 4 and x.shape[2] >= 3 and x.shape[3] >= 3:
+            s = torch.tensor([1.0, 2.0, 1.0], device=x.device, dtype=x.dtype)
+            d = torch.tensor([-1.0, 0.0, 1.0], device=x.device, dtype=x.dtype)
+            ky = torch.outer(d, s).view(1, 1, 3, 3).expand(c, 1, 3, 3) / 8.0
+            kx = torch.outer(s, d).view(1, 1, 3, 3).expand(c, 1, 3, 3) / 8.0
+            xp = F.pad(x, (1, 1, 1, 1), mode="reflect")
+            return [F.conv2d(xp, ky, groups=c), F.conv2d(xp, kx, groups=c)]
+
+        if x.ndim == 5 and x.shape[2] >= 3 and x.shape[3] >= 3 and x.shape[4] >= 3:
+            s = torch.tensor([1.0, 2.0, 1.0], device=x.device, dtype=x.dtype)
+            d = torch.tensor([-1.0, 0.0, 1.0], device=x.device, dtype=x.dtype)
+            kz = (d[:, None, None] * s[None, :, None] * s[None, None, :]).view(
+                1, 1, 3, 3, 3
+            ).expand(c, 1, 3, 3, 3) / 32.0
+            ky = (s[:, None, None] * d[None, :, None] * s[None, None, :]).view(
+                1, 1, 3, 3, 3
+            ).expand(c, 1, 3, 3, 3) / 32.0
+            kx = (s[:, None, None] * s[None, :, None] * d[None, None, :]).view(
+                1, 1, 3, 3, 3
+            ).expand(c, 1, 3, 3, 3) / 32.0
+            xp = F.pad(x, (1, 1, 1, 1, 1, 1), mode="reflect")
+            return [
+                F.conv3d(xp, kz, groups=c),
+                F.conv3d(xp, ky, groups=c),
+                F.conv3d(xp, kx, groups=c),
+            ]
+
+        # Fallback to finite differences when spatial dimensions < 3
         grads: list[Tensor] = []
         for dim in range(2, x.ndim):
             if x.shape[dim] < 2:
@@ -237,8 +281,8 @@ class SobelGradientLoss(nn.Module):
         return grads
 
     def forward(self, pred_hr: Tensor, target_hr: Tensor) -> Tensor:
-        pred_grads = self._spatial_gradients(pred_hr.to(torch.float32))
-        true_grads = self._spatial_gradients(target_hr.to(torch.float32))
+        pred_grads = self._sobel_gradients(pred_hr.to(torch.float32))
+        true_grads = self._sobel_gradients(target_hr.to(torch.float32))
         if not pred_grads:
             return pred_hr.to(torch.float32).sum() * 0.0
         losses = [F.l1_loss(pg, tg) for pg, tg in zip(pred_grads, true_grads, strict=True)]

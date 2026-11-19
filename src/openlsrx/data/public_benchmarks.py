@@ -18,7 +18,7 @@ from scipy.ndimage import distance_transform_edt, gaussian_filter
 
 from .synthetic import _porespy_blobs
 from .transforms import degrade_xct_volume, normalize_volume
-from .zn13x import register_multires_pair_3d
+from .zn13x import apply_hr_grid_shift_pair_3d, register_multires_pair_3d
 
 
 @dataclass(frozen=True)
@@ -423,6 +423,79 @@ def _coaxial_center_crop_pair_3d(
     return lr_crop, hr_crop
 
 
+def _crop_and_register_linear_dualscan_pair(
+    lo_full: np.ndarray,
+    hi_full: np.ndarray,
+    req_lr: tuple[int, int, int],
+    scale_factor: int,
+) -> tuple[np.ndarray, np.ndarray, list[int], float]:
+    """Align a dual-scan pair on the integer HR voxel grid in linear uint16/65535 space without interpolation."""
+    s = int(scale_factor)
+    d_lr = min(int(lo_full.shape[0]), int(hi_full.shape[0]) // s, int(req_lr[0]))
+    h_lr = min(int(lo_full.shape[1]), int(hi_full.shape[1]) // s, int(req_lr[1]))
+    w_lr = min(int(lo_full.shape[2]), int(hi_full.shape[2]) // s, int(req_lr[2]))
+
+    z0_lr = max(0, (int(lo_full.shape[0]) - d_lr) // 2)
+    y0_lr = max(0, (int(lo_full.shape[1]) - h_lr) // 2)
+    x0_lr = max(0, (int(lo_full.shape[2]) - w_lr) // 2)
+    z0_hr, y0_hr, x0_hr = s * z0_lr, s * y0_lr, s * x0_lr
+
+    lr_init = np.ascontiguousarray(
+        lo_full[z0_lr : z0_lr + d_lr, y0_lr : y0_lr + h_lr, x0_lr : x0_lr + w_lr],
+        dtype=np.float32,
+    )
+    hr_init = np.ascontiguousarray(
+        hi_full[z0_hr : z0_hr + s * d_lr, y0_hr : y0_hr + s * h_lr, x0_hr : x0_hr + s * w_lr],
+        dtype=np.float32,
+    )
+
+    lo_reg_in = normalize_volume(lr_init, mode="percentile", lower_pct=0.5, upper_pct=99.5)
+    hi_reg_in = normalize_volume(hr_init, mode="percentile", lower_pct=0.5, upper_pct=99.5)
+    _, _, pre_reg = register_multires_pair_3d(
+        lo_reg_in, hi_reg_in, scale_factor=s, local_refine_radius=2
+    )
+    raw_shift_obj = pre_reg.get("hr_shift_zyx", [0, 0, 0])
+    assert isinstance(raw_shift_obj, list)
+    raw_shift = [int(raw_shift_obj[0]), int(raw_shift_obj[1]), int(raw_shift_obj[2])]
+    init_ssim_obj = pre_reg.get("initial_triplanar_ssim", 0.0)
+    raw_init_ssim = float(init_ssim_obj) if isinstance(init_ssim_obj, (int, float)) else 0.0
+
+    if tuple(raw_shift) == (0, 0, 0):
+        return lr_init, hr_init, raw_shift, raw_init_ssim
+
+    # Exact HR-grid alignment: hr_start_aligned = s * lr_start - shift_hr_zyx.
+    # When hi_full has outer margin around the sub-crop (e.g., 36x32x32 inside 75^3 / 225^3),
+    # shift the HR crop window directly inside hi_full to preserve the full requested shape;
+    # otherwise (full 75^3 -> 225^3) slice the overlap via apply_hr_grid_shift_pair_3d.
+    za_hr = z0_hr - raw_shift[0]
+    ya_hr = y0_hr - raw_shift[1]
+    xa_hr = x0_hr - raw_shift[2]
+    if (
+        0 <= za_hr
+        and za_hr + s * d_lr <= int(hi_full.shape[0])
+        and 0 <= ya_hr
+        and ya_hr + s * h_lr <= int(hi_full.shape[1])
+        and 0 <= xa_hr
+        and xa_hr + s * w_lr <= int(hi_full.shape[2])
+    ):
+        hr_aligned = np.ascontiguousarray(
+            hi_full[za_hr : za_hr + s * d_lr, ya_hr : ya_hr + s * h_lr, xa_hr : xa_hr + s * w_lr],
+            dtype=np.float32,
+        )
+        return lr_init, hr_aligned, raw_shift, raw_init_ssim
+
+    sliced = apply_hr_grid_shift_pair_3d(
+        lr_init,
+        hr_init,
+        shift_hr_zyx=(raw_shift[0], raw_shift[1], raw_shift[2]),
+        scale_factor=s,
+        min_overlap_lr=min(8, int(min(d_lr, h_lr, w_lr))),
+    )
+    if sliced is not None:
+        return sliced[0], sliced[1], raw_shift, raw_init_ssim
+    return lr_init, hr_init, raw_shift, raw_init_ssim
+
+
 def _read_verified_uint16_raw(
     raw_path: Path,
     expected_shape: tuple[int, int, int],
@@ -532,13 +605,21 @@ def prepare_bentheimer_dualscan_benchmark(
             shape_ok = cached.get("requested_lr_shape") == list(req_lr)
             offline_cached = cached.get("source_kind") == "offline_calibrated_dualscan_phantom"
             want_real = (not prefer_offline) or (raw_dir is not None)
-            if shape_ok and not (want_real and offline_cached):
+            reg_cached = cached.get("registration")
+            aligned_ok = isinstance(reg_cached, dict) and reg_cached.get("hr_shift_zyx") == [
+                0,
+                0,
+                0,
+            ]
+            if shape_ok and aligned_ok and not (want_real and offline_cached):
                 return lr_tif, hr_tif, cached
 
         pid = os.getpid()
         lr_vol: np.ndarray | None = None
         hr_vol: np.ndarray | None = None
         reg_info: dict[str, object] = {}
+        raw_detected_shift: list[int] | None = None
+        raw_initial_ssim: float | None = None
         source_kind = "offline_calibrated_dualscan_phantom"
 
         # 1. Try explicit raw_dir or persistent raw_cache_dir first
@@ -564,8 +645,10 @@ def prepare_bentheimer_dualscan_benchmark(
                     raw_dtype=spec.high_raw_dtype,
                     expected_md5=spec.high_md5 if verify_checksum else None,
                 )
-                lr_vol, hr_vol = _coaxial_center_crop_pair_3d(
-                    lo_full, hi_full, lr_shape=req_lr, scale_factor=spec.scale_factor
+                lr_vol, hr_vol, raw_detected_shift, raw_initial_ssim = (
+                    _crop_and_register_linear_dualscan_pair(
+                        lo_full, hi_full, req_lr=req_lr, scale_factor=spec.scale_factor
+                    )
                 )
                 source_kind = (
                     "local_zenodo_5542624_dualscan_raw"
@@ -615,8 +698,10 @@ def prepare_bentheimer_dualscan_benchmark(
                     raw_dtype=spec.high_raw_dtype,
                     expected_md5=spec.high_md5 if verify_checksum else None,
                 )
-                lr_vol, hr_vol = _coaxial_center_crop_pair_3d(
-                    lo_full, hi_full, lr_shape=req_lr, scale_factor=spec.scale_factor
+                lr_vol, hr_vol, raw_detected_shift, raw_initial_ssim = (
+                    _crop_and_register_linear_dualscan_pair(
+                        lo_full, hi_full, req_lr=req_lr, scale_factor=spec.scale_factor
+                    )
                 )
                 source_kind = "downloaded_zenodo_5542624_dualscan"
             except Exception as exc:
@@ -648,6 +733,9 @@ def prepare_bentheimer_dualscan_benchmark(
         _, _, reg_info = register_multires_pair_3d(
             lo_reg_in, hi_reg_in, scale_factor=spec.scale_factor, local_refine_radius=2
         )
+        if raw_detected_shift is not None:
+            reg_info["raw_detected_hr_shift_zyx"] = raw_detected_shift
+            reg_info["initial_unaligned_triplanar_ssim"] = raw_initial_ssim
 
         is_exp = source_kind in {
             "downloaded_zenodo_5542624_dualscan",

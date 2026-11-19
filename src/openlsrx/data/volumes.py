@@ -28,6 +28,7 @@ from .transforms import (
     degrade_xct_volume,
     extract_paired_slices_from_subvolume,
     fit_cross_scan_calibration,
+    make_slice_dataloader,
     minimum_psf_guard_slices_lr,
     normalize_volume,
     sanitize_xct_volume,
@@ -61,20 +62,22 @@ def load_volume_any(
         raise FileNotFoundError(f"XCT data path does not exist: {p}")
 
     roi_applied_on_disk = False
+    max_slices_applied = False
     if p.is_dir():
         exts = {".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg"}
         files = sorted([f for f in p.iterdir() if f.suffix.lower() in exts], key=_natural_key)
         if not files:
             raise ValueError(f"No 2D image slices found in directory: {p}")
-        if max_slices is not None:
+        if max_slices is not None and roi_slices is None and transpose_axes is None:
             files = files[: int(max_slices)]
-        slices = []
+            max_slices_applied = True
+        raw_slices_list = []
         for f in files:
             img = tifffile.imread(f) if f.suffix.lower() in {".tif", ".tiff"} else iio.imread(f)
             if img.ndim == 3:
                 img = img[..., 0]
-            slices.append(sanitize_xct_volume(img))
-        vol = np.stack(slices, axis=0)
+            raw_slices_list.append(np.asarray(img))
+        vol = sanitize_xct_volume(np.stack(raw_slices_list, axis=0))
     elif p.suffix.lower() in {".h5", ".hdf5", ".nxs"}:
         with h5py.File(p, "r") as hf:
             if h5_dataset_key not in hf:
@@ -106,16 +109,13 @@ def load_volume_any(
                     vol = sanitize_xct_volume(np.asarray(dset[tuple(raw_slices)]))
                 else:
                     vol = sanitize_xct_volume(np.asarray(dset[: int(max_slices)]))
+                max_slices_applied = True
             else:
                 vol = sanitize_xct_volume(np.asarray(dset[()]))
     elif p.suffix.lower() in {".tif", ".tiff"}:
         vol = sanitize_xct_volume(tifffile.imread(p))
-        if max_slices is not None and vol.ndim == 3 and transpose_axes is None:
-            vol = vol[: int(max_slices)]
     elif p.suffix.lower() == ".npy":
         vol = sanitize_xct_volume(np.load(p))
-        if max_slices is not None and vol.ndim == 3 and transpose_axes is None:
-            vol = vol[: int(max_slices)]
     else:
         raise ValueError(f"Unsupported XCT volume file format: {p.suffix} ({p})")
 
@@ -127,10 +127,10 @@ def load_volume_any(
         raise ValueError(f"Loaded array must be 3D (D, H, W), got shape {vol.shape} from {p}.")
     if transpose_axes is not None:
         vol = np.transpose(vol, transpose_axes)
-        if max_slices is not None and p.suffix.lower() not in {".h5", ".hdf5", ".nxs"}:
-            vol = vol[: int(max_slices)]
     if roi_slices is not None and not roi_applied_on_disk:
         vol = vol[roi_slices]
+    if max_slices is not None and not max_slices_applied:
+        vol = vol[: int(max_slices)]
     return np.ascontiguousarray(vol, dtype=np.float32)
 
 
@@ -427,7 +427,7 @@ class PairedVolumeDataModule(pl.LightningDataModule):
             max(
                 self.guard_slices_lr, minimum_psf_guard_slices_lr(self.psf_sigma, self.scale_factor)
             )
-            if (lr_aligned is not None and self.psf_sigma > 0.0)
+            if (lr_aligned is not None and self.guard_slices_lr > 0 and self.psf_sigma > 0.0)
             else self.guard_slices_lr
         )
         if target_lr_shape[self.split_axis] - 2 * eff_guard < 3:
@@ -491,8 +491,53 @@ class PairedVolumeDataModule(pl.LightningDataModule):
                 )
                 self.splits_3d[split_name] = (lr_sub, hr_sub)
 
+    def export_radiometric_state(self) -> dict[str, object]:
+        """Serialize train-fitted normalization & cross-scan calibration parameters for checkpoints."""
+        return {
+            "norm_mode": self.norm_mode,
+            "norm_bounds_lr": list(self.norm_bounds_lr)
+            if self.norm_bounds_lr is not None
+            else None,
+            "norm_bounds_hr": list(self.norm_bounds_hr)
+            if self.norm_bounds_hr is not None
+            else None,
+            "circular_fov_mask": bool(self.circular_fov_mask),
+            "cross_scan_calibration": self.cross_scan_calibration,
+            "cross_scan_calibration_params": self.cross_scan_calibration_params,
+        }
+
+    def restore_radiometric_state(self, state: dict[str, object]) -> None:
+        """Restore train-fitted normalization & cross-scan calibration parameters when unset."""
+        if self.norm_bounds_lr is None and isinstance(state.get("norm_bounds_lr"), (list, tuple)):
+            b_lr = state["norm_bounds_lr"]
+            assert isinstance(b_lr, (list, tuple)) and len(b_lr) == 2
+            self.norm_bounds_lr = (float(b_lr[0]), float(b_lr[1]))
+        if self.norm_bounds_hr is None and isinstance(state.get("norm_bounds_hr"), (list, tuple)):
+            b_hr = state["norm_bounds_hr"]
+            assert isinstance(b_hr, (list, tuple)) and len(b_hr) == 2
+            self.norm_bounds_hr = (float(b_hr[0]), float(b_hr[1]))
+        if self.cross_scan_calibration_params is None and isinstance(
+            state.get("cross_scan_calibration_params"), dict
+        ):
+            cal_params = state["cross_scan_calibration_params"]
+            assert isinstance(cal_params, dict)
+            self.cross_scan_calibration_params = dict(cal_params)
+            saved_cal_mode = str(cal_params.get("mode", "none"))
+            if self.cross_scan_calibration == "none" and saved_cal_mode in ("affine", "quantile"):
+                self.cross_scan_calibration = saved_cal_mode  # type: ignore[assignment]
+
     def setup(self, stage: str | None = None) -> None:
         if stage == "predict" and self.predict_path:
+            if (
+                self.trainer is not None
+                and getattr(self.trainer, "lightning_module", None) is not None
+            ):
+                saved_state = getattr(
+                    self.trainer.lightning_module, "_saved_radiometric_state", None
+                )
+                if isinstance(saved_state, dict):
+                    self.restore_radiometric_state(saved_state)
+
             lo_roi, lo_res = _alignment_to_roi_and_Residual(self.low_alignment)
             raw_pred = load_volume_any(
                 self.predict_path,
@@ -522,14 +567,14 @@ class PairedVolumeDataModule(pl.LightningDataModule):
             ordered = np.moveaxis(pred_lr, axis_map[self.predict_axis], 0)
             ctx_stride = 1
             if float(self.scale_factor) != 1.0:
+                target_n = max(1, int(round(ordered.shape[0] * float(self.scale_factor))))
+                zoom_f = target_n / float(ordered.shape[0])
                 ordered = np.clip(
-                    zoom_cell_centered(
-                        ordered, zoom_factors=(float(self.scale_factor), 1.0, 1.0), order=3
-                    ),
+                    zoom_cell_centered(ordered, zoom_factors=(zoom_f, 1.0, 1.0), order=3),
                     0.0,
                     1.0,
                 )
-                ctx_stride = max(1, int(round(float(self.scale_factor))))
+                ctx_stride = max(1, int(round(zoom_f)))
             self.predict_dataset = PairedSliceDataset(
                 ordered,
                 high_res=None,
@@ -568,10 +613,13 @@ class PairedVolumeDataModule(pl.LightningDataModule):
 
         if stage in (None, "test"):
             lr_te, hr_te = self.splits_3d["test"]
+            dim_to_ax: dict[int, str] = {0: "yz", 1: "xz", 2: "xy"}
+            par_ax = dim_to_ax[int(self.split_axis)]
+            perp_axes = tuple(ax for d, ax in dim_to_ax.items() if d != int(self.split_axis))
             if self.test_axis == "parallel":
-                axes: tuple[str, ...] = ("yz",)
+                axes: tuple[str, ...] = (par_ax,)
             elif self.test_axis == "perpendicular":
-                axes = ("xz", "xy")
+                axes = perp_axes
             else:
                 axes = ("yz", "xz", "xy")
             self.test_dataset = build_multi_axis_slice_dataset(
@@ -587,6 +635,7 @@ class PairedVolumeDataModule(pl.LightningDataModule):
         if stage in (None, "predict"):
             lr_te, hr_te = self.splits_3d["test"]
             self.predict_lr_volume = lr_te
+            self.predict_hr_volume = hr_te
             self.predict_Spatial_shape_hr = (
                 int(hr_te.shape[0]),
                 int(hr_te.shape[1]),
@@ -616,7 +665,7 @@ class PairedVolumeDataModule(pl.LightningDataModule):
 
     def train_dataloader(self) -> DataLoader:
         assert self.train_dataset is not None
-        return DataLoader(
+        return make_slice_dataloader(
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
@@ -627,7 +676,7 @@ class PairedVolumeDataModule(pl.LightningDataModule):
 
     def val_dataloader(self) -> DataLoader:
         assert self.val_dataset is not None
-        return DataLoader(
+        return make_slice_dataloader(
             self.val_dataset,
             batch_size=self.eval_batch_size,
             shuffle=False,
@@ -638,7 +687,7 @@ class PairedVolumeDataModule(pl.LightningDataModule):
 
     def test_dataloader(self) -> DataLoader:
         assert self.test_dataset is not None
-        return DataLoader(
+        return make_slice_dataloader(
             self.test_dataset,
             batch_size=self.eval_batch_size,
             shuffle=False,
@@ -649,7 +698,7 @@ class PairedVolumeDataModule(pl.LightningDataModule):
 
     def predict_dataloader(self) -> DataLoader:
         assert self.predict_dataset is not None
-        return DataLoader(
+        return make_slice_dataloader(
             self.predict_dataset,
             batch_size=self.eval_batch_size,
             shuffle=False,

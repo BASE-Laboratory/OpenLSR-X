@@ -30,13 +30,19 @@ KEY_METRICS: list[tuple[str, str, bool]] = [
 
 def _aggregate_csv(
     csv_path: Path, group_col: str
-) -> dict[tuple[str, str], dict[str, tuple[float, float]]]:
+) -> tuple[
+    dict[tuple[str, str], dict[str, tuple[float, float]]],
+    dict[str, str],
+]:
     buckets: dict[tuple[str, str], dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    sources: dict[str, set[str]] = defaultdict(set)
     with csv_path.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
             g = str(row[group_col])
             m = str(row["method"])
+            src = str(row.get("source_kind") or "synthetic")
+            sources[g].add(src)
             for col, _, _ in KEY_METRICS:
                 raw_v = row.get(col, "")
                 if raw_v not in ("", None, "None", "nan", "NaN", "inf", "-inf"):
@@ -53,7 +59,8 @@ def _aggregate_csv(
             )
             for col, vals in metric_lists.items()
         }
-    return summary
+    source_labels = {g: ",".join(sorted(vals)) for g, vals in sources.items()}
+    return summary, source_labels
 
 
 def write_latex_and_markdown_tables(
@@ -64,7 +71,7 @@ def write_latex_and_markdown_tables(
     caption: str,
     label: str,
 ) -> None:
-    agg = _aggregate_csv(csv_path, group_col=group_col)
+    agg, source_labels = _aggregate_csv(csv_path, group_col=group_col)
     groups = sorted({g for g, _ in agg})
 
     out_tex.parent.mkdir(parents=True, exist_ok=True)
@@ -77,13 +84,15 @@ def write_latex_and_markdown_tables(
         f"\\caption{{{caption}}}",
         f"\\label{{{label}}}",
         "\\small",
-        "\\begin{tabular}{ll" + "c" * len(KEY_METRICS) + "}",
+        "\\begin{tabular}{lll" + "c" * len(KEY_METRICS) + "}",
         "\\toprule",
-        "Dataset / Regime & Method & " + " & ".join(hdr for _, hdr, _ in KEY_METRICS) + " \\\\",
+        "Dataset / Regime & Source & Method & "
+        + " & ".join(hdr for _, hdr, _ in KEY_METRICS)
+        + " \\\\",
         "\\midrule",
     ]
 
-    md_headers = ["Dataset / Regime", "Method"] + [
+    md_headers = ["Dataset / Regime", "Source", "Method"] + [
         hdr.replace("$\\uparrow$", "(↑)").replace("$\\downarrow$", "(↓)").replace("$", "")
         for _, hdr, _ in KEY_METRICS
     ]
@@ -108,10 +117,12 @@ def write_latex_and_markdown_tables(
                 )
 
         g_tex = g.replace("_", "\\_")
+        src_raw = source_labels.get(g, "synthetic")
+        src_tex = src_raw.replace("_", "\\_")
         for m in methods:
             m_tex = m.replace("_", "\\_")
-            tex_cells = [g_tex, m_tex]
-            md_cells = [g, m]
+            tex_cells = [g_tex, src_tex, m_tex]
+            md_cells = [g, f"`{src_raw}`", m]
             for col, _, _ in KEY_METRICS:
                 mean, std = agg[(g, m)][col]
                 cell_str = f"{mean:.4f}" if std < 1e-9 else f"{mean:.4f} $\\pm$ {std:.4f}"
@@ -194,6 +205,20 @@ def plot_visual_comparison(example_dir: Path, out_fig: Path) -> None:
     plt.close(fig)
 
 
+def _rock_caption_from_csv(csv_path: Path) -> str:
+    with csv_path.open("r", encoding="utf-8") as f:
+        datasets = sorted(
+            {str(r.get("dataset", "")) for r in csv.DictReader(f) if r.get("dataset")}
+        )
+    if datasets and all("dualscan" in d for d in datasets):
+        return (
+            "Physical 18 um to 6 um (3x) Micro-CT Super-Resolution on Bentheimer Dual-Scan "
+            "Sandstone Cores (Zenodo 5542624)."
+        )
+    pretty = ", ".join(d.replace("_", " ").title() for d in datasets) if datasets else "Rock XCT"
+    return f"3D Micro-CT Super-Resolution on {pretty}."
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Build manuscript LaTeX tables and figures.")
     parser.add_argument(
@@ -205,6 +230,11 @@ def main() -> None:
         "--rock-csv",
         default="results/public_rock/public_rock_results.csv",
         help="Path to public rock benchmark CSV.",
+    )
+    parser.add_argument(
+        "--dualscan-csv",
+        default="results/public_rock_dualscan/public_rock_results.csv",
+        help="Optional path to physical Bentheimer dual-scan benchmark CSV.",
     )
     parser.add_argument(
         "--example-volumes",
@@ -234,10 +264,22 @@ def main() -> None:
             group_col="dataset",
             out_tex=out_dir / "tables" / "public_rock_benchmark.tex",
             out_md=out_dir / "tables" / "public_rock_benchmark.md",
-            caption="3D Micro-CT Super-Resolution on Bentheimer Sandstone and Indiana Limestone.",
+            caption=_rock_caption_from_csv(rk_csv),
             label="tab:rock_benchmark",
         )
         print(f"[make_paper_outputs] Wrote Rock XCT tables to {out_dir / 'tables'}")
+
+    ds_csv = Path(ns.dualscan_csv)
+    if ds_csv.is_file() and ds_csv.resolve() != rk_csv.resolve():
+        write_latex_and_markdown_tables(
+            csv_path=ds_csv,
+            group_col="dataset",
+            out_tex=out_dir / "tables" / "public_rock_dualscan_benchmark.tex",
+            out_md=out_dir / "tables" / "public_rock_dualscan_benchmark.md",
+            caption=_rock_caption_from_csv(ds_csv),
+            label="tab:rock_dualscan_benchmark",
+        )
+        print(f"[make_paper_outputs] Wrote Dual-Scan Rock XCT tables to {out_dir / 'tables'}")
 
     ex_dir = Path(ns.example_volumes)
     if (ex_dir / "hr_test.tif").is_file():

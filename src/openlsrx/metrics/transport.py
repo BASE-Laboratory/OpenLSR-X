@@ -275,22 +275,13 @@ def compute_drainage_curve(
     pc_transform = np.full(mask.shape, np.inf, dtype=np.float32)
     pc_transform[mask] = 2.0 / np.maximum(dt[mask], 1e-6).astype(np.float32)
 
-    try:
-        drn = ps.simulations.drainage(
-            im=mask,
-            pc=pc_transform,
-            dt=dt.astype(np.float32),
-            inlets=inlets,
-            steps=grid,
-        )
-    except Exception:
-        drn = ps.simulations.drainage(
-            im=mask,
-            pc=pc_transform,
-            dt=dt.astype(np.float32),
-            inlets=inlets,
-            steps=max(4, int(len(grid))),
-        )
+    drn = ps.simulations.drainage(
+        im=mask,
+        pc=pc_transform,
+        dt=dt.astype(np.float32),
+        inlets=inlets,
+        steps=np.unique(np.sort(np.asarray(grid, dtype=np.float32))),
+    )
     im_pc = np.asarray(drn.im_pc, dtype=np.float64)
     pore_pc = im_pc[mask]
     snwp = np.array([float(np.sum(pore_pc <= p)) / float(n_pores) for p in grid], dtype=np.float64)
@@ -391,6 +382,15 @@ def evaluate_transport_metrics(
         pore_is_low=pore_is_low,
     )
     pred_t = compute_directional_tortuosity(pred_mask)
+    if float(pred_t["solver_converged"]) < 1.0 or float(true_t["solver_converged"]) < 1.0:
+        import warnings
+
+        warnings.warn(
+            f"Steady-state diffusion solver reported incomplete convergence "
+            f"(pred={pred_t['solver_converged']:.1f}, true={true_t['solver_converged']:.1f}).",
+            UserWarning,
+            stacklevel=2,
+        )
 
     d_eff_mae = float(
         np.mean(
@@ -439,6 +439,8 @@ def evaluate_transport_metrics(
         "true_d_eff_anisotropy_spread": float(true_t["d_eff_anisotropy_spread"]),
         "pred_transport_anisotropy_ratio": _json_safe(pred_t["transport_anisotropy_ratio"]),
         "true_transport_anisotropy_ratio": _json_safe(true_t["transport_anisotropy_ratio"]),
+        "pred_solver_converged": float(pred_t["solver_converged"]),
+        "true_solver_converged": float(true_t["solver_converged"]),
         "drainage_snwp_rmse": drainage_rmse,
     }
 
@@ -453,7 +455,7 @@ def compute_tortuosity_uncertainty_bounds(
     k_sigma: float = 1.0,
     precomputed_true: dict[str, Any] | None = None,
 ) -> dict[str, float | None]:
-    """Propagate voxel-wise orthogonal epistemic uncertainty ``sigma_ortho`` into 3D tortuosity bounds."""
+    """Propagate voxel-wise orthogonal view-disagreement ``sigma_ortho`` into 3D tortuosity bounds."""
     from scipy.stats import spearmanr
 
     pred_arr = np.asarray(pred_vol, dtype=np.float32)
@@ -507,10 +509,14 @@ def compute_tortuosity_uncertainty_bounds(
         0.5 * (tau_hi - tau_lo) if (np.isfinite(tau_lo) and np.isfinite(tau_hi)) else float("inf")
     )
 
+    mean_std = float(unc_arr.mean())
+    p95_std = float(np.percentile(unc_arr, 95.0))
     result: dict[str, float | None] = {
         "threshold_used": float(thr),
-        "mean_epistemic_std": float(unc_arr.mean()),
-        "p95_epistemic_std": float(np.percentile(unc_arr, 95.0)),
+        "mean_ortho_std": mean_std,
+        "p95_ortho_std": p95_std,
+        "mean_epistemic_std": mean_std,
+        "p95_epistemic_std": p95_std,
         "d_eff_nominal": _json_safe(t_nom["d_eff_mean"]),
         "d_eff_lower": _json_safe(d_lo),
         "d_eff_upper": _json_safe(d_hi),

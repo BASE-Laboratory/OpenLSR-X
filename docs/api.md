@@ -50,7 +50,7 @@
 
 ---
 
-## 3D Orthogonal Inference & Epistemic Uncertainty
+## 3D Orthogonal Inference & View-Disagreement Diagnostics
 
 ::: openlsrx.inference.orthogonal.super_resolve_volume_orthogonal
 
@@ -62,7 +62,7 @@
 
 ---
 
-## Data Modules, Synchrotron Registration & Transforms
+## Data Modules, Dual-Scan & Synchrotron Registration & Transforms
 
 ::: openlsrx.data.synthetic.SyntheticPoreSpyDataModule
 
@@ -72,15 +72,21 @@
 
 ::: openlsrx.data.volumes.load_volume_any
 
+::: openlsrx.data.public_benchmarks.prepare_bentheimer_dualscan_benchmark
+
 ::: openlsrx.data.zn13x.prepare_zn13x_benchmark
 
 ::: openlsrx.data.zn13x.register_multires_pair_3d
+
+::: openlsrx.data.zn13x.apply_hr_grid_shift_pair_3d
 
 ::: openlsrx.data.zn13x.extract_aligned_slab_from_h5
 
 ::: openlsrx.data.transforms.split_volume_spatially
 
 ::: openlsrx.data.transforms.degrade_xct_volume
+
+::: openlsrx.data.transforms.make_slice_dataloader
 
 ---
 

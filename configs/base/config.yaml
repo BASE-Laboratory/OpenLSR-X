@@ -26,6 +26,8 @@ model:
   use_vgg_loss: false
   vgg_loss_weight: 0.006
   lr_scheduler_type: constant
+  sample_id: base_srgan
+  output_dir: outputs/base_run
 
 data:
   class_path: openlsrx.data.SyntheticPoreSpyDataModule
