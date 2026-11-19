@@ -16,6 +16,7 @@ import torch
 from pytorch_lightning.cli import LightningCLI
 
 from .data import (
+    AVAILABLE_DUALSCAN_DATASETS,
     AVAILABLE_PUBLIC_DATASETS,
     PairedVolumeDataModule,  # noqa: F401 - registered for LightningCLI subclass discovery
     SyntheticPoreSpyDataModule,  # noqa: F401 - registered for LightningCLI subclass discovery
@@ -23,6 +24,7 @@ from .data import (
     fetch_or_generate_rock_sample,
     load_volume_any,
     normalize_volume,
+    prepare_bentheimer_dualscan_benchmark,
     prepare_zn13x_benchmark,
 )
 from .inference import super_resolve_volume_orthogonal
@@ -197,10 +199,16 @@ def _run_export_openimpala(argv: Sequence[str]) -> int:
 
 
 def _run_download_benchmarks(argv: Sequence[str]) -> int:
-    all_choices = sorted([*AVAILABLE_PUBLIC_DATASETS.keys(), *ZN13X_BENCHMARK_KEYS])
+    all_choices = sorted(
+        [
+            *AVAILABLE_PUBLIC_DATASETS.keys(),
+            *AVAILABLE_DUALSCAN_DATASETS.keys(),
+            *ZN13X_BENCHMARK_KEYS,
+        ]
+    )
     parser = argparse.ArgumentParser(
         prog="openlsrx download-benchmarks",
-        description="Fetch open micro-CT rock & Diamond I13-2 Zn-13X synchrotron benchmark volumes.",
+        description="Fetch open micro-CT rock, physical dual-scan Bentheimer, & Diamond I13-2 Zn-13X benchmark volumes.",
     )
     parser.add_argument(
         "--datasets",
@@ -220,13 +228,19 @@ def _run_download_benchmarks(argv: Sequence[str]) -> int:
         "--size",
         type=int,
         default=128,
-        help="Cubic HR side length for rock benchmarks, or LR side length for zn13x_* if <= 64 (default: 128).",
+        help="Cubic HR side length for rock benchmarks, or LR side length for zn13x_*/dualscan if <= 75 (default: 128).",
     )
     parser.add_argument(
         "--raw-h5-dir",
         type=str,
         default=None,
         help="Optional local directory containing raw Diamond I13-2 16906*_recon.h5 or tomo_p4_tomopy_recon.h5 files.",
+    )
+    parser.add_argument(
+        "--raw-dir",
+        type=str,
+        default=None,
+        help="Optional local directory containing Zenodo 5542624 16-bit .raw dual-scan files.",
     )
     parser.add_argument(
         "--offline",
@@ -252,6 +266,26 @@ def _run_download_benchmarks(argv: Sequence[str]) -> int:
                 dest_dir=ns.dest,
                 lr_size=lr_size,
                 raw_h5_dir=ns.raw_h5_dir,
+                allow_offline_fallback=(not ns.no_offline_fallback),
+                prefer_offline=bool(ns.offline),
+                seed=ns.seed,
+            )
+            print(
+                f"[{name}] ready at {lr_tif} & {hr_tif} "
+                f"(source={manifest['source_kind']}, hr_sha256={str(manifest['hr_sha256'])[:12]}...)"
+            )
+        elif name in AVAILABLE_DUALSCAN_DATASETS:
+            spec_ds = AVAILABLE_DUALSCAN_DATASETS[name]
+            lr_side = (
+                min(spec_ds.low_raw_shape[0], max(12, ns.size))
+                if ns.size <= spec_ds.low_raw_shape[0]
+                else min(spec_ds.low_raw_shape[0], max(12, ns.size // spec_ds.scale_factor))
+            )
+            lr_tif, hr_tif, manifest = prepare_bentheimer_dualscan_benchmark(
+                dataset_name=name,
+                dest_dir=ns.dest,
+                lr_shape=(lr_side, lr_side, lr_side),
+                raw_dir=ns.raw_dir,
                 allow_offline_fallback=(not ns.no_offline_fallback),
                 prefer_offline=bool(ns.offline),
                 seed=ns.seed,

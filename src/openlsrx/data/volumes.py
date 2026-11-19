@@ -16,15 +16,18 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
 from .transforms import (
+    CrossScanCalibrationMode,
     NormMode,
     PairedSliceDataset,
     VolumeAlignment,
     apply_alignment,
+    apply_cross_scan_calibration,
     build_circular_fov_mask,
     build_multi_axis_slice_dataset,
     compute_normalization_bounds,
     degrade_xct_volume,
     extract_paired_slices_from_subvolume,
+    fit_cross_scan_calibration,
     minimum_psf_guard_slices_lr,
     normalize_volume,
     sanitize_xct_volume,
@@ -196,6 +199,8 @@ class PairedVolumeDataModule(pl.LightningDataModule):
         psf_sigma: float = 0.8,
         degrade_noise_std: float = 0.02,
         norm_mode: NormMode = "percentile",
+        cross_scan_calibration: CrossScanCalibrationMode = "none",
+        calibration_psf_sigma: float | None = None,
         circular_fov_mask: bool = False,
         low_vmin: float | None = None,
         low_vmax: float | None = None,
@@ -257,6 +262,10 @@ class PairedVolumeDataModule(pl.LightningDataModule):
         self.degrade_noise_std = float(degrade_noise_std)
 
         self.norm_mode: NormMode = norm_mode
+        self.cross_scan_calibration: CrossScanCalibrationMode = cross_scan_calibration
+        self.calibration_psf_sigma: float | None = (
+            None if calibration_psf_sigma is None else float(calibration_psf_sigma)
+        )
         self.circular_fov_mask = bool(circular_fov_mask)
         self.low_vmin = low_vmin
         self.low_vmax = low_vmax
@@ -306,6 +315,7 @@ class PairedVolumeDataModule(pl.LightningDataModule):
         self.splits_3d: dict[str, tuple[np.ndarray, np.ndarray]] = {}
         self.norm_bounds_hr: tuple[float, float] | None = None
         self.norm_bounds_lr: tuple[float, float] | None = None
+        self.cross_scan_calibration_params: dict[str, object] | None = None
 
     def _fit_bounds(self, vol: np.ndarray, is_high: bool) -> tuple[float, float]:
         vmin = self.high_vmin if is_high else self.low_vmin
@@ -441,13 +451,35 @@ class PairedVolumeDataModule(pl.LightningDataModule):
             lr_tr_raw = raw_splits["train"][0]
             assert lr_tr_raw is not None
             self.norm_bounds_lr = self._fit_bounds(lr_tr_raw, is_high=False)
+            hr_tr_norm = self._apply_bounds(hr_tr_raw, self.norm_bounds_hr, is_high=True)
+            lr_tr_norm = self._apply_bounds(lr_tr_raw, self.norm_bounds_lr, is_high=False)
+            cal_sigma = (
+                self.psf_sigma if self.calibration_psf_sigma is None else self.calibration_psf_sigma
+            )
+            fov_tr = build_circular_fov_mask(lr_tr_norm.shape) if self.circular_fov_mask else None
+            self.cross_scan_calibration_params = fit_cross_scan_calibration(
+                lr_tr_norm,
+                hr_tr_norm,
+                scale_factor=self.scale_factor,
+                mode=self.cross_scan_calibration,
+                psf_sigma=cal_sigma,
+                mask_lr=fov_tr,
+            )
             for split_name, (lr_raw_sub, hr_raw_sub) in raw_splits.items():
                 assert lr_raw_sub is not None
                 hr_sub = self._apply_bounds(hr_raw_sub, self.norm_bounds_hr, is_high=True)
                 lr_sub = self._apply_bounds(lr_raw_sub, self.norm_bounds_lr, is_high=False)
+                if self.cross_scan_calibration != "none":
+                    fov_lr = (
+                        build_circular_fov_mask(lr_sub.shape) if self.circular_fov_mask else None
+                    )
+                    lr_sub = apply_cross_scan_calibration(
+                        lr_sub, self.cross_scan_calibration_params, mask=fov_lr
+                    )
                 self.splits_3d[split_name] = (lr_sub, hr_sub)
         else:
             # Degrade each spatial split independently AFTER splitting (zero cross-split PSF bleed)
+            self.cross_scan_calibration_params = {"mode": "none"}
             for idx_split, (split_name, (_, hr_raw_sub)) in enumerate(raw_splits.items()):
                 hr_sub = self._apply_bounds(hr_raw_sub, self.norm_bounds_hr, is_high=True)
                 lr_sub = degrade_xct_volume(
@@ -471,6 +503,14 @@ class PairedVolumeDataModule(pl.LightningDataModule):
             aligned_pred = apply_alignment(raw_pred, lo_res)
             bounds = self.norm_bounds_lr or self._fit_bounds(aligned_pred, is_high=False)
             pred_lr = self._apply_bounds(aligned_pred, bounds, is_high=False)
+            if (
+                self.cross_scan_calibration != "none"
+                and self.cross_scan_calibration_params is not None
+            ):
+                fov_p = build_circular_fov_mask(pred_lr.shape) if self.circular_fov_mask else None
+                pred_lr = apply_cross_scan_calibration(
+                    pred_lr, self.cross_scan_calibration_params, mask=fov_p
+                )
             self.predict_lr_volume = pred_lr
             self.predict_Spatial_shape_hr = (
                 int(round(pred_lr.shape[0] * float(self.scale_factor))),

@@ -1,6 +1,13 @@
 """Data loading, synthetic porous-media generation, and XCT preprocessing modules."""
 
-from .public_benchmarks import AVAILABLE_PUBLIC_DATASETS, fetch_or_generate_rock_sample
+from .public_benchmarks import (
+    AVAILABLE_DUALSCAN_DATASETS,
+    AVAILABLE_PUBLIC_DATASETS,
+    PublicDualScanSpec,
+    PublicRockSpec,
+    fetch_or_generate_rock_sample,
+    prepare_bentheimer_dualscan_benchmark,
+)
 from .synthetic import (
     FeatureRegime,
     NoiseRegime,
@@ -9,17 +16,20 @@ from .synthetic import (
     generate_porespy_volume,
 )
 from .transforms import (
+    CrossScanCalibrationMode,
     DatasetObject,
     NormMode,
     PairedSliceDataset,
     VolumeAlignment,
     apply_alignment,
+    apply_cross_scan_calibration,
     build_circular_fov_mask,
     build_multi_axis_slice_dataset,
     compute_normalization_bounds,
     degrade_xct_volume,
     downsample_orthogonal_slabs,
     extract_paired_slices_from_subvolume,
+    fit_cross_scan_calibration,
     minimum_psf_guard_slices_lr,
     normalize_volume,
     sanitize_xct_volume,
@@ -39,13 +49,17 @@ from .zn13x import (
 )
 
 __all__ = [
+    "AVAILABLE_DUALSCAN_DATASETS",
     "AVAILABLE_PUBLIC_DATASETS",
+    "CrossScanCalibrationMode",
     "DatasetObject",
     "FeatureRegime",
     "NoiseRegime",
     "NormMode",
     "PairedSliceDataset",
     "PairedVolumeDataModule",
+    "PublicDualScanSpec",
+    "PublicRockSpec",
     "SyntheticPoreSpyDataModule",
     "SyntheticRepresentation",
     "VolumeAlignment",
@@ -54,6 +68,7 @@ __all__ = [
     "Zn13XPairName",
     "Zn13XResolutionSpec",
     "apply_alignment",
+    "apply_cross_scan_calibration",
     "build_circular_fov_mask",
     "build_multi_axis_slice_dataset",
     "compute_normalization_bounds",
@@ -62,10 +77,12 @@ __all__ = [
     "extract_aligned_slab_from_h5",
     "extract_paired_slices_from_subvolume",
     "fetch_or_generate_rock_sample",
+    "fit_cross_scan_calibration",
     "generate_porespy_volume",
     "load_volume_any",
     "minimum_psf_guard_slices_lr",
     "normalize_volume",
+    "prepare_bentheimer_dualscan_benchmark",
     "prepare_zn13x_benchmark",
     "register_multires_pair_3d",
     "sanitize_xct_volume",

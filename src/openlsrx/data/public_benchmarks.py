@@ -17,7 +17,8 @@ import tifffile
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 
 from .synthetic import _porespy_blobs
-from .transforms import normalize_volume
+from .transforms import degrade_xct_volume, normalize_volume
+from .zn13x import register_multires_pair_3d
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,33 @@ class PublicRockSpec:
     target_porosity: float
     macro_blobiness: float
     micro_blobiness: float | None
+
+
+@dataclass(frozen=True)
+class PublicDualScanSpec:
+    """Metadata for an open-access physical multi-resolution (LR + HR) micro-CT rock scan pair."""
+
+    name: str
+    description: str
+    lithology: str
+    reference: str
+    zenodo_doi: str
+    license_name: str
+    scale_factor: int
+    low_voxel_size_um: float
+    high_voxel_size_um: float
+    low_url: str
+    low_filename: str
+    low_md5: str
+    low_raw_dtype: str
+    low_raw_shape: tuple[int, int, int]
+    high_url: str
+    high_filename: str
+    high_md5: str
+    high_raw_dtype: str
+    high_raw_shape: tuple[int, int, int]
+    target_porosity: float
+    macro_blobiness: float
 
 
 AVAILABLE_PUBLIC_DATASETS: dict[str, PublicRockSpec] = {
@@ -88,6 +116,81 @@ AVAILABLE_PUBLIC_DATASETS: dict[str, PublicRockSpec] = {
         target_porosity=0.18,
         macro_blobiness=0.65,
         micro_blobiness=2.6,
+    ),
+}
+
+AVAILABLE_DUALSCAN_DATASETS: dict[str, PublicDualScanSpec] = {
+    "bentheimer_dualscan_core1": PublicDualScanSpec(
+        name="bentheimer_dualscan_core1",
+        description=(
+            "Bentheimer Sandstone Core 1 Subvol 1 physical dual-scan micro-CT pair "
+            "(18 um 75^3 LR -> 6 um 225^3 HR, 3x super-resolution)."
+        ),
+        lithology="Sandstone",
+        reference=(
+            "Jackson, S. J., Niu, Y., Manoorkar, S., Mostaghimi, P. & Armstrong, R. T., "
+            "Multi-resolution Bentheimer Sandstone micro-CT dataset, Zenodo (2021), "
+            "https://doi.org/10.5281/zenodo.5542624"
+        ),
+        zenodo_doi="10.5281/zenodo.5542624",
+        license_name="CC-BY-4.0",
+        scale_factor=3,
+        low_voxel_size_um=18.0,
+        high_voxel_size_um=6.0,
+        low_url=(
+            "https://zenodo.org/records/5542624/files/"
+            "Core1_Subvol1_18micron_75cube_16bit_LE_normalised.raw?download=1"
+        ),
+        low_filename="Core1_Subvol1_18micron_75cube_16bit_LE_normalised.raw",
+        low_md5="6be38996684013a6a82ca181738bee48",
+        low_raw_dtype="<u2",
+        low_raw_shape=(75, 75, 75),
+        high_url=(
+            "https://zenodo.org/records/5542624/files/"
+            "Core1_Subvol1_6micron_225cube_16bit_LE_normalised.raw?download=1"
+        ),
+        high_filename="Core1_Subvol1_6micron_225cube_16bit_LE_normalised.raw",
+        high_md5="d26cb64dbe448c1330bdc00e424c011b",
+        high_raw_dtype="<u2",
+        high_raw_shape=(225, 225, 225),
+        target_porosity=0.22,
+        macro_blobiness=1.1,
+    ),
+    "bentheimer_dualscan_core2": PublicDualScanSpec(
+        name="bentheimer_dualscan_core2",
+        description=(
+            "Laminated Bentheimer Sandstone Core 2 Subvol 2 physical dual-scan micro-CT pair "
+            "(18 um 75^3 LR -> 6 um 225^3 HR, 3x super-resolution)."
+        ),
+        lithology="Sandstone",
+        reference=(
+            "Jackson, S. J., Niu, Y., Manoorkar, S., Mostaghimi, P. & Armstrong, R. T., "
+            "Multi-resolution Bentheimer Sandstone micro-CT dataset, Zenodo (2021), "
+            "https://doi.org/10.5281/zenodo.5542624"
+        ),
+        zenodo_doi="10.5281/zenodo.5542624",
+        license_name="CC-BY-4.0",
+        scale_factor=3,
+        low_voxel_size_um=18.0,
+        high_voxel_size_um=6.0,
+        low_url=(
+            "https://zenodo.org/records/5542624/files/"
+            "Core2_Subvol2_18micron_75cube_16bit_LE_normalised.raw?download=1"
+        ),
+        low_filename="Core2_Subvol2_18micron_75cube_16bit_LE_normalised.raw",
+        low_md5="2f2647f06ade06f21c5d11aaaa068e29",
+        low_raw_dtype="<u2",
+        low_raw_shape=(75, 75, 75),
+        high_url=(
+            "https://zenodo.org/records/5542624/files/"
+            "Core2_Subvol2_6micron_225cube_16bit_LE_normalised.raw?download=1"
+        ),
+        high_filename="Core2_Subvol2_6micron_225cube_16bit_LE_normalised.raw",
+        high_md5="3ee93a943a000b7635865780ac5c80e6",
+        high_raw_dtype="<u2",
+        high_raw_shape=(225, 225, 225),
+        target_porosity=0.20,
+        macro_blobiness=1.25,
     ),
 }
 
@@ -288,3 +391,298 @@ def fetch_or_generate_rock_sample(
         tif_tmp.replace(tif_path)
         man_tmp.replace(manifest_path)
         return tif_path, manifest
+
+
+def _coaxial_center_crop_pair_3d(
+    lr_arr: np.ndarray,
+    hr_arr: np.ndarray,
+    lr_shape: tuple[int, int, int],
+    scale_factor: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Coaxially center-crop an integer-scale ``(LR, HR)`` pair with zero voxel phase offset."""
+    s = int(scale_factor)
+    d_lr = min(int(lr_arr.shape[0]), int(hr_arr.shape[0]) // s, int(lr_shape[0]))
+    h_lr = min(int(lr_arr.shape[1]), int(hr_arr.shape[1]) // s, int(lr_shape[1]))
+    w_lr = min(int(lr_arr.shape[2]), int(hr_arr.shape[2]) // s, int(lr_shape[2]))
+    z0_lr = max(0, (int(lr_arr.shape[0]) - d_lr) // 2)
+    y0_lr = max(0, (int(lr_arr.shape[1]) - h_lr) // 2)
+    x0_lr = max(0, (int(lr_arr.shape[2]) - w_lr) // 2)
+    z0_hr, y0_hr, x0_hr = s * z0_lr, s * y0_lr, s * x0_lr
+    lr_crop = np.ascontiguousarray(
+        lr_arr[z0_lr : z0_lr + d_lr, y0_lr : y0_lr + h_lr, x0_lr : x0_lr + w_lr],
+        dtype=np.float32,
+    )
+    hr_crop = np.ascontiguousarray(
+        hr_arr[
+            z0_hr : z0_hr + s * d_lr,
+            y0_hr : y0_hr + s * h_lr,
+            x0_hr : x0_hr + s * w_lr,
+        ],
+        dtype=np.float32,
+    )
+    return lr_crop, hr_crop
+
+
+def _read_verified_uint16_raw(
+    raw_path: Path,
+    expected_shape: tuple[int, int, int],
+    raw_dtype: str = "<u2",
+    expected_md5: str | None = None,
+) -> np.ndarray:
+    """Load a raw binary volume, verify MD5 when requested, and scale linearly by 1/65535."""
+    if expected_md5 is not None:
+        actual_md5 = _hash_file(raw_path, "md5")
+        if actual_md5.lower() != expected_md5.lower():
+            raise ValueError(
+                f"MD5 mismatch for {raw_path.name}: expected {expected_md5}, got {actual_md5}"
+            )
+    expected_elems = int(np.prod(expected_shape))
+    arr = np.fromfile(raw_path, dtype=raw_dtype)
+    if arr.size != expected_elems:
+        raise ValueError(
+            f"Raw element count mismatch for {raw_path.name}: "
+            f"expected {expected_elems} ({expected_shape}), got {arr.size}"
+        )
+    reshaped = arr.reshape(expected_shape)
+    if np.dtype(raw_dtype).kind == "u" and np.dtype(raw_dtype).itemsize == 2:
+        return (reshaped.astype(np.float32) / 65535.0).astype(np.float32, copy=False)
+    return normalize_volume(reshaped.astype(np.float32), mode="minmax")
+
+
+def _synthesize_calibrated_dualscan_phantom_pair(
+    spec: PublicDualScanSpec,
+    lr_shape: tuple[int, int, int],
+    seed: int = 42,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Synthesize an explicitly labeled offline 3x dual-scan sandstone phantom pair."""
+    s = int(spec.scale_factor)
+    hr_shape = (int(lr_shape[0]) * s, int(lr_shape[1]) * s, int(lr_shape[2]) * s)
+    rng = np.random.default_rng(seed)
+    pore_mask = _porespy_blobs(
+        shape=hr_shape,
+        blobiness=spec.macro_blobiness,
+        porosity=spec.target_porosity,
+        seed=seed,
+    )
+    grain_dt = distance_transform_edt(~pore_mask).astype(np.float32)
+    grain_dt = grain_dt / max(float(grain_dt.max()), 1.0)
+    clean_hr = np.where(pore_mask, 0.14, 0.78 + 0.12 * grain_dt).astype(np.float32)
+
+    hr_vol = gaussian_filter(clean_hr, sigma=0.55, mode="reflect")
+    hr_vol = np.clip(
+        hr_vol + rng.normal(0.0, 0.014, size=hr_shape).astype(np.float32), 0.0, 1.0
+    ).astype(np.float32, copy=False)
+
+    lr_deg = degrade_xct_volume(
+        clean_hr,
+        scale_factor=s,
+        psf_sigma=1.05,
+        noise_std=0.0,
+        seed=seed + 17,
+    )
+    # Emulate polychromatic full-core vs interior-ROI beam-hardening tonal shift
+    lr_shifted = 0.05 + 0.86 * np.power(np.clip(lr_deg, 0.0, 1.0), 1.25)
+    lr_vol = np.clip(
+        lr_shifted + rng.normal(0.0, 0.018, size=lr_deg.shape).astype(np.float32), 0.0, 1.0
+    ).astype(np.float32, copy=False)
+    return lr_vol, hr_vol
+
+
+def prepare_bentheimer_dualscan_benchmark(
+    dataset_name: str = "bentheimer_dualscan_core1",
+    dest_dir: str | Path = "data/benchmarks",
+    lr_shape: tuple[int, int, int] = (75, 75, 75),
+    raw_dir: str | Path | None = None,
+    allow_offline_fallback: bool = True,
+    prefer_offline: bool = False,
+    verify_checksum: bool = True,
+    timeout_s: float = 90.0,
+    seed: int = 42,
+) -> tuple[Path, Path, dict[str, object]]:
+    """Prepare a physical 18 um -> 6 um (3x) Bentheimer dual-scan micro-CT benchmark pair.
+
+    Writes ``<dest_dir>/<dataset_name>_lr.tif``, ``<dest_dir>/<dataset_name>_hr.tif``, and
+    ``<dest_dir>/<dataset_name>_manifest.json`` atomically under an exclusive file lock.
+
+    Intensities of real 16-bit Zenodo ``.raw`` scans are scaled strictly linearly by
+    ``1 / 65535.0`` without computing whole-volume percentiles, ensuring downstream
+    ``PairedVolumeDataModule`` fits both ``[lower_pct, upper_pct]`` normalization bounds and
+    ``cross_scan_calibration`` exclusively on the ``train`` slab with zero ``val``/``test`` leakage.
+    """
+    if dataset_name not in AVAILABLE_DUALSCAN_DATASETS:
+        raise KeyError(
+            f"Unknown dual-scan dataset {dataset_name!r}. "
+            f"Available: {sorted(AVAILABLE_DUALSCAN_DATASETS)}"
+        )
+
+    spec = AVAILABLE_DUALSCAN_DATASETS[dataset_name]
+    req_lr = (int(lr_shape[0]), int(lr_shape[1]), int(lr_shape[2]))
+    out_dir = Path(dest_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    raw_cache_dir = out_dir / "raw_cache"
+    lr_tif = out_dir / f"{spec.name}_lr.tif"
+    hr_tif = out_dir / f"{spec.name}_hr.tif"
+    manifest_path = out_dir / f"{spec.name}_manifest.json"
+    lock_path = out_dir / f".{spec.name}.lock"
+
+    with lock_path.open("w") as lf:
+        fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
+        if lr_tif.is_file() and hr_tif.is_file() and manifest_path.is_file():
+            cached: dict[str, object] = json.loads(manifest_path.read_text(encoding="utf-8"))
+            shape_ok = cached.get("requested_lr_shape") == list(req_lr)
+            offline_cached = cached.get("source_kind") == "offline_calibrated_dualscan_phantom"
+            want_real = (not prefer_offline) or (raw_dir is not None)
+            if shape_ok and not (want_real and offline_cached):
+                return lr_tif, hr_tif, cached
+
+        pid = os.getpid()
+        lr_vol: np.ndarray | None = None
+        hr_vol: np.ndarray | None = None
+        reg_info: dict[str, object] = {}
+        source_kind = "offline_calibrated_dualscan_phantom"
+
+        # 1. Try explicit raw_dir or persistent raw_cache_dir first
+        candidate_dirs: list[Path] = []
+        if raw_dir is not None:
+            candidate_dirs.append(Path(raw_dir))
+        if not prefer_offline:
+            candidate_dirs.append(raw_cache_dir)
+
+        for cdir in candidate_dirs:
+            lo_raw_p = cdir / spec.low_filename
+            hi_raw_p = cdir / spec.high_filename
+            if lo_raw_p.is_file() and hi_raw_p.is_file():
+                lo_full = _read_verified_uint16_raw(
+                    lo_raw_p,
+                    expected_shape=spec.low_raw_shape,
+                    raw_dtype=spec.low_raw_dtype,
+                    expected_md5=spec.low_md5 if verify_checksum else None,
+                )
+                hi_full = _read_verified_uint16_raw(
+                    hi_raw_p,
+                    expected_shape=spec.high_raw_shape,
+                    raw_dtype=spec.high_raw_dtype,
+                    expected_md5=spec.high_md5 if verify_checksum else None,
+                )
+                lr_vol, hr_vol = _coaxial_center_crop_pair_3d(
+                    lo_full, hi_full, lr_shape=req_lr, scale_factor=spec.scale_factor
+                )
+                source_kind = (
+                    "local_zenodo_5542624_dualscan_raw"
+                    if (raw_dir is not None and cdir == Path(raw_dir))
+                    else "downloaded_zenodo_5542624_dualscan"
+                )
+                break
+
+        # 2. Download from Zenodo 5542624 HTTPS and persist verified .raw files in raw_cache_dir
+        if lr_vol is None and not prefer_offline:
+            raw_cache_dir.mkdir(parents=True, exist_ok=True)
+            tmp_lo = raw_cache_dir / f".{spec.low_filename}.{pid}.part"
+            tmp_hi = raw_cache_dir / f".{spec.high_filename}.{pid}.part"
+            cached_lo = raw_cache_dir / spec.low_filename
+            cached_hi = raw_cache_dir / spec.high_filename
+            try:
+                if not cached_lo.is_file():
+                    _download_https_file(spec.low_url, tmp_lo, timeout_s=timeout_s)
+                    if verify_checksum:
+                        lo_md5 = _hash_file(tmp_lo, "md5")
+                        if lo_md5.lower() != spec.low_md5.lower():
+                            raise ValueError(
+                                f"MD5 mismatch for {spec.low_filename}: "
+                                f"expected {spec.low_md5}, got {lo_md5}"
+                            )
+                    tmp_lo.replace(cached_lo)
+                if not cached_hi.is_file():
+                    _download_https_file(spec.high_url, tmp_hi, timeout_s=timeout_s)
+                    if verify_checksum:
+                        hi_md5 = _hash_file(tmp_hi, "md5")
+                        if hi_md5.lower() != spec.high_md5.lower():
+                            raise ValueError(
+                                f"MD5 mismatch for {spec.high_filename}: "
+                                f"expected {spec.high_md5}, got {hi_md5}"
+                            )
+                    tmp_hi.replace(cached_hi)
+
+                lo_full = _read_verified_uint16_raw(
+                    cached_lo,
+                    expected_shape=spec.low_raw_shape,
+                    raw_dtype=spec.low_raw_dtype,
+                    expected_md5=spec.low_md5 if verify_checksum else None,
+                )
+                hi_full = _read_verified_uint16_raw(
+                    cached_hi,
+                    expected_shape=spec.high_raw_shape,
+                    raw_dtype=spec.high_raw_dtype,
+                    expected_md5=spec.high_md5 if verify_checksum else None,
+                )
+                lr_vol, hr_vol = _coaxial_center_crop_pair_3d(
+                    lo_full, hi_full, lr_shape=req_lr, scale_factor=spec.scale_factor
+                )
+                source_kind = "downloaded_zenodo_5542624_dualscan"
+            except Exception as exc:
+                if not allow_offline_fallback:
+                    raise RuntimeError(
+                        f"Failed to download dual-scan pair {spec.name} from Zenodo 5542624 "
+                        "and offline fallback is disabled."
+                    ) from exc
+                source_kind = "offline_calibrated_dualscan_phantom"
+            finally:
+                tmp_lo.unlink(missing_ok=True)
+                tmp_hi.unlink(missing_ok=True)
+
+        # 3. Offline calibrated dual-scan phantom fallback
+        if lr_vol is None or hr_vol is None:
+            if not allow_offline_fallback and not prefer_offline:
+                raise RuntimeError(
+                    f"Real dual-scan dataset {spec.name} was not loaded and offline fallback is disabled."
+                )
+            lr_vol, hr_vol = _synthesize_calibrated_dualscan_phantom_pair(
+                spec=spec, lr_shape=req_lr, seed=seed
+            )
+            source_kind = "offline_calibrated_dualscan_phantom"
+
+        # Verify 3D registration diagnostics on [0, 1] contrast-matched copies without mutating
+        # the split-isolated linear uint16 dynamic range stored on disk.
+        lo_reg_in = normalize_volume(lr_vol, mode="percentile", lower_pct=0.5, upper_pct=99.5)
+        hi_reg_in = normalize_volume(hr_vol, mode="percentile", lower_pct=0.5, upper_pct=99.5)
+        _, _, reg_info = register_multires_pair_3d(
+            lo_reg_in, hi_reg_in, scale_factor=spec.scale_factor, local_refine_radius=2
+        )
+
+        is_exp = source_kind in {
+            "downloaded_zenodo_5542624_dualscan",
+            "local_zenodo_5542624_dualscan_raw",
+        }
+        lr_tmp = out_dir / f".{spec.name}_lr.{pid}.tif"
+        hr_tmp = out_dir / f".{spec.name}_hr.{pid}.tif"
+        man_tmp = out_dir / f".{spec.name}_manifest.{pid}.json"
+        tifffile.imwrite(lr_tmp, lr_vol.astype(np.float32), photometric="minisblack")
+        tifffile.imwrite(hr_tmp, hr_vol.astype(np.float32), photometric="minisblack")
+
+        manifest: dict[str, object] = {
+            "name": spec.name,
+            "lithology": spec.lithology,
+            "description": spec.description,
+            "scale_factor": spec.scale_factor,
+            "low_resolution_um": spec.low_voxel_size_um,
+            "high_resolution_um": spec.high_voxel_size_um,
+            "source_kind": source_kind,
+            "is_experimental_xct": is_exp,
+            "zenodo_doi": spec.zenodo_doi if is_exp else None,
+            "low_source_url": spec.low_url if is_exp else None,
+            "high_source_url": spec.high_url if is_exp else None,
+            "reference": spec.reference,
+            "license": spec.license_name,
+            "requested_lr_shape": list(req_lr),
+            "lr_shape": list(lr_vol.shape),
+            "hr_shape": list(hr_vol.shape),
+            "lr_sha256": _hash_file(lr_tmp, "sha256"),
+            "hr_sha256": _hash_file(hr_tmp, "sha256"),
+            "registration": reg_info,
+            "seed": seed,
+        }
+        man_tmp.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+        lr_tmp.replace(lr_tif)
+        hr_tmp.replace(hr_tif)
+        man_tmp.replace(manifest_path)
+        return lr_tif, hr_tif, manifest

@@ -12,11 +12,11 @@
 
 ## Highlights
 
-- **Cell-Centered 2D & `2.5D` Training → Isotropic 3D Reconstruction:** Train memory-efficient `1`-slice or native-LR-strided `2k + 1` multi-slice (`2.5D`) generators (`SwinIR`, `RRDB` + `RaGAN`, `SRGAN`/`SRResNet`) alongside native `SR3DResNet` baselines across integer and fractional synchrotron optical magnifications (`2x`, `2.5x`, `4x`, `8x`), and fuse cell-centered (`grid_mode=True`) orthogonal sweeps (`yz + xz + xy`) via **Confidence-Weighted Directional Fourier Fusion** (`confidence_fourier`) with zero-overhead voxel-wise **orthogonal view-disagreement uncertainty** $\sigma_{\text{ortho}}(\mathbf{x})$ ($n=3$ views).
+- **Cell-Centered 2D & `2.5D` Training → Isotropic 3D Reconstruction:** Train memory-efficient `1`-slice or native-LR-strided `2k + 1` multi-slice (`2.5D`) generators (`SwinIR`, `RRDB` + `RaGAN`, `SRGAN`/`SRResNet`) alongside native `SR3DResNet` baselines across integer and fractional laboratory/synchrotron magnifications (`2x`, `2.5x`, `3x`, `4x`, `6x`, `8x`, with native $2^a 3^b$ sub-pixel `PixelShuffle`), and fuse cell-centered (`grid_mode=True`) orthogonal sweeps (`yz + xz + xy`) via **Confidence-Weighted Directional Fourier Fusion** (`confidence_fourier`) with zero-overhead voxel-wise **orthogonal view-disagreement uncertainty** $\sigma_{\text{ortho}}(\mathbf{x})$ ($n=3$ views).
 - **Physics- & Topology-Guided Objectives:** Combines **approximate slice/`2.5D` linear-attenuation ($\mu$) downsampling consistency** (`AttenuationConservationLoss`, with local `2.5D` discrete $z$-Laplacian PSF curvature reduction), differentiable **bimodal pore-throat skeleton preservation** (`SoftCLDiceLoss`), 2D/3D **Sobel phase-boundary sharpness** (`SobelGradientLoss`), and **Focal Frequency Loss** (`FocalFrequencyLoss`).
-- **Split-Isolated 3D Spatial Splitting & Normalization:** Partitions 3D volumes into disjoint sub-volume slabs (separated by PSF guard margins) *before* fitting intensity normalization bounds on `train` only and *before* per-split synthetic PSF degradation.
+- **Split-Isolated 3D Spatial Splitting, Normalization & Cross-Scan Calibration:** Partitions 3D volumes into disjoint sub-volume slabs (separated by PSF guard margins) *before* fitting intensity normalization bounds and optional `train`-only monotonic cross-scan radiometric calibration (`cross_scan_calibration="quantile" | "affine"`) on `train` only, and *before* per-split synthetic PSF degradation.
 - **Synchrotron Spectral, Petrophysical & Diffusive Transport Metrology:** Evaluates **3D Fourier Shell Correlation (FSC)** & **2D Fourier Ring Correlation (FRC)** (`FSC = 0.5` prediction-vs-reference crossover frequency & spectral AUC), ground-truth-thresholded porosity/Euler/surface-area metrics, tri-phase `Zn-13X` reactive core-rim segmentation (`Macropore` / `Na-13X` / `Zn-13X`), quasi-static drainage capillary pressure $S_{\text{nwp}}(P_c)$, and residual-verified **3D steady-state Laplace diffusive tortuosity** ($D_{\text{eff}} / D_0$, $\tau$) with view-disagreement sensitivity bounds $[D_{\text{eff}}^-, D_{\text{eff}}^+]$ and direct **OpenImpala** export.
-- **Provenance-Verified Open Benchmarks:** Ships with deterministic **Factorial PoreSpy** benchmarks, **Open Rock Micro-CT** (Bentheimer Sandstone from Zenodo `5542624` & calibrated carbonate phantom), and coaxial sub-voxel-registered Zenodo staging (`10.5281/zenodo.14245751`) + explicit provenance tracking (`source_kind`, `is_experimental_xct`) for the Diamond Light Source I13-2 multi-resolution `Zn-13X` dataset ([*Scientific Data*, 2025](https://doi.org/10.1038/s41597-025-04605-9)).
+- **Provenance-Verified Open Benchmarks:** Ships with deterministic **Factorial PoreSpy** benchmarks, **Open Rock Micro-CT** (both synthetic-$2\times$ and physical independent $18\ \mu\text{m} \to 6\ \mu\text{m}$ $3\times$ dual-scan Bentheimer Sandstone pairs from Zenodo `5542624`, plus calibrated carbonate phantoms), and coaxial sub-voxel-registered Zenodo staging (`10.5281/zenodo.14245751`) + explicit provenance tracking (`source_kind`, `is_experimental_xct`) for the Diamond Light Source I13-2 multi-resolution `Zn-13X` dataset ([*Scientific Data*, 2025](https://doi.org/10.1038/s41597-025-04605-9)).
 
 ---
 
@@ -46,23 +46,23 @@ Run standalone 3-axis orthogonal `confidence_fourier` super-resolution + view-di
 openlsrx predict-volume \
   --ckpt lightning_logs/version_0/checkpoints/last.ckpt \
   --input data/benchmarks/zn13x_2x_lr.tif \
-  --output-dir results/zn13x_2x_sr \
-  --fusion confidence_fourier \
-  --save-uncertainty
+  --output results/zn13x_2x_sr.tif \
+  --uncertainty-output results/zn13x_2x_sr_std.tif \
+  --fusion confidence_fourier
 ```
 
-Prepare open rock micro-CT benchmark stacks and train on Bentheimer Sandstone:
+Prepare open rock micro-CT benchmark stacks (including physical $18\ \mu\text{m} \to 6\ \mu\text{m}$ $3\times$ dual-scan Bentheimer Sandstone from Zenodo `5542624`) and train:
 
 ```bash
-openlsrx download-benchmarks --dest data/benchmarks
-openlsrx fit -c configs/labxct/bs_config.yaml
+openlsrx download-benchmarks --datasets bentheimer_dualscan_core1 bentheimer_dualscan_core2 --dest data/benchmarks --size 75
+openlsrx fit -c configs/labxct/bs_dualscan_3x_swinir_25d.yaml
 ```
 
 Evaluate image-fidelity, petrophysical, 3D FSC spectral, tri-phase `Zn-13X`, and 3D diffusive transport metrics (+ OpenImpala export):
 
 ```bash
 openlsrx evaluate \
-  --pred results/zn13x_2x_sr/zn13x_2x_lr_sr_confidence_fourier.tif \
+  --pred results/zn13x_2x_sr.tif \
   --target data/benchmarks/zn13x_2x_hr.tif \
   --voxel-size 0.8125 \
   --include-transport \
@@ -79,13 +79,17 @@ openlsrx evaluate \
 Run the Factorial PoreSpy, Open Rock Micro-CT, and 9-arm Diamond I13-2 `Zn-13X` studies and generate publication-ready LaTeX `booktabs` tables and comparison figures (production runs fail loudly if real Zenodo/HDF5 data are unavailable unless `--allow-synthetic-fallback` is explicitly passed):
 
 ```bash
-# Closed-form analytical accuracy tests (<10s) & full visual verification suite
+# Closed-form analytical accuracy tests (~15s) & full visual + Bentheimer verification suite
 pytest tests/test_analytical_verification.py
-python scripts/verification/run_verification_suite.py --output-dir docs/assets/verification --include-bentheimer
+python scripts/verification/run_verification_suite.py \
+  --output-dir docs/assets/verification \
+  --include-bentheimer \
+  --include-bentheimer-dualscan
 
 # Rapid offline CPU smoke verification (~2 minutes; explicitly labeled synthetic phantoms)
 python scripts/benchmarks/porespy_study.py --fast
 python scripts/benchmarks/public_rock_xct.py --fast
+python scripts/benchmarks/public_rock_xct.py --fast --dualscan
 python scripts/benchmarks/zn13x_synchrotron_study.py --fast
 python scripts/benchmarks/aggregate_campaign.py --inputs results --output-dir results/campaign_summary
 
