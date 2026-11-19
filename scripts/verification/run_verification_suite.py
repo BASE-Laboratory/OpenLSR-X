@@ -44,6 +44,7 @@ from openlsrx.data import (
     fetch_or_generate_rock_sample,
     generate_porespy_volume,
     minimum_psf_guard_slices_lr,
+    prepare_bentheimer_dualscan_benchmark,
     prepare_zn13x_benchmark,
     register_multires_pair_3d,
     split_volume_spatially,
@@ -169,6 +170,23 @@ def run_subsystem_1_data_alignment(out_dir: Path) -> dict[str, Any]:
             "legacy_max_abs_shift_hr_vox": round(float(np.max(np.abs(err_leg_vox))), 4),
             "centered_max_abs_shift_hr_vox": round(float(np.max(np.abs(err_cen_vox))), 6),
         }
+    n_hr_3x = 63
+    zz3x, _, _ = np.meshgrid(
+        np.arange(n_hr_3x), np.arange(n_hr_3x), np.arange(n_hr_3x), indexing="ij"
+    )
+    ramp_3x = zz3x.astype(np.float32) / float(n_hr_3x - 1)
+    lr_blk_3x = ramp_3x.reshape(21, 3, 21, 3, 21, 3).mean(axis=(1, 3, 5))
+    up_leg_3x = nd_zoom(lr_blk_3x, zoom=3, order=1, grid_mode=False)
+    up_cen_3x = zoom_cell_centered(lr_blk_3x, zoom_factors=3, order=1)
+    int_3x = slice(3, n_hr_3x - 3)
+    shift_stats["3x"] = {
+        "legacy_max_abs_shift_hr_vox": round(
+            float(np.max(np.abs((up_leg_3x[int_3x] - ramp_3x[int_3x]) * (n_hr_3x - 1)))), 4
+        ),
+        "centered_max_abs_shift_hr_vox": round(
+            float(np.max(np.abs((up_cen_3x[int_3x] - ramp_3x[int_3x]) * (n_hr_3x - 1)))), 6
+        ),
+    }
 
     _, ps_hr, _ = generate_porespy_volume(
         shape=64,
@@ -1472,6 +1490,286 @@ def run_bentheimer_synthetic_degradation_check(
     return per_core_results
 
 
+def run_bentheimer_dualscan_3x_check(
+    out_dir: Path,
+    work_dir: Path,
+    raw_dir: Path | None = None,
+    seeds: tuple[int, ...] = (42, 43, 44),
+    epochs: int = 10,
+) -> dict[str, Any]:
+    """Multi-seed, two-core check on physical 18 um -> 6 um (3x) independent dual-scan Bentheimer micro-CT."""
+    cores = ["bentheimer_dualscan_core1", "bentheimer_dualscan_core2"]
+    per_core_results: dict[str, Any] = {}
+    last_vis: dict[str, Any] = {}
+
+    for core_name in cores:
+        lr_tif, hr_tif, manifest = prepare_bentheimer_dualscan_benchmark(
+            dataset_name=core_name,
+            dest_dir=work_dir / "zenodo_bentheimer_dualscan",
+            lr_shape=(36, 32, 32),
+            raw_dir=raw_dir,
+            prefer_offline=False,
+            allow_offline_fallback=False,
+            seed=42,
+        )
+        dm_raw = PairedVolumeDataModule(
+            low_path=str(lr_tif),
+            high_path=str(hr_tif),
+            degrade_from_hr=False,
+            scale_factor=3,
+            norm_mode="percentile",
+            lower_pct=0.5,
+            upper_pct=99.5,
+            cross_scan_calibration="none",
+            train_frac=0.60,
+            val_frac=0.15,
+            guard_slices_lr=1,
+            train_axes=("yz",),
+            context_slices=1,
+            batch_size=8,
+            seed=42,
+        )
+        dm_raw.setup("fit")
+        lr_te_raw, hr_te_raw = dm_raw.splits_3d["test"]
+        v_tri_raw = upsample_3d(lr_te_raw, 3, "tricubic")
+        img_raw = evaluate_image_metrics(v_tri_raw, hr_te_raw)
+        pet_raw = evaluate_petrophysical_metrics(v_tri_raw, hr_te_raw, pore_is_low=True)
+
+        seed_rows: list[dict[str, Any]] = []
+        for sd in seeds:
+            pl.seed_everything(sd, workers=True)
+            dm = PairedVolumeDataModule(
+                low_path=str(lr_tif),
+                high_path=str(hr_tif),
+                degrade_from_hr=False,
+                scale_factor=3,
+                norm_mode="percentile",
+                lower_pct=0.5,
+                upper_pct=99.5,
+                cross_scan_calibration="quantile",
+                calibration_psf_sigma=1.0,
+                train_frac=0.60,
+                val_frac=0.15,
+                guard_slices_lr=1,
+                train_axes=("yz", "xz", "xy"),
+                context_slices=3,
+                patch_size_lr=24,
+                batch_size=8,
+                seed=sd,
+            )
+            dm.setup("fit")
+            lr_te, hr_te = dm.splits_3d["test"]
+
+            model = SRGAN(
+                super_res_factor=3,
+                backbone="swinir",
+                context_slices=3,
+                out_channels=24,
+                num_blocks=2,
+                swin_num_heads=4,
+                swin_window_size=8,
+                output_activation="clamp",
+                use_adversarial_loss=False,
+                use_vgg_loss=False,
+                pixel_loss_type="l1",
+                conservation_loss_weight=0.10,
+                conservation_psf_sigma=1.0,
+                topology_loss_weight=0.04,
+                gradient_loss_weight=0.05,
+                ffl_loss_weight=0.02,
+                learning_rate=5e-4,
+                save_val_images=False,
+            )
+            pl.Trainer(
+                max_epochs=epochs,
+                limit_train_batches=14,
+                accelerator="cpu",
+                devices=1,
+                logger=False,
+                enable_checkpointing=False,
+                enable_progress_bar=False,
+                enable_model_summary=False,
+            ).fit(model, datamodule=dm)
+            model.eval()
+
+            v_tri = upsample_3d(lr_te, 3, "tricubic")
+            ort_d = super_resolve_volume_orthogonal(
+                model.gen,
+                lr_te,
+                scale_factor=3,
+                fusion="confidence_fourier",
+                context_slices=3,
+                return_uncertainty=True,
+            )
+            v_yz = ort_d["yz"]
+            v_ort = ort_d["fused"]
+            u_std = ort_d["uncertainty_std"]
+
+            img_tri = evaluate_image_metrics(v_tri, hr_te)
+            img_yz = evaluate_image_metrics(v_yz, hr_te)
+            img_ort = evaluate_image_metrics(v_ort, hr_te)
+            pet_tri = evaluate_petrophysical_metrics(v_tri, hr_te, pore_is_low=True)
+            pet_yz = evaluate_petrophysical_metrics(v_yz, hr_te, pore_is_low=True)
+            pet_ort = evaluate_petrophysical_metrics(v_ort, hr_te, pore_is_low=True)
+
+            ref_tr = precompute_reference_transport(hr_te, pore_is_low=True, drainage_steps=8)
+            tr_tri = evaluate_transport_metrics(
+                v_tri, hr_te, pore_is_low=True, drainage_steps=8, precomputed_true=ref_tr
+            )
+            tr_yz = evaluate_transport_metrics(
+                v_yz, hr_te, pore_is_low=True, drainage_steps=8, precomputed_true=ref_tr
+            )
+            tr_ort = evaluate_transport_metrics(
+                v_ort, hr_te, pore_is_low=True, drainage_steps=8, precomputed_true=ref_tr
+            )
+            unc_b = compute_tortuosity_uncertainty_bounds(
+                v_ort,
+                u_std,
+                true_vol=hr_te,
+                pore_is_low=True,
+                k_sigma=1.0,
+                precomputed_true=ref_tr,
+            )
+            r_sp, _ = spearmanr(u_std.ravel(), np.abs(v_ort - hr_te).ravel())
+
+            true_deff = float(tr_ort["true_d_eff_mean"] or 0.0)
+            tri_err = float(tr_tri["d_eff_rel_error"] or 0.0) * 100.0
+            yz_err = float(tr_yz["d_eff_rel_error"] or 0.0) * 100.0
+            ort_err = float(tr_ort["d_eff_rel_error"] or 0.0) * 100.0
+            brack = float(unc_b["d_eff_bracketed_by_envelope"] or 0.0) > 0.5
+
+            seed_rows.append(
+                {
+                    "seed": sd,
+                    "raw_tricubic_psnr": round(float(img_raw["psnr"]), 2),
+                    "tricubic_psnr": round(float(img_tri["psnr"]), 2),
+                    "yz_psnr": round(float(img_yz["psnr"]), 2),
+                    "ortho_psnr": round(float(img_ort["psnr"]), 2),
+                    "raw_tricubic_ssim_3d": round(float(img_raw["ssim_3d_triplanar"]), 4),
+                    "tricubic_ssim_3d": round(float(img_tri["ssim_3d_triplanar"]), 4),
+                    "yz_ssim_3d": round(float(img_yz["ssim_3d_triplanar"]), 4),
+                    "ortho_ssim_3d": round(float(img_ort["ssim_3d_triplanar"]), 4),
+                    "raw_tricubic_pore_dice": round(float(pet_raw["pore_dice"]), 4),
+                    "tricubic_pore_dice": round(float(pet_tri["pore_dice"]), 4),
+                    "yz_pore_dice": round(float(pet_yz["pore_dice"]), 4),
+                    "ortho_pore_dice": round(float(pet_ort["pore_dice"]), 4),
+                    "raw_tricubic_porosity_abs_err": round(float(pet_raw["porosity_abs_error"]), 4),
+                    "tricubic_porosity_abs_err": round(float(pet_tri["porosity_abs_error"]), 4),
+                    "ortho_porosity_abs_err": round(float(pet_ort["porosity_abs_error"]), 4),
+                    "true_d_eff": round(true_deff, 5),
+                    "tricubic_d_eff_rel_err_pct": round(tri_err, 2),
+                    "yz_d_eff_rel_err_pct": round(yz_err, 2),
+                    "ortho_d_eff_rel_err_pct": round(ort_err, 2),
+                    "spearman_r": round(float(r_sp), 4),
+                    "bracketed_1sigma": brack,
+                }
+            )
+            if core_name == "bentheimer_dualscan_core1" and sd == seeds[0]:
+                last_vis = {
+                    "raw_near": upsample_3d(lr_te_raw, 3, "nearest"),
+                    "tri": v_tri,
+                    "yz": v_yz,
+                    "ort": v_ort,
+                    "hr": hr_te,
+                    "std": u_std,
+                    "r_sp": float(r_sp),
+                }
+
+        def _msd(
+            key: str,
+            digits: int = 2,
+            rows: list[dict[str, Any]] = seed_rows,
+        ) -> dict[str, float]:
+            vals = [float(r[key]) for r in rows]
+            return {
+                "mean": round(float(np.mean(vals)), digits),
+                "std": round(float(np.std(vals, ddof=1)), digits),
+            }
+
+        reg_meta = manifest.get("registration", {})
+        per_core_results[core_name] = {
+            "source_kind": manifest["source_kind"],
+            "is_experimental_xct": bool(manifest["is_experimental_xct"]),
+            "zenodo_doi": manifest["zenodo_doi"],
+            "pairing_mode": "physical_independent_dual_scan_18um_to_6um_3x",
+            "cross_scan_calibration": "train_only_monotonic_quantile_psf1.0",
+            "scale_factor": 3,
+            "low_resolution_um": 18.0,
+            "high_resolution_um": 6.0,
+            "lr_subvolume_shape": [36, 32, 32],
+            "hr_subvolume_shape": [108, 96, 96],
+            "test_slab_shape": list(hr_te.shape),
+            "epochs_cpu": epochs,
+            "registration": reg_meta,
+            "n_seeds": len(seeds),
+            "seeds": seed_rows,
+            "summary": {
+                "raw_tricubic_psnr": _msd("raw_tricubic_psnr", 2),
+                "tricubic_psnr": _msd("tricubic_psnr", 2),
+                "yz_psnr": _msd("yz_psnr", 2),
+                "ortho_psnr": _msd("ortho_psnr", 2),
+                "raw_tricubic_ssim_3d": _msd("raw_tricubic_ssim_3d", 4),
+                "tricubic_ssim_3d": _msd("tricubic_ssim_3d", 4),
+                "yz_ssim_3d": _msd("yz_ssim_3d", 4),
+                "ortho_ssim_3d": _msd("ortho_ssim_3d", 4),
+                "raw_tricubic_pore_dice": _msd("raw_tricubic_pore_dice", 4),
+                "tricubic_pore_dice": _msd("tricubic_pore_dice", 4),
+                "yz_pore_dice": _msd("yz_pore_dice", 4),
+                "ortho_pore_dice": _msd("ortho_pore_dice", 4),
+                "raw_tricubic_porosity_abs_err": _msd("raw_tricubic_porosity_abs_err", 4),
+                "tricubic_porosity_abs_err": _msd("tricubic_porosity_abs_err", 4),
+                "ortho_porosity_abs_err": _msd("ortho_porosity_abs_err", 4),
+                "tricubic_d_eff_rel_err_pct": _msd("tricubic_d_eff_rel_err_pct", 2),
+                "yz_d_eff_rel_err_pct": _msd("yz_d_eff_rel_err_pct", 2),
+                "ortho_d_eff_rel_err_pct": _msd("ortho_d_eff_rel_err_pct", 2),
+                "spearman_r": _msd("spearman_r", 3),
+                "bracketed_count": f"{sum(1 for r in seed_rows if r['bracketed_1sigma'])}/{len(seeds)}",
+            },
+        }
+
+    if last_vis:
+        zm = int(last_vis["hr"].shape[0]) // 2
+        fig, axes = plt.subplots(2, 5, figsize=(16.2, 6.9), dpi=180)
+        plt.subplots_adjust(hspace=0.28, wspace=0.14)
+        cols = [
+            ("Real 18 µm LR Scan\n(Raw Uncalibrated)", last_vis["raw_near"]),
+            ("Quantile-Calibrated\nTricubic-3D (3×)", last_vis["tri"]),
+            ("Single-Axis SwinIR-2.5D\n(PixelShuffle 3×, yz)", last_vis["yz"]),
+            ("3-Axis Fourier Fusion\n(SwinIR-2.5D 3×)", last_vis["ort"]),
+            ("Real 6 µm HR Scan\n(Zenodo 5542624)", last_vis["hr"]),
+        ]
+        for ci, (cname, cvol) in enumerate(cols):
+            axes[0, ci].imshow(cvol[zm], cmap="gray", vmin=0.02, vmax=0.98, interpolation="nearest")
+            axes[0, ci].set_title(cname, fontsize=8.6)
+            axes[0, ci].set_xticks([])
+            axes[0, ci].set_yticks([])
+            if ci < 4:
+                err_map = np.abs(cvol[zm] - last_vis["hr"][zm])
+                axes[1, ci].imshow(
+                    err_map, cmap="inferno", vmin=0.0, vmax=0.30, interpolation="nearest"
+                )
+                axes[1, ci].set_title(f"|SR − HR| (MAE {err_map.mean():.3f})", fontsize=8.4)
+            else:
+                axes[1, ci].imshow(last_vis["std"][zm], cmap="magma", interpolation="nearest")
+                axes[1, ci].set_title(
+                    f"Inter-View SD σ_ortho (r_s={last_vis['r_sp']:+.2f})", fontsize=8.4
+                )
+            axes[1, ci].set_xticks([])
+            axes[1, ci].set_yticks([])
+        axes[0, 0].set_ylabel("Greyscale Slice", fontweight="bold")
+        axes[1, 0].set_ylabel("Error / View SD", fontweight="bold")
+        fig.suptitle(
+            "Physical Independent Dual-Scan Bentheimer Micro-CT (Zenodo 5542624, True 18 µm → 6 µm, 3×)",
+            fontsize=11.2,
+            fontweight="bold",
+            y=0.99,
+        )
+        fig.savefig(out_dir / "vr_06_bentheimer_dualscan_3x.png", bbox_inches="tight")
+        plt.close(fig)
+
+    return per_core_results
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1481,15 +1779,43 @@ def parse_args() -> argparse.Namespace:
         help="Directory where verification PNG figures and JSON report are written.",
     )
     parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        default=None,
+        help="Optional persistent working/cache directory for Zenodo benchmark downloads.",
+    )
+    parser.add_argument(
+        "--raw-dir",
+        type=Path,
+        default=None,
+        help="Optional directory containing pre-downloaded Zenodo 5542624 16-bit .raw files.",
+    )
+    parser.add_argument(
         "--epochs",
         type=int,
         default=8,
         help="CPU training epochs per compact neural verification run.",
     )
     parser.add_argument(
+        "--dualscan-epochs",
+        type=int,
+        default=10,
+        help="CPU training epochs per seed for the 3x physical dual-scan Bentheimer check.",
+    )
+    parser.add_argument(
         "--include-bentheimer",
         action="store_true",
         help="Also download Zenodo 5542624 6 um Bentheimer cores (2 cores x 3 seeds) under synthetic 2x degradation.",
+    )
+    parser.add_argument(
+        "--include-bentheimer-dualscan",
+        action="store_true",
+        help="Also run physical 18 um -> 6 um (3x) independent dual-scan Bentheimer verification (2 cores x 3 seeds).",
+    )
+    parser.add_argument(
+        "--only-bentheimer-dualscan",
+        action="store_true",
+        help="Run only the physical 18 um -> 6 um (3x) dual-scan Bentheimer verification and merge into verification_summary.json.",
     )
     return parser.parse_args()
 
@@ -1498,10 +1824,37 @@ def main() -> None:
     args = parse_args()
     out_dir: Path = args.output_dir
     out_dir.mkdir(parents=True, exist_ok=True)
+    summary_path = out_dir / "verification_summary.json"
     t0 = time.perf_counter()
 
     with tempfile.TemporaryDirectory(prefix="openlsrx_verify_") as tmp_s:
-        work_dir = Path(tmp_s)
+        work_dir = args.cache_dir if args.cache_dir is not None else Path(tmp_s)
+        work_dir.mkdir(parents=True, exist_ok=True)
+
+        if args.only_bentheimer_dualscan:
+            report: dict[str, Any] = (
+                json.loads(summary_path.read_text(encoding="utf-8"))
+                if summary_path.is_file()
+                else {}
+            )
+            print(
+                "[DualScan 3x] Running 2-Core x 3-Seed Physical 18 um -> 6 um Bentheimer check..."
+            )
+            t_ds = time.perf_counter()
+            report["bentheimer_dualscan_3x_multiseed"] = run_bentheimer_dualscan_3x_check(
+                out_dir,
+                work_dir,
+                raw_dir=args.raw_dir,
+                epochs=args.dualscan_epochs,
+            )
+            report["bentheimer_dualscan_3x_elapsed_seconds"] = round(time.perf_counter() - t_ds, 1)
+            summary_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+            print(
+                f"Dual-scan 3x verification complete in "
+                f"{report['bentheimer_dualscan_3x_elapsed_seconds']}s -> {summary_path}"
+            )
+            return
+
         s1 = run_subsystem_1_data_alignment(out_dir)
         print("[1/4] Subsystem 1 (Data, Cell-Centered Alignment & Registration) verified")
         s2 = run_subsystem_2_losses(out_dir)
@@ -1513,7 +1866,7 @@ def main() -> None:
         s4 = run_subsystem_4_analytical_metrics(out_dir, work_dir, *zn_vols)
         print("[4/4] Subsystem 4 (Closed-Form Analytical Physics & Spectral Metrics) verified")
 
-        report: dict[str, Any] = {
+        report = {
             "elapsed_seconds": round(time.perf_counter() - t0, 1),
             "subsystem_1_data": s1,
             "subsystem_2_losses": s2,
@@ -1522,14 +1875,24 @@ def main() -> None:
         }
         if args.include_bentheimer:
             print(
-                "[5/5] Running 2-Core x 3-Seed Real 6 um Bentheimer (Synthetic 2x Degradation) check..."
+                "[5/6] Running 2-Core x 3-Seed Real 6 um Bentheimer (Synthetic 2x Degradation) check..."
             )
             report["bentheimer_synthetic_degradation_multiseed"] = (
                 run_bentheimer_synthetic_degradation_check(out_dir, work_dir, epochs=args.epochs)
             )
             report["elapsed_seconds"] = round(time.perf_counter() - t0, 1)
+        if args.include_bentheimer_dualscan:
+            print(
+                "[6/6] Running 2-Core x 3-Seed Physical 18 um -> 6 um (3x) Bentheimer Dual-Scan check..."
+            )
+            report["bentheimer_dualscan_3x_multiseed"] = run_bentheimer_dualscan_3x_check(
+                out_dir,
+                work_dir,
+                raw_dir=args.raw_dir,
+                epochs=args.dualscan_epochs,
+            )
+            report["elapsed_seconds"] = round(time.perf_counter() - t0, 1)
 
-    summary_path = out_dir / "verification_summary.json"
     summary_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Verification complete in {report['elapsed_seconds']}s -> {summary_path}")
 

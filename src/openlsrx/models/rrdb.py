@@ -68,8 +68,27 @@ class RRDB(nn.Module):
         return x + self.res_scale * out
 
 
+def _factor_subpixel_steps(scale_factor: float) -> tuple[list[int], int]:
+    """Decompose exact ``2^a * 3^b`` integer scales into native ``PixelShuffle`` steps."""
+    s_round = int(round(scale_factor))
+    if s_round >= 1 and math.isclose(scale_factor, float(s_round), rel_tol=1e-6, abs_tol=1e-6):
+        rem = s_round
+        steps_23: list[int] = []
+        while rem % 2 == 0:
+            steps_23.append(2)
+            rem //= 2
+        while rem % 3 == 0:
+            steps_23.append(3)
+            rem //= 3
+        if rem == 1:
+            return steps_23, s_round
+
+    n_pow2 = int(math.floor(math.log2(scale_factor) + 1e-9))
+    return [2] * n_pow2, 2**n_pow2
+
+
 class ArbitraryScaleUpsample(nn.Module):
-    """Hybrid sub-pixel + resize-convolution upsampler supporting any scale >= 1.0."""
+    """Hybrid sub-pixel (``2^a * 3^b`` ``PixelShuffle``) + resize-convolution upsampler for any scale >= 1.0."""
 
     def __init__(self, channels: int = 64, scale_factor: float | int = 2) -> None:
         super().__init__()
@@ -78,12 +97,12 @@ class ArbitraryScaleUpsample(nn.Module):
             raise ValueError(f"scale_factor must be >= 1.0, got {scale_factor}.")
         self.scale_factor = sf
 
-        n_pow2 = int(math.floor(math.log2(sf) + 1e-9))
-        self.pow2_scale = 2**n_pow2
+        steps, base_scale = _factor_subpixel_steps(sf)
+        self.pow2_scale = base_scale
         self.residual_scale = sf / float(self.pow2_scale)
 
         self.pow2_blocks = nn.Sequential(
-            *[UpsampleBlock(in_channels=channels, scale_factor=2) for _ in range(n_pow2)]
+            *[UpsampleBlock(in_channels=channels, scale_factor=st) for st in steps]
         )
         self.has_residual = not math.isclose(self.residual_scale, 1.0, rel_tol=1e-5, abs_tol=1e-5)
         self.refine_conv: nn.Conv2d | None = (

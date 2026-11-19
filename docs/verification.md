@@ -1,17 +1,18 @@
 # Analytical & Visual Verification Suite
 
-This page documents the reproducible verification suite included in `scripts/verification/run_verification_suite.py` and enforced in CI via `tests/test_analytical_verification.py`. Each core function in `openlsrx` is checked against **closed-form analytical ground truth**, **explicitly labeled 3D phantoms**, and **real 6 µm Bentheimer Sandstone micro-CT scans (`Zenodo 5542624`) under controlled synthetic 2× degradation**.
+This page documents the reproducible verification suite included in `scripts/verification/run_verification_suite.py` and enforced in CI via `tests/test_analytical_verification.py`. Each core function in `openlsrx` is checked against **closed-form analytical ground truth**, **explicitly labeled 3D phantoms**, **real 6 µm Bentheimer Sandstone micro-CT scans (`Zenodo 5542624`) under controlled synthetic 2× degradation**, and **physical independent dual-scan `18 µm → 6 µm` (`3×`) Bentheimer Sandstone micro-CT pairs (`Zenodo 5542624`)**.
 
 To regenerate every figure and the machine-readable report (`docs/assets/verification/verification_summary.json`) locally:
 
 ```bash
-# Fast closed-form analytical pytest checks (~10 s on CPU)
+# Fast closed-form analytical pytest checks (~30 s on CPU)
 pytest tests/test_analytical_verification.py
 
-# Full visual + multi-seed Bentheimer verification suite
+# Full visual + multi-seed Bentheimer (synthetic 2x + physical dual-scan 3x) verification suite
 python scripts/verification/run_verification_suite.py \
   --output-dir docs/assets/verification \
-  --include-bentheimer
+  --include-bentheimer \
+  --include-bentheimer-dualscan
 ```
 
 ---
@@ -22,11 +23,12 @@ python scripts/verification/run_verification_suite.py \
 
 ### 1.1 `zoom_cell_centered` — Eliminating Half-Block Depth Shift
 
-Block-averaging an HR grid of spacing `Δx_HR = 1` by factor `s` places coarse voxel `k` at coordinate `(k + 0.5)*s - 0.5`. Legacy `scipy.ndimage.zoom(..., grid_mode=False)` pins corner voxels (`0` and `N - 1`), introducing a spatially varying depth shift of up to `±(s - 1)/2` HR voxels. `zoom_cell_centered` (`openlsrx.data.transforms`) uses `grid_mode=True` with boundary-preserving `'nearest'` extension so coarse and fine voxel centers remain aligned across `2×`, `4×`, and `8×`.
+Block-averaging an HR grid of spacing `Δx_HR = 1` by factor `s` places coarse voxel `k` at coordinate `(k + 0.5)*s - 0.5`. Legacy `scipy.ndimage.zoom(..., grid_mode=False)` pins corner voxels (`0` and `N - 1`), introducing a spatially varying depth shift of up to `±(s - 1)/2` HR voxels. `zoom_cell_centered` (`openlsrx.data.transforms`) uses `grid_mode=True` with boundary-preserving `'nearest'` extension so coarse and fine voxel centers remain aligned across `2×`, `3×`, `4×`, and `8×`.
 
 | Scale Factor `s` | Analytical Corner-Pinned Limit `(s - 1) / 2` | Legacy `grid_mode=False` Max Shift (HR vox) | `zoom_cell_centered` Max Shift (HR vox) |
 | :---: | :---: | :---: | :---: |
 | `2×` | `0.5000` | `±0.4683` | **`±0.000004`** (`4e-6`) |
+| `3×` | `1.0000` | `±0.9032` | **`< 0.000010`** (`< 1e-5`) |
 | `4×` | `1.5000` | `±1.3095` | **`±0.000008`** (`8e-6`) |
 | `8×` | `3.5000` | `±2.6111` | **`±0.000023`** (`2.3e-5`) |
 
@@ -38,14 +40,14 @@ Block-averaging an HR grid of spacing `Δx_HR = 1` by factor `s` places coarse v
 
 Extracts cell-centered `(LR, HR)` slice pairs across `("yz", "xz", "xy")`. In `2.5D` mode (`context_slices = 2k + 1`), neighboring slices are sampled at native coarse-grid spacing (`±Δz_LR`) rather than cubically blended sub-voxel steps, producing `lr_ctx` of shape `(160, 3, 32, 32)` and `hr_slc` of shape `(160, 64, 64)` on a `(16, 32, 32)` LR / `(32, 64, 64)` HR slab.
 
-### 1.4 `minimum_psf_guard_slices_lr`, `split_volume_spatially`, and `compute_normalization_bounds`
+### 1.4 `minimum_psf_guard_slices_lr`, `split_volume_spatially`, `compute_normalization_bounds`, and `fit_cross_scan_calibration`
 
-Enforces 3D slab isolation by purging `ceil((4 * psf_sigma + 2) / s)` LR slices (`2` LR / `4` HR slices at `psf_sigma=1.0, s=2`) at both `train|val` and `val|test` boundaries (`Train=36`, `Guard=4`, `Val=8`, `Guard=4`, `Test=12` HR slices), and fits percentile normalization bounds (`[0.1360, 0.8566]`) strictly on `train`.
+Enforces 3D slab isolation by purging `ceil((4 * psf_sigma + 2) / s)` LR slices (`2` LR / `4` HR slices at `psf_sigma=1.0, s=2`) at both `train|val` and `val|test` boundaries (`Train=36`, `Guard=4`, `Val=8`, `Guard=4`, `Test=12` HR slices), fits percentile normalization bounds (`[0.1360, 0.8566]`) strictly on `train`, and optionally fits an `affine` or monotonic `quantile` cross-scan radiometric map (`fit_cross_scan_calibration`) strictly on `train` so mutating held-out `test` voxels changes fitted knot values by `0.0`.
 
 ### 1.5 `register_multires_pair_3d` and Provenance-Guarded Loaders
 
 - **Half-LR-voxel 3D shift recovery:** Injecting a `(+3, -2, +4)` HR voxel translation (`+1.5, -1.0, +2.0` LR voxels at `2×`) into a `Zn-13X` phantom pair, `register_multires_pair_3d` recovers the exact `(-3, +2, -4)` HR shift and raises `triplanar_ssim` from `0.2176` to **`0.7330`**.
-- **Strict offline provenance:** Calling `prepare_zn13x_benchmark(..., prefer_offline=True)` sets `source_kind = "offline_calibrated_zn13x_phantom"`, `is_experimental_xct = False`, and `low_zenodo_doi = None` / `high_zenodo_doi = None`.
+- **Strict offline provenance:** Calling `prepare_zn13x_benchmark(..., prefer_offline=True)` or `prepare_bentheimer_dualscan_benchmark(..., prefer_offline=True)` sets `source_kind = "offline_calibrated_*"`, `is_experimental_xct = False`, and null Zenodo DOIs/URLs.
 
 ---
 
@@ -97,9 +99,9 @@ All three datasets in Figure 3 are **synthetic or calibrated 3D phantoms** (`8�
 
 ![Real 6 um Bentheimer Micro-CT with Synthetic 2x Degradation](assets/verification/vr_05_bentheimer_synth_deg.png)
 
-!!! important "Provenance & Scope of the Bentheimer Verification Check"
+!!! important "Provenance & Scope of the Synthetic-Degradation Bentheimer Check"
     - **Real HR scan, synthetic `2×` LR degradation:** The `6 µm` HR volumes (`Core1_Subvol1_LR.tif` and `Core2_Subvol2_LR.tif`, `Zenodo 5542624`, Jackson et al., 2021 — named `_LR` in their `6 µm → 2 µm` study) are real experimental X-ray micro-CT scans, whereas the `12 µm` LR inputs here are generated via `degrade_xct_volume` (`degrade_from_hr=True`, `psf_sigma=1.0`, `noise_std=0.02`). A `(0, 0, 0)` HR-voxel shift on this pair therefore verifies **zero algorithmic coordinate drift** through synthetic degradation and cell-centered fusion, rather than physical registration of two independent scans.
-    - **Sample size & convergence:** The table below reports `mean ± SD` across `3` seeds (`42, 43, 44`) on two distinct `96 × 80 × 80` Bentheimer cores (`22 × 80 × 80` held-out test slabs) after a compact `8`-epoch CPU training budget (`~35 s/run`). Full scientific benchmark claims require full GPU training (`100+` epochs), thicker test slabs, and true dual-scan rocks or electrodes.
+    - **Sample size & convergence:** The table below reports `mean ± SD` across `3` seeds (`42, 43, 44`) on two distinct `96 × 80 × 80` Bentheimer cores (`22 × 80 × 80` held-out test slabs) after a compact `8`-epoch CPU training budget (`~35 s/run`).
 
 | Core (`Zenodo 5542624`, Real `6 µm` HR + Synthetic `2×` LR, `n = 3` seeds) | Tricubic PSNR (dB) | `SwinIR-3Axis` PSNR (dB) | Tricubic `D_eff` Rel. Err (%) | Single-Axis `yz` `D_eff` Rel. Err (%) | `3-Axis` `D_eff` Rel. Err (%) | Voxel `σ_ortho` vs Error Spearman `r_s` | `±1 σ_ortho` Envelope Coverage |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -107,6 +109,24 @@ All three datasets in Figure 3 are **synthetic or calibrated 3D phantoms** (`8�
 | `bentheimer_laminated` (Core 2 Subvol 2, `D_eff = 0.0765`) | `25.00 ± 0.03` | `27.05 ± 0.18` | `6.51 ± 0.14%` | `2.59 ± 1.36%` | **`2.09 ± 1.30%`** | `+0.232 ± 0.006` (weak positive) | `3 / 3` |
 
 Across all `6/6` core-seed runs, `D_eff` relative error decreases monotonically from `Tricubic-3D` → `Single-Axis SwinIR (yz)` → `3-Axis SwinIR-2.5D`, even though `3-Axis` PSNR is `0.1–0.3 dB` lower than single-axis `yz`. Inter-view standard deviation `σ_ortho` (`n = 3` orthogonal sweeps) exhibits a **weak but consistently positive** Spearman rank correlation (`r_s = 0.23–0.27`) with voxelwise error `|SR - HR|`, and its `±1 σ_ortho` threshold shift brackets true `D_eff` in `3/6` short-epoch runs (`0/3` on Core 1 where `8`-epoch bias exceeds `1 σ_ortho`, `3/3` on Core 2, and `1/1` at `12` epochs on a `128 × 96 × 96` Core 1 slab where `D_eff` error drops from `8.92%` Nearest / `4.97%` Tricubic to `1.64%`).
+
+### 3.3 Physical Independent Dual-Scan `18 µm → 6 µm` (`3×`) Bentheimer Micro-CT (`Zenodo 5542624`)
+
+![Physical Independent Dual-Scan Bentheimer Micro-CT (Zenodo 5542624, True 18 um -> 6 um, 3x)](assets/verification/vr_06_bentheimer_dualscan_3x.png)
+
+To verify `openlsrx` on **two physically independent X-ray micro-CT acquisitions** at an odd integer magnification (`3×`, corresponding to a `27×` voxel-volume upsampling ratio), `prepare_bentheimer_dualscan_benchmark` loads the MD5-verified 16-bit little-endian `.raw` scan pairs from `Zenodo 5542624` (`Core1_Subvol1` and `Core2_Subvol2`, `75³` at `18 µm` paired with `225³` at `6 µm`; `source_kind="downloaded_zenodo_5542624_dualscan"`, `is_experimental_xct=True`).
+
+- **3D registration diagnostics:** On coaxial `(36, 32, 32)` LR → `(108, 96, 96)` HR subvolumes, `register_multires_pair_3d(..., scale_factor=3)` confirms hardware alignment within `≤ 1` HR voxel (`hr_shift_zyx = [-1, 0, 0]`, `hr_triplanar_ssim = 0.6501` on Core 1; `hr_shift_zyx = [0, 0, 0]`, `hr_triplanar_ssim = 0.6124` on Core 2; `registration_quality_ok = True`).
+- **Split-isolated cross-scan radiometric calibration:** Independent polychromatic full-core (`18 µm`) vs. interior-ROI (`6 µm`) reconstructions exhibit non-linear beam-hardening greyscale shifts. Fitting `cross_scan_calibration="quantile"` strictly on the `train` slab (`20` LR / `60` HR slices) lifts held-out `test` (`27 × 96 × 96` HR) `Tricubic-3D` PSNR by **`+1.46 dB`** (`14.90 → 16.36 dB`, 3D SSIM `0.3547 → 0.4502`) on Core 1 and **`+0.70 dB`** (`16.52 → 17.22 dB`, 3D SSIM `0.3758 → 0.4452`) on Core 2 with zero `val`/`test` leakage.
+- **Native `PixelShuffle(3)` `SwinIR-2.5D` (`10` CPU epochs, `n = 3` seeds):** Training `SwinIR-2.5D` (`ArbitraryScaleUpsample(scale_factor=3)` using native `nn.PixelShuffle(3)`) further improves unseen `test` PSNR, 3D SSIM, and pore Dice over calibrated `Tricubic-3D` across all `6/6` runs (`16.55 ± 0.03 dB` on Core 1; `17.50 ± 0.02 dB` and `0.0019 ± 0.0021` porosity error on Core 2), while orthogonal view disagreement `σ_ortho` correlates positively with true voxel error `|SR - HR|` (**`r_s = +0.396 ± 0.008`** on Core 1, **`+0.288 ± 0.009`** on Core 2).
+
+| Core (`Zenodo 5542624`, True `18 µm → 6 µm` `3×` Dual-Scan, `n = 3` seeds, `10` CPU epochs) | Raw Tricubic PSNR (dB) | Calibrated Tricubic PSNR (dB) | `SwinIR-3Axis` PSNR (dB) | Cal. Tricubic → `3-Axis` 3D SSIM | Cal. Tricubic → `3-Axis` Pore Dice | Cal. Tricubic → `3-Axis` `D_eff` Rel. Err (%) | `σ_ortho` vs Error `r_s` |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| `bentheimer_dualscan_core1` (`D_eff = 0.0392`, `27×96×96` HR) | `14.90 ± 0.00` | `16.36 ± 0.00` | **`16.55 ± 0.03`** | `0.4502` → **`0.4640 ± 0.0022`** | `0.7658` → **`0.7743 ± 0.0025`** | `70.19%` → `67.67 ± 1.67%` (`yz`: `63.92 ± 6.54%`) | **`+0.396 ± 0.008`** |
+| `bentheimer_dualscan_core2` (`D_eff = 0.0638`, `27×96×96` HR) | `16.52 ± 0.00` | `17.22 ± 0.00` | **`17.50 ± 0.02`** | `0.4452` → **`0.4628 ± 0.0010`** | `0.7947` → **`0.7997 ± 0.0002`** | **`6.59%`** → `16.00 ± 1.00%` (`yz`: `15.68 ± 1.06%`) | **`+0.288 ± 0.009`** |
+
+!!! warning "Restrained Interpretation of Short-CPU-Epoch `3×` Dual-Scan Transport"
+    At `18 µm → 6 µm` (`27×` voxel-volume upsampling) on thin `27 × 96 × 96` (`162 µm` thick) slabs under a `10`-epoch CPU verification budget, sub-`18 µm` pore throats near percolation on Core 1 remain heavily blurred (`63.9–67.7%` `D_eff` error vs. `70.2%` Tricubic), while on Core 2 smooth calibrated `Tricubic-3D` happens to cancel partial-volume throat dilation/erosion at the HR Otsu threshold (`6.59%` `D_eff` error vs. `16.00%` for `10`-epoch `SwinIR-3Axis`, even though `SwinIR-3Axis` improves PSNR, 3D SSIM, pore Dice, and cuts bulk porosity error `8.6×` from `0.0163` to `0.0019`). This contrast illustrates why `OpenLSR-X` evaluates 3D Fickian diffusivity directly rather than treating PSNR, SSIM, or bulk porosity as surrogates for pore-throat transport; full GPU training on full `75³ → 225³` dual-scan volumes is configured in `configs/labxct/bs_dualscan_3x_swinir_25d.yaml`.
 
 ---
 

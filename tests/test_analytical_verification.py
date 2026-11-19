@@ -11,17 +11,27 @@ import math
 from pathlib import Path
 
 import numpy as np
+import pytest
+import tifffile
 import torch
 from scipy.ndimage import gaussian_filter
 from scipy.ndimage import zoom as nd_zoom
 
+from openlsrx.cli import main as cli_main
 from openlsrx.data import (
+    AVAILABLE_DUALSCAN_DATASETS,
+    PairedVolumeDataModule,
+    apply_cross_scan_calibration,
+    degrade_xct_volume,
     fetch_or_generate_rock_sample,
+    fit_cross_scan_calibration,
+    prepare_bentheimer_dualscan_benchmark,
     prepare_zn13x_benchmark,
     register_multires_pair_3d,
     synthesize_zn13x_phantom_pair,
     zoom_cell_centered,
 )
+from openlsrx.inference import super_resolve_volume_orthogonal
 from openlsrx.losses import (
     AttenuationConservationLoss,
     SoftCLDiceLoss,
@@ -34,6 +44,8 @@ from openlsrx.metrics import (
     solve_steady_state_diffusion_axis,
     two_point_correlation_radial,
 )
+from openlsrx.models import RRDBGenerator, SR3DResNet, SwinIRGenerator
+from openlsrx.models.rrdb import ArbitraryScaleUpsample
 
 
 def test_zoom_cell_centered_eliminates_depth_shift_2x_4x_8x() -> None:
@@ -259,3 +271,225 @@ def test_bimodal_capillary_tube_drainage_steps() -> None:
     assert np.any(mid_mask)
     assert np.all((snw[mid_mask] > 0.75) & (snw[mid_mask] < 0.90))
     assert float(snw[-1]) > 0.95
+
+
+def test_zoom_cell_centered_eliminates_depth_shift_3x() -> None:
+    """Cell-centered zoom must eliminate coordinate shift at odd 3x scale (18 um -> 6 um)."""
+    n_hr = 63
+    zz, _, _ = np.meshgrid(np.arange(n_hr), np.arange(n_hr), np.arange(n_hr), indexing="ij")
+    ramp_hr = zz.astype(np.float32) / float(n_hr - 1)
+    lr_blk = ramp_hr.reshape(21, 3, 21, 3, 21, 3).mean(axis=(1, 3, 5))
+
+    up_legacy = nd_zoom(lr_blk, zoom=3, order=1, grid_mode=False)
+    up_centered = zoom_cell_centered(lr_blk, zoom_factors=3, order=1)
+
+    interior = slice(3, n_hr - 3)
+    leg_shift = float(np.max(np.abs(up_legacy[interior] - ramp_hr[interior])) * (n_hr - 1))
+    cen_shift = float(np.max(np.abs(up_centered[interior] - ramp_hr[interior])) * (n_hr - 1))
+
+    assert leg_shift > 0.80
+    assert cen_shift < 1e-4
+
+
+def test_native_3x_subpixel_swinir_rrdb_sr3d_and_orthogonal_fusion() -> None:
+    """3x upsampling must use native PixelShuffle(3) without residual interpolation and fuse non-cubic 3D stacks."""
+    up3 = ArbitraryScaleUpsample(channels=16, scale_factor=3)
+    up6 = ArbitraryScaleUpsample(channels=16, scale_factor=6)
+    up25 = ArbitraryScaleUpsample(channels=16, scale_factor=2.5)
+    assert up3.pow2_scale == 3 and up3.has_residual is False
+    assert up6.pow2_scale == 6 and up6.has_residual is False
+    assert up25.pow2_scale == 2 and up25.has_residual is True
+
+    x2d = torch.rand(2, 3, 12, 10)
+    rrdb3 = RRDBGenerator(
+        in_channels=3,
+        out_channels=16,
+        out_img_channels=1,
+        growth_channels=8,
+        num_blocks=2,
+        super_res_factor=3,
+    ).eval()
+    swin3 = SwinIRGenerator(
+        in_channels=3,
+        out_channels=16,
+        out_img_channels=1,
+        num_blocks=2,
+        num_heads=4,
+        window_size=4,
+        super_res_factor=3,
+    ).eval()
+    with torch.no_grad():
+        assert tuple(rrdb3(x2d).shape) == (2, 1, 36, 30)
+        assert tuple(swin3(x2d).shape) == (2, 1, 36, 30)
+
+    lr_noncubic = np.random.default_rng(5).uniform(0.1, 0.9, size=(8, 12, 10)).astype(np.float32)
+    ortho = super_resolve_volume_orthogonal(
+        swin3,
+        lr_noncubic,
+        scale_factor=3,
+        fusion="confidence_fourier",
+        context_slices=3,
+        return_uncertainty=True,
+    )
+    assert ortho["fused"].shape == (24, 36, 30)
+    assert ortho["uncertainty_std"].shape == (24, 36, 30)
+
+    sr3d = SR3DResNet(out_channels=12, num_blocks=2, super_res_factor=3).eval()
+    with torch.no_grad():
+        out_3d = sr3d.gen(torch.rand(1, 1, 8, 8, 8))
+    assert tuple(out_3d.shape) == (1, 1, 24, 24, 24)
+
+
+def test_split_isolated_cross_scan_calibration_affine_and_quantile(tmp_path: Path) -> None:
+    """Cross-scan calibration must invert affine/gamma radiometric shifts and never leak test slabs."""
+    rng = np.random.default_rng(99)
+    hr = np.clip(
+        gaussian_filter(rng.uniform(0.05, 0.95, size=(54, 36, 36)).astype(np.float32), sigma=1.2),
+        0.05,
+        0.95,
+    )
+    lr_clean = degrade_xct_volume(hr, scale_factor=3, psf_sigma=1.0, noise_std=0.0, seed=99)
+
+    # 1. Exact affine recovery
+    lr_aff = np.clip(0.62 * lr_clean + 0.19, 0.0, 1.0).astype(np.float32)
+    p_aff = fit_cross_scan_calibration(
+        lr_aff[:12], hr[:36], scale_factor=3, mode="affine", psf_sigma=1.0
+    )
+    rec_aff = apply_cross_scan_calibration(lr_aff[12:], p_aff)
+    assert float(np.mean(np.abs(rec_aff - lr_clean[12:]))) < 1e-3
+
+    # 2. Monotonic polychromatic gamma recovery on unseen test slab
+    lr_gam = np.clip(0.08 + 0.82 * np.power(lr_clean, 1.65), 0.0, 1.0).astype(np.float32)
+    p_aff_g = fit_cross_scan_calibration(
+        lr_gam[:12], hr[:36], scale_factor=3, mode="affine", psf_sigma=1.0
+    )
+    p_qnt_g = fit_cross_scan_calibration(
+        lr_gam[:12], hr[:36], scale_factor=3, mode="quantile", psf_sigma=1.0
+    )
+    err_aff_g = float(
+        np.mean(np.abs(apply_cross_scan_calibration(lr_gam[12:], p_aff_g) - lr_clean[12:]))
+    )
+    err_qnt_g = float(
+        np.mean(np.abs(apply_cross_scan_calibration(lr_gam[12:], p_qnt_g) - lr_clean[12:]))
+    )
+    assert err_qnt_g < 0.01
+    assert err_qnt_g < err_aff_g
+
+    # 3. Zero test-slab leakage in PairedVolumeDataModule
+    lr_p1 = tmp_path / "lr1.tif"
+    lr_p2 = tmp_path / "lr2.tif"
+    hr_p = tmp_path / "hr.tif"
+    tifffile.imwrite(lr_p1, lr_gam)
+    lr_corrupted_test = lr_gam.copy()
+    lr_corrupted_test[-4:] = 0.99  # Mutate only the held-out test slab
+    tifffile.imwrite(lr_p2, lr_corrupted_test)
+    tifffile.imwrite(hr_p, hr)
+
+    dm1 = PairedVolumeDataModule(
+        low_path=str(lr_p1),
+        high_path=str(hr_p),
+        degrade_from_hr=False,
+        scale_factor=3,
+        norm_mode="percentile",
+        cross_scan_calibration="quantile",
+        calibration_psf_sigma=1.0,
+        train_frac=0.60,
+        val_frac=0.15,
+        guard_slices_lr=1,
+    )
+    dm2 = PairedVolumeDataModule(
+        low_path=str(lr_p2),
+        high_path=str(hr_p),
+        degrade_from_hr=False,
+        scale_factor=3,
+        norm_mode="percentile",
+        cross_scan_calibration="quantile",
+        calibration_psf_sigma=1.0,
+        train_frac=0.60,
+        val_frac=0.15,
+        guard_slices_lr=1,
+    )
+    dm1.setup("fit")
+    dm2.setup("fit")
+    assert dm1.norm_bounds_lr == dm2.norm_bounds_lr
+    assert dm1.cross_scan_calibration_params is not None
+    assert dm2.cross_scan_calibration_params is not None
+    assert np.allclose(
+        np.asarray(dm1.cross_scan_calibration_params["xp"]),
+        np.asarray(dm2.cross_scan_calibration_params["xp"]),
+        atol=0.0,
+    )
+    assert np.allclose(
+        np.asarray(dm1.cross_scan_calibration_params["fp"]),
+        np.asarray(dm2.cross_scan_calibration_params["fp"]),
+        atol=0.0,
+    )
+
+
+def test_bentheimer_dualscan_offline_and_local_raw_provenance(tmp_path: Path) -> None:
+    """Dual-scan Bentheimer loader must enforce honest offline phantom provenance and coaxial local .raw loading."""
+    lr_off, hr_off, man_off = prepare_bentheimer_dualscan_benchmark(
+        dataset_name="bentheimer_dualscan_core1",
+        dest_dir=tmp_path / "offline_ds",
+        lr_shape=(12, 12, 12),
+        prefer_offline=True,
+        allow_offline_fallback=True,
+        seed=42,
+    )
+    assert lr_off.is_file() and hr_off.is_file()
+    assert man_off["source_kind"] == "offline_calibrated_dualscan_phantom"
+    assert man_off["is_experimental_xct"] is False
+    assert man_off["zenodo_doi"] is None
+    assert man_off["low_source_url"] is None
+    assert man_off["high_source_url"] is None
+    assert man_off["lr_shape"] == [12, 12, 12]
+    assert man_off["hr_shape"] == [36, 36, 36]
+
+    # Local 16-bit little-endian .raw roundtrip with coaxial odd-margin crop (75 - 16 = 59)
+    spec = AVAILABLE_DUALSCAN_DATASETS["bentheimer_dualscan_core1"]
+    raw_dir = tmp_path / "raw_u16"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(12)
+    hr_u16 = np.clip(
+        gaussian_filter(rng.uniform(6000, 14000, size=spec.high_raw_shape), sigma=1.5),
+        4000,
+        16000,
+    ).astype("<u2")
+    lr_u16 = hr_u16.reshape(75, 3, 75, 3, 75, 3).mean(axis=(1, 3, 5)).astype("<u2")
+    lr_u16.tofile(raw_dir / spec.low_filename)
+    hr_u16.tofile(raw_dir / spec.high_filename)
+
+    lr_real, hr_real, man_real = prepare_bentheimer_dualscan_benchmark(
+        dataset_name="bentheimer_dualscan_core1",
+        dest_dir=tmp_path / "local_ds",
+        lr_shape=(18, 16, 16),
+        raw_dir=raw_dir,
+        verify_checksum=False,
+        allow_offline_fallback=False,
+    )
+    assert lr_real.is_file() and hr_real.is_file()
+    assert man_real["source_kind"] == "local_zenodo_5542624_dualscan_raw"
+    assert man_real["is_experimental_xct"] is True
+    assert man_real["zenodo_doi"] == "10.5281/zenodo.5542624"
+    assert man_real["lr_shape"] == [18, 16, 16]
+    assert man_real["hr_shape"] == [54, 48, 48]
+    reg = man_real["registration"]
+    assert isinstance(reg, dict)
+    assert list(reg["hr_shift_zyx"]) == [0, 0, 0]
+
+    with pytest.raises(SystemExit) as exc_cli:
+        cli_main(
+            [
+                "download-benchmarks",
+                "--datasets",
+                "bentheimer_dualscan_core1",
+                "--dest",
+                str(tmp_path / "cli_ds"),
+                "--size",
+                "15",
+                "--offline",
+            ]
+        )
+    assert exc_cli.value.code == 0
+    assert (tmp_path / "cli_ds" / "bentheimer_dualscan_core1_lr.tif").is_file()
+    assert (tmp_path / "cli_ds" / "bentheimer_dualscan_core1_hr.tif").is_file()

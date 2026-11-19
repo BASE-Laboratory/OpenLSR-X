@@ -445,5 +445,422 @@
         "bracketed_count": "3/3"
       }
     }
-  }
+  },
+  "bentheimer_dualscan_3x_multiseed": {
+    "bentheimer_dualscan_core1": {
+      "source_kind": "downloaded_zenodo_5542624_dualscan",
+      "is_experimental_xct": true,
+      "zenodo_doi": "10.5281/zenodo.5542624",
+      "pairing_mode": "physical_independent_dual_scan_18um_to_6um_3x",
+      "cross_scan_calibration": "train_only_monotonic_quantile_psf1.0",
+      "scale_factor": 3,
+      "low_resolution_um": 18.0,
+      "high_resolution_um": 6.0,
+      "lr_subvolume_shape": [
+        36,
+        32,
+        32
+      ],
+      "hr_subvolume_shape": [
+        108,
+        96,
+        96
+      ],
+      "test_slab_shape": [
+        27,
+        96,
+        96
+      ],
+      "epochs_cpu": 10,
+      "registration": {
+        "coarse_shift_zyx": [
+          -0.3333,
+          0.0,
+          0.0
+        ],
+        "hr_shift_zyx": [
+          -1,
+          0,
+          0
+        ],
+        "initial_triplanar_ssim": 0.6468235210983669,
+        "coarse_mid_slice_ssim": 0.616614604798647,
+        "hr_triplanar_ssim": 0.6501367210445944,
+        "registration_quality_ok": true,
+        "aligned_lr_shape": [
+          35,
+          32,
+          32
+        ],
+        "aligned_hr_shape": [
+          105,
+          96,
+          96
+        ],
+        "scale_factor": 3
+      },
+      "n_seeds": 3,
+      "seeds": [
+        {
+          "seed": 42,
+          "raw_tricubic_psnr": 14.9,
+          "tricubic_psnr": 16.36,
+          "yz_psnr": 16.51,
+          "ortho_psnr": 16.53,
+          "raw_tricubic_ssim_3d": 0.3547,
+          "tricubic_ssim_3d": 0.4502,
+          "yz_ssim_3d": 0.4637,
+          "ortho_ssim_3d": 0.4641,
+          "raw_tricubic_pore_dice": 0.7746,
+          "tricubic_pore_dice": 0.7658,
+          "yz_pore_dice": 0.7729,
+          "ortho_pore_dice": 0.7731,
+          "raw_tricubic_porosity_abs_err": 0.0166,
+          "tricubic_porosity_abs_err": 0.0298,
+          "ortho_porosity_abs_err": 0.0268,
+          "true_d_eff": 0.03915,
+          "tricubic_d_eff_rel_err_pct": 70.19,
+          "yz_d_eff_rel_err_pct": 67.2,
+          "ortho_d_eff_rel_err_pct": 67.77,
+          "spearman_r": 0.3925,
+          "bracketed_1sigma": false
+        },
+        {
+          "seed": 43,
+          "raw_tricubic_psnr": 14.9,
+          "tricubic_psnr": 16.36,
+          "yz_psnr": 16.58,
+          "ortho_psnr": 16.58,
+          "raw_tricubic_ssim_3d": 0.3547,
+          "tricubic_ssim_3d": 0.4502,
+          "yz_ssim_3d": 0.4675,
+          "ortho_ssim_3d": 0.4662,
+          "raw_tricubic_pore_dice": 0.7746,
+          "tricubic_pore_dice": 0.7658,
+          "yz_pore_dice": 0.777,
+          "ortho_pore_dice": 0.7772,
+          "raw_tricubic_porosity_abs_err": 0.0166,
+          "tricubic_porosity_abs_err": 0.0298,
+          "ortho_porosity_abs_err": 0.0242,
+          "true_d_eff": 0.03915,
+          "tricubic_d_eff_rel_err_pct": 70.19,
+          "yz_d_eff_rel_err_pct": 56.38,
+          "ortho_d_eff_rel_err_pct": 65.95,
+          "spearman_r": 0.3903,
+          "bracketed_1sigma": false
+        },
+        {
+          "seed": 44,
+          "raw_tricubic_psnr": 14.9,
+          "tricubic_psnr": 16.36,
+          "yz_psnr": 16.53,
+          "ortho_psnr": 16.54,
+          "raw_tricubic_ssim_3d": 0.3547,
+          "tricubic_ssim_3d": 0.4502,
+          "yz_ssim_3d": 0.462,
+          "ortho_ssim_3d": 0.4618,
+          "raw_tricubic_pore_dice": 0.7746,
+          "tricubic_pore_dice": 0.7658,
+          "yz_pore_dice": 0.7727,
+          "ortho_pore_dice": 0.7727,
+          "raw_tricubic_porosity_abs_err": 0.0166,
+          "tricubic_porosity_abs_err": 0.0298,
+          "ortho_porosity_abs_err": 0.0304,
+          "true_d_eff": 0.03915,
+          "tricubic_d_eff_rel_err_pct": 70.19,
+          "yz_d_eff_rel_err_pct": 68.17,
+          "ortho_d_eff_rel_err_pct": 69.29,
+          "spearman_r": 0.4055,
+          "bracketed_1sigma": false
+        }
+      ],
+      "summary": {
+        "raw_tricubic_psnr": {
+          "mean": 14.9,
+          "std": 0.0
+        },
+        "tricubic_psnr": {
+          "mean": 16.36,
+          "std": 0.0
+        },
+        "yz_psnr": {
+          "mean": 16.54,
+          "std": 0.04
+        },
+        "ortho_psnr": {
+          "mean": 16.55,
+          "std": 0.03
+        },
+        "raw_tricubic_ssim_3d": {
+          "mean": 0.3547,
+          "std": 0.0
+        },
+        "tricubic_ssim_3d": {
+          "mean": 0.4502,
+          "std": 0.0
+        },
+        "yz_ssim_3d": {
+          "mean": 0.4644,
+          "std": 0.0028
+        },
+        "ortho_ssim_3d": {
+          "mean": 0.464,
+          "std": 0.0022
+        },
+        "raw_tricubic_pore_dice": {
+          "mean": 0.7746,
+          "std": 0.0
+        },
+        "tricubic_pore_dice": {
+          "mean": 0.7658,
+          "std": 0.0
+        },
+        "yz_pore_dice": {
+          "mean": 0.7742,
+          "std": 0.0024
+        },
+        "ortho_pore_dice": {
+          "mean": 0.7743,
+          "std": 0.0025
+        },
+        "raw_tricubic_porosity_abs_err": {
+          "mean": 0.0166,
+          "std": 0.0
+        },
+        "tricubic_porosity_abs_err": {
+          "mean": 0.0298,
+          "std": 0.0
+        },
+        "ortho_porosity_abs_err": {
+          "mean": 0.0271,
+          "std": 0.0031
+        },
+        "tricubic_d_eff_rel_err_pct": {
+          "mean": 70.19,
+          "std": 0.0
+        },
+        "yz_d_eff_rel_err_pct": {
+          "mean": 63.92,
+          "std": 6.54
+        },
+        "ortho_d_eff_rel_err_pct": {
+          "mean": 67.67,
+          "std": 1.67
+        },
+        "spearman_r": {
+          "mean": 0.396,
+          "std": 0.008
+        },
+        "bracketed_count": "0/3"
+      }
+    },
+    "bentheimer_dualscan_core2": {
+      "source_kind": "downloaded_zenodo_5542624_dualscan",
+      "is_experimental_xct": true,
+      "zenodo_doi": "10.5281/zenodo.5542624",
+      "pairing_mode": "physical_independent_dual_scan_18um_to_6um_3x",
+      "cross_scan_calibration": "train_only_monotonic_quantile_psf1.0",
+      "scale_factor": 3,
+      "low_resolution_um": 18.0,
+      "high_resolution_um": 6.0,
+      "lr_subvolume_shape": [
+        36,
+        32,
+        32
+      ],
+      "hr_subvolume_shape": [
+        108,
+        96,
+        96
+      ],
+      "test_slab_shape": [
+        27,
+        96,
+        96
+      ],
+      "epochs_cpu": 10,
+      "registration": {
+        "coarse_shift_zyx": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "hr_shift_zyx": [
+          0,
+          0,
+          0
+        ],
+        "initial_triplanar_ssim": 0.612442244229884,
+        "coarse_mid_slice_ssim": 0.5363575797192215,
+        "hr_triplanar_ssim": 0.612442244229884,
+        "registration_quality_ok": true,
+        "aligned_lr_shape": [
+          36,
+          32,
+          32
+        ],
+        "aligned_hr_shape": [
+          108,
+          96,
+          96
+        ],
+        "scale_factor": 3
+      },
+      "n_seeds": 3,
+      "seeds": [
+        {
+          "seed": 42,
+          "raw_tricubic_psnr": 16.52,
+          "tricubic_psnr": 17.22,
+          "yz_psnr": 17.49,
+          "ortho_psnr": 17.5,
+          "raw_tricubic_ssim_3d": 0.3758,
+          "tricubic_ssim_3d": 0.4452,
+          "yz_ssim_3d": 0.4639,
+          "ortho_ssim_3d": 0.4627,
+          "raw_tricubic_pore_dice": 0.7962,
+          "tricubic_pore_dice": 0.7947,
+          "yz_pore_dice": 0.7987,
+          "ortho_pore_dice": 0.7995,
+          "raw_tricubic_porosity_abs_err": 0.0051,
+          "tricubic_porosity_abs_err": 0.0163,
+          "ortho_porosity_abs_err": 0.0012,
+          "true_d_eff": 0.06384,
+          "tricubic_d_eff_rel_err_pct": 6.59,
+          "yz_d_eff_rel_err_pct": 15.6,
+          "ortho_d_eff_rel_err_pct": 15.73,
+          "spearman_r": 0.2782,
+          "bracketed_1sigma": false
+        },
+        {
+          "seed": 43,
+          "raw_tricubic_psnr": 16.52,
+          "tricubic_psnr": 17.22,
+          "yz_psnr": 17.45,
+          "ortho_psnr": 17.49,
+          "raw_tricubic_ssim_3d": 0.3758,
+          "tricubic_ssim_3d": 0.4452,
+          "yz_ssim_3d": 0.4629,
+          "ortho_ssim_3d": 0.4639,
+          "raw_tricubic_pore_dice": 0.7962,
+          "tricubic_pore_dice": 0.7947,
+          "yz_pore_dice": 0.7979,
+          "ortho_pore_dice": 0.7999,
+          "raw_tricubic_porosity_abs_err": 0.0051,
+          "tricubic_porosity_abs_err": 0.0163,
+          "ortho_porosity_abs_err": 0.0002,
+          "true_d_eff": 0.06384,
+          "tricubic_d_eff_rel_err_pct": 6.59,
+          "yz_d_eff_rel_err_pct": 14.67,
+          "ortho_d_eff_rel_err_pct": 15.16,
+          "spearman_r": 0.2955,
+          "bracketed_1sigma": false
+        },
+        {
+          "seed": 44,
+          "raw_tricubic_psnr": 16.52,
+          "tricubic_psnr": 17.22,
+          "yz_psnr": 17.51,
+          "ortho_psnr": 17.52,
+          "raw_tricubic_ssim_3d": 0.3758,
+          "tricubic_ssim_3d": 0.4452,
+          "yz_ssim_3d": 0.462,
+          "ortho_ssim_3d": 0.4619,
+          "raw_tricubic_pore_dice": 0.7962,
+          "tricubic_pore_dice": 0.7947,
+          "yz_pore_dice": 0.7996,
+          "ortho_pore_dice": 0.7998,
+          "raw_tricubic_porosity_abs_err": 0.0051,
+          "tricubic_porosity_abs_err": 0.0163,
+          "ortho_porosity_abs_err": 0.0043,
+          "true_d_eff": 0.06384,
+          "tricubic_d_eff_rel_err_pct": 6.59,
+          "yz_d_eff_rel_err_pct": 16.78,
+          "ortho_d_eff_rel_err_pct": 17.1,
+          "spearman_r": 0.2906,
+          "bracketed_1sigma": false
+        }
+      ],
+      "summary": {
+        "raw_tricubic_psnr": {
+          "mean": 16.52,
+          "std": 0.0
+        },
+        "tricubic_psnr": {
+          "mean": 17.22,
+          "std": 0.0
+        },
+        "yz_psnr": {
+          "mean": 17.48,
+          "std": 0.03
+        },
+        "ortho_psnr": {
+          "mean": 17.5,
+          "std": 0.02
+        },
+        "raw_tricubic_ssim_3d": {
+          "mean": 0.3758,
+          "std": 0.0
+        },
+        "tricubic_ssim_3d": {
+          "mean": 0.4452,
+          "std": 0.0
+        },
+        "yz_ssim_3d": {
+          "mean": 0.4629,
+          "std": 0.001
+        },
+        "ortho_ssim_3d": {
+          "mean": 0.4628,
+          "std": 0.001
+        },
+        "raw_tricubic_pore_dice": {
+          "mean": 0.7962,
+          "std": 0.0
+        },
+        "tricubic_pore_dice": {
+          "mean": 0.7947,
+          "std": 0.0
+        },
+        "yz_pore_dice": {
+          "mean": 0.7987,
+          "std": 0.0009
+        },
+        "ortho_pore_dice": {
+          "mean": 0.7997,
+          "std": 0.0002
+        },
+        "raw_tricubic_porosity_abs_err": {
+          "mean": 0.0051,
+          "std": 0.0
+        },
+        "tricubic_porosity_abs_err": {
+          "mean": 0.0163,
+          "std": 0.0
+        },
+        "ortho_porosity_abs_err": {
+          "mean": 0.0019,
+          "std": 0.0021
+        },
+        "tricubic_d_eff_rel_err_pct": {
+          "mean": 6.59,
+          "std": 0.0
+        },
+        "yz_d_eff_rel_err_pct": {
+          "mean": 15.68,
+          "std": 1.06
+        },
+        "ortho_d_eff_rel_err_pct": {
+          "mean": 16.0,
+          "std": 1.0
+        },
+        "spearman_r": {
+          "mean": 0.288,
+          "std": 0.009
+        },
+        "bracketed_count": "0/3"
+      }
+    }
+  },
+  "bentheimer_dualscan_3x_elapsed_seconds": 443.4
 }

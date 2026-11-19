@@ -6,7 +6,6 @@ throughput, and petrophysical fidelity against 2D + 3-Axis Orthogonal Fourier Fu
 
 from __future__ import annotations
 
-import math
 from typing import Literal
 
 import numpy as np
@@ -79,9 +78,20 @@ class Generator3D(nn.Module):
         super_res_factor: int = 2,
     ) -> None:
         super().__init__()
-        if super_res_factor < 1 or (super_res_factor & (super_res_factor - 1)) != 0:
+        if super_res_factor < 1:
+            raise ValueError(f"Generator3D super_res_factor must be >= 1, got {super_res_factor}.")
+        rem = int(super_res_factor)
+        up_steps: list[int] = []
+        while rem % 2 == 0:
+            up_steps.append(2)
+            rem //= 2
+        while rem % 3 == 0:
+            up_steps.append(3)
+            rem //= 3
+        if rem != 1:
             raise ValueError(
-                f"Generator3D super_res_factor must be a power of 2, got {super_res_factor}."
+                f"Generator3D super_res_factor must factor into 2s and 3s (1, 2, 3, 4, 6, 8, ...), "
+                f"got {super_res_factor}."
             )
         self.in_channels = int(in_channels)
         self.out_channels = int(out_channels)
@@ -98,12 +108,11 @@ class Generator3D(nn.Module):
             self.out_channels, self.out_channels, kernel_size=3, padding=1, padding_mode="reflect"
         )
 
-        n_up = int(math.log2(self.super_res_factor))
         up_layers: list[nn.Module] = []
-        for _ in range(n_up):
+        for step in up_steps:
             up_layers.extend(
                 [
-                    nn.Upsample(scale_factor=2, mode="trilinear", align_corners=False),
+                    nn.Upsample(scale_factor=step, mode="trilinear", align_corners=False),
                     _SafeReflectConv3d(
                         self.out_channels, self.out_channels, kernel_size=3, padding=1
                     ),

@@ -15,6 +15,7 @@ from torch import Tensor
 from torch.utils.data import ConcatDataset, Dataset
 
 NormMode = Literal["minmax", "percentile", "fixed", "none"]
+CrossScanCalibrationMode = Literal["none", "affine", "quantile"]
 
 
 @dataclass(frozen=True)
@@ -261,6 +262,121 @@ def degrade_xct_volume(
         binned = binned + rng.normal(0.0, float(noise_std), size=binned.shape).astype(np.float32)
 
     return np.clip(binned, 0.0, 1.0).astype(np.float32, copy=False)
+
+
+def fit_cross_scan_calibration(
+    lr_train: np.ndarray,
+    hr_train: np.ndarray,
+    scale_factor: float = 2,
+    mode: CrossScanCalibrationMode = "none",
+    psf_sigma: float = 0.0,
+    n_quantiles: int = 257,
+    mask_lr: np.ndarray | None = None,
+) -> dict[str, object]:
+    """Fit a strictly ``train``-slab-only radiometric transfer mapping ``LR -> coarse(HR)``.
+
+    Independent physical dual-scan X-ray micro-CT reconstructions (e.g., full-core ``18 um`` vs.
+    interior ROI ``6 um`` scans) often differ in polychromatic beam-hardening curvature and
+    greyscale windowing. Fitting a monotonic 1D transfer strictly on the ``train`` slab aligns
+    ``LR`` attenuation with PSF-downsampled ``HR`` without leaking ``val`` or ``test`` statistics.
+    """
+    if mode == "none":
+        return {"mode": "none"}
+
+    lr_arr = sanitize_xct_volume(lr_train)
+    hr_arr = sanitize_xct_volume(hr_train)
+    hr_coarse = degrade_xct_volume(
+        hr_arr,
+        scale_factor=scale_factor,
+        psf_sigma=max(0.0, float(psf_sigma)),
+        noise_std=0.0,
+        seed=0,
+    )
+    common = tuple(min(int(a), int(b)) for a, b in zip(lr_arr.shape, hr_coarse.shape, strict=True))
+    lr_sub = lr_arr[: common[0], : common[1], : common[2]]
+    hr_sub = hr_coarse[: common[0], : common[1], : common[2]]
+
+    if mask_lr is not None:
+        m_sub = np.asarray(mask_lr, dtype=bool)[: common[0], : common[1], : common[2]]
+        x = lr_sub[m_sub].astype(np.float64, copy=False)
+        y = hr_sub[m_sub].astype(np.float64, copy=False)
+    else:
+        x = lr_sub.ravel().astype(np.float64, copy=False)
+        y = hr_sub.ravel().astype(np.float64, copy=False)
+
+    if x.size == 0:
+        return {"mode": "none"}
+
+    if mode == "affine":
+        x_mean = float(x.mean())
+        y_mean = float(y.mean())
+        x_var = float(np.mean((x - x_mean) ** 2))
+        if x_var < 1e-12:
+            slope, intercept = 1.0, y_mean - x_mean
+        else:
+            cov_xy = float(np.mean((x - x_mean) * (y - y_mean)))
+            slope = max(0.0, cov_xy / x_var)
+            intercept = y_mean - slope * x_mean
+        return {"mode": "affine", "slope": float(slope), "intercept": float(intercept)}
+
+    if mode == "quantile":
+        qs = np.linspace(0.0, 100.0, max(17, int(n_quantiles)))
+        q_lr = np.percentile(x, qs)
+        q_hr = np.percentile(y, qs)
+        q_lr_unique, unique_idx = np.unique(q_lr, return_index=True)
+        q_hr_unique = np.maximum.accumulate(q_hr[unique_idx])
+        if q_lr_unique.size < 2:
+            shift = float(y.mean() - x.mean())
+            return {"mode": "affine", "slope": 1.0, "intercept": shift}
+        span_x = float(q_lr[-2] - q_lr[1]) if q_lr.size >= 4 else float(q_lr[-1] - q_lr[0])
+        span_y = float(q_hr[-2] - q_hr[1]) if q_hr.size >= 4 else float(q_hr[-1] - q_hr[0])
+        tail_slope = max(0.0, span_y / span_x) if span_x > 1e-8 else 1.0
+        return {
+            "mode": "quantile",
+            "xp": q_lr_unique.astype(np.float64).tolist(),
+            "fp": q_hr_unique.astype(np.float64).tolist(),
+            "tail_slope": float(tail_slope),
+        }
+
+    raise ValueError(
+        f"Unsupported cross_scan_calibration mode={mode!r}. Expected 'none', 'affine', or 'quantile'."
+    )
+
+
+def apply_cross_scan_calibration(
+    lr_volume: np.ndarray,
+    params: dict[str, object] | None,
+    mask: np.ndarray | None = None,
+) -> np.ndarray:
+    """Apply a frozen ``train``-fitted cross-scan calibration map to a normalized LR volume."""
+    arr = sanitize_xct_volume(lr_volume)
+    if params is None or params.get("mode", "none") == "none":
+        out = np.clip(arr, 0.0, 1.0).astype(np.float32, copy=False)
+    elif params.get("mode") == "affine":
+        slope = float(params["slope"])  # type: ignore[arg-type]
+        intercept = float(params["intercept"])  # type: ignore[arg-type]
+        out = np.clip(arr * np.float32(slope) + np.float32(intercept), 0.0, 1.0).astype(
+            np.float32, copy=False
+        )
+    elif params.get("mode") == "quantile":
+        xp = np.asarray(params["xp"], dtype=np.float64)
+        fp = np.asarray(params["fp"], dtype=np.float64)
+        tail_slope = float(params.get("tail_slope", 1.0))  # type: ignore[arg-type]
+        flat = arr.ravel().astype(np.float64, copy=False)
+        mapped = np.interp(flat, xp, fp)
+        below = flat < xp[0]
+        above = flat > xp[-1]
+        if np.any(below):
+            mapped[below] = fp[0] + tail_slope * (flat[below] - xp[0])
+        if np.any(above):
+            mapped[above] = fp[-1] + tail_slope * (flat[above] - xp[-1])
+        out = np.clip(mapped.reshape(arr.shape), 0.0, 1.0).astype(np.float32, copy=False)
+    else:
+        raise ValueError(f"Unknown cross-scan calibration params mode={params.get('mode')!r}.")
+
+    if mask is not None:
+        out = np.where(np.asarray(mask, dtype=bool), out, 0.0).astype(np.float32, copy=False)
+    return out
 
 
 def downsample_orthogonal_slabs(
