@@ -12,6 +12,7 @@ import pytest
 import tifffile
 
 from openlsrx.cli import main as cli_main
+from openlsrx.data import DEFAULT_CERTIFIED_REGIONS_PATH, resolve_zn13x_pair_7dof
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONFIG_FILES = sorted((REPO_ROOT / "configs").rglob("*.yaml"))
@@ -19,6 +20,20 @@ CONFIG_FILES = sorted((REPO_ROOT / "configs").rglob("*.yaml"))
 
 @pytest.mark.parametrize("config_path", CONFIG_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))
 def test_all_yaml_configs_validate_with_lightning_cli(config_path: Path) -> None:
+    if config_path.name == "certified_regions.yaml":
+        assert config_path.read_bytes() == DEFAULT_CERTIFIED_REGIONS_PATH.read_bytes()
+        for pair in ("2x", "8x"):
+            for tier in ("zenodo_14245751_preview_8bit", "full_savu_32bit"):
+                tx, center, meta = resolve_zn13x_pair_7dof(
+                    pair,  # type: ignore[arg-type]
+                    tier_section=tier,  # type: ignore[arg-type]
+                    certified_regions_path=config_path,
+                )
+                assert 0.90 < tx.scale < 1.10
+                assert center is not None
+                assert meta["registration_schema"] == "multimodal_benchmark_7dof_v2"
+        return
+
     subcmd = "predict" if "predict" in config_path.stem else "fit"
     proc = subprocess.run(
         [sys.executable, "-m", "openlsrx", subcmd, "--print_config", "-c", str(config_path)],

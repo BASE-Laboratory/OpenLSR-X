@@ -248,6 +248,15 @@ def _run_download_benchmarks(argv: Sequence[str]) -> int:
         help="Optional local directory containing Zenodo 5542624 16-bit .raw dual-scan files.",
     )
     parser.add_argument(
+        "--certified-regions",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a MultimodalBenchmark certified_regions.yaml or "
+            "SimilarityTransform3D JSON/YAML file for Zn-13X 7-DOF registration."
+        ),
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="Synthesize deterministic calibrated digital-rock/synchrotron phantoms offline without network fetches.",
@@ -275,13 +284,19 @@ def _run_download_benchmarks(argv: Sequence[str]) -> int:
                 dest_dir=ns.dest,
                 lr_size=lr_size,
                 raw_h5_dir=ns.raw_h5_dir,
+                certified_regions_path=ns.certified_regions,
                 allow_offline_fallback=(not ns.no_offline_fallback),
                 prefer_offline=bool(ns.offline),
                 seed=ns.seed,
             )
+            prov_tag = (
+                ", provisional_8bit_preview=True"
+                if manifest.get("provisional_8bit_preview")
+                else ""
+            )
             print(
                 f"[{name}] ready at {lr_tif} & {hr_tif} "
-                f"(source={manifest['source_kind']}, hr_sha256={str(manifest['hr_sha256'])[:12]}...)"
+                f"(source={manifest['source_kind']}{prov_tag}, hr_sha256={str(manifest['hr_sha256'])[:12]}...)"
             )
         elif name in AVAILABLE_DUALSCAN_DATASETS:
             spec_ds = AVAILABLE_DUALSCAN_DATASETS[name]
@@ -348,6 +363,15 @@ def _run_download_zn13x(argv: Sequence[str]) -> int:
     )
     parser.add_argument("--raw-h5-dir", type=str, default=None)
     parser.add_argument(
+        "--certified-regions",
+        type=str,
+        default=None,
+        help=(
+            "Optional path to a MultimodalBenchmark certified_regions.yaml or "
+            "SimilarityTransform3D JSON/YAML file for 7-DOF registration."
+        ),
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="Synthesize deterministic calibrated Zn-13X phantoms offline without network fetches.",
@@ -371,13 +395,17 @@ def _run_download_zn13x(argv: Sequence[str]) -> int:
             dest_dir=ns.dest,
             lr_size=ns.lr_size,
             raw_h5_dir=ns.raw_h5_dir,
+            certified_regions_path=ns.certified_regions,
             allow_offline_fallback=allow_fb,
             prefer_offline=bool(ns.offline),
             seed=ns.seed,
         )
+        prov_tag = (
+            ", provisional_8bit_preview=True" if manifest.get("provisional_8bit_preview") else ""
+        )
         print(
             f"[zn13x_{pair}] ready at {lr_tif} & {hr_tif} "
-            f"(source={manifest['source_kind']}, hr_sha256={str(manifest['hr_sha256'])[:12]}...)"
+            f"(source={manifest['source_kind']}{prov_tag}, hr_sha256={str(manifest['hr_sha256'])[:12]}...)"
         )
     return 0
 

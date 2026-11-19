@@ -2,16 +2,23 @@
 
 from .baselines import upsample_2d, upsample_3d
 from .data import (
+    DEFAULT_CERTIFIED_REGIONS_PATH,
     ZN13X_I13_RESOLUTIONS,
     DatasetObject,
     PairedSliceDataset,
     PairedVolumeDataModule,
+    SimilarityTransform3DSpec,
     SyntheticPoreSpyDataModule,
+    compose_similarity_transforms_3d,
     extract_aligned_slab_from_h5,
     generate_porespy_volume,
     load_volume_any,
+    load_zn13x_certified_regions,
     prepare_zn13x_benchmark,
     register_multires_pair_3d,
+    resample_lr_to_hr_grid_7dof,
+    resample_moving_to_fixed_7dof,
+    resolve_zn13x_pair_7dof,
     synthesize_zn13x_phantom_pair,
 )
 from .inference import (
@@ -66,12 +73,13 @@ from .models import (
     super_resolve_volume_3d,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "ArbitraryScaleUpsample",
     "AttenuationConservationLoss",
     "ConvBlock",
+    "DEFAULT_CERTIFIED_REGIONS_PATH",
     "DatasetObject",
     "DenseResidualBlock",
     "Discriminator",
@@ -88,6 +96,7 @@ __all__ = [
     "ResidualSwinBlock",
     "SR3DResNet",
     "SRGAN",
+    "SimilarityTransform3DSpec",
     "SobelGradientLoss",
     "SoftCLDiceLoss",
     "SwinIRGenerator",
@@ -97,6 +106,7 @@ __all__ = [
     "ZN13X_I13_RESOLUTIONS",
     "__version__",
     "build_3d_subcube_dataloaders",
+    "compose_similarity_transforms_3d",
     "compute_directional_tortuosity",
     "compute_drainage_curve",
     "compute_drainage_rmse",
@@ -115,8 +125,12 @@ __all__ = [
     "fuse_orthogonal_volumes",
     "generate_porespy_volume",
     "load_volume_any",
+    "load_zn13x_certified_regions",
     "prepare_zn13x_benchmark",
     "register_multires_pair_3d",
+    "resample_lr_to_hr_grid_7dof",
+    "resample_moving_to_fixed_7dof",
+    "resolve_zn13x_pair_7dof",
     "soft_skeletonize",
     "solve_steady_state_diffusion_axis",
     "super_resolve_slice_stack",

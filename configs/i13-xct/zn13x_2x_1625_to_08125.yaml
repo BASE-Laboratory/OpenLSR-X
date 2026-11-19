@@ -1,5 +1,7 @@
 # Diamond Light Source I13-2 Experimental 2x Pair: 4x (1.625 um) -> 8x (0.8125 um)
-# Prepare slabs via: openlsrx download-benchmarks --datasets zn13x_2x
+# Staged with MultimodalBenchmark 7-DOF similarity registration (configs/i13-xct/certified_regions.yaml, scale=0.98640)
+# via: openlsrx download-zn13x --pair 2x [--raw-h5-dir <savu_float32_dir>]
+# Note: Zenodo 14245751 8-bit sub-volumes are provisional registration-preview benchmarks; pass --raw-h5-dir for quantitative float32 runs.
 seed_everything: 42
 
 trainer:

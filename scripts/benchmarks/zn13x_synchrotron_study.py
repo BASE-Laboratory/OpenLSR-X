@@ -106,6 +106,8 @@ def _evaluate_method(
     voxel_size_um: float,
     source_kind: str = "unknown",
     is_experimental_xct: bool = False,
+    provisional_8bit_preview: bool = False,
+    fitted_scale_factor: float | None = None,
     precomputed_true: dict[str, Any] | None = None,
     stack_axis: int = 0,
     gen_params: int = 0,
@@ -118,6 +120,8 @@ def _evaluate_method(
         "pair": pair,
         "source_kind": source_kind,
         "is_experimental_xct": int(bool(is_experimental_xct)),
+        "provisional_8bit_preview": int(bool(provisional_8bit_preview)),
+        "fitted_scale_factor": fitted_scale_factor,
         "seed": seed,
         "method": method,
         "gen_params": gen_params,
@@ -175,6 +179,7 @@ def run_zn13x_study(
     epochs: int = 120,
     seeds: list[int] | None = None,
     raw_h5_dir: Path | None = None,
+    certified_regions_path: Path | None = None,
     fast: bool = False,
     allow_synthetic_fallback: bool | None = None,
 ) -> Path:
@@ -224,6 +229,7 @@ def run_zn13x_study(
             dest_dir=data_dir,
             lr_size=cur_lr_size,
             raw_h5_dir=raw_h5_dir,
+            certified_regions_path=certified_regions_path,
             allow_offline_fallback=fallback,
             prefer_offline=fast,
             seed=42,
@@ -232,10 +238,18 @@ def run_zn13x_study(
         voxel_um = float(manifest["high_resolution_um"])  # type: ignore[arg-type]
         src_kind = str(manifest.get("source_kind", "unknown"))
         is_exp = bool(manifest.get("is_experimental_xct", False))
+        prov_8bit = bool(manifest.get("provisional_8bit_preview", False))
+        reg_dict = manifest.get("registration", {})
+        fitted_scale = (
+            float(reg_dict["fitted_scale_factor"])
+            if isinstance(reg_dict, dict) and "fitted_scale_factor" in reg_dict
+            else None
+        )
 
         for seed in seed_list:
             print(
-                f"[zn13x_study] Running {dataset_name} ({scale}x, source={manifest['source_kind']}) seed={seed} ..."
+                f"[zn13x_study] Running {dataset_name} ({scale}x, source={manifest['source_kind']}, "
+                f"provisional_8bit={prov_8bit}) seed={seed} ..."
             )
             dm = PairedVolumeDataModule(
                 low_path=str(lr_tif),
@@ -286,6 +300,8 @@ def run_zn13x_study(
                     voxel_um,
                     source_kind=src_kind,
                     is_experimental_xct=is_exp,
+                    provisional_8bit_preview=prov_8bit,
+                    fitted_scale_factor=fitted_scale,
                     precomputed_true=ref_transport,
                     infer_sec=infer_tricubic,
                 )
@@ -333,6 +349,8 @@ def run_zn13x_study(
                     voxel_um,
                     source_kind=src_kind,
                     is_experimental_xct=is_exp,
+                    provisional_8bit_preview=prov_8bit,
+                    fitted_scale_factor=fitted_scale,
                     precomputed_true=ref_transport,
                     gen_params=_count_params(srresnet.gen),
                     train_sec=train_srres,
@@ -391,6 +409,8 @@ def run_zn13x_study(
                     voxel_um,
                     source_kind=src_kind,
                     is_experimental_xct=is_exp,
+                    provisional_8bit_preview=prov_8bit,
+                    fitted_scale_factor=fitted_scale,
                     precomputed_true=ref_transport,
                     gen_params=_count_params(sr3d.gen),
                     train_sec=train_3d,
@@ -441,6 +461,8 @@ def run_zn13x_study(
                     voxel_um,
                     source_kind=src_kind,
                     is_experimental_xct=is_exp,
+                    provisional_8bit_preview=prov_8bit,
+                    fitted_scale_factor=fitted_scale,
                     precomputed_true=ref_transport,
                     stack_axis=0,
                     gen_params=_count_params(srgan.gen),
@@ -459,6 +481,8 @@ def run_zn13x_study(
                     voxel_um,
                     source_kind=src_kind,
                     is_experimental_xct=is_exp,
+                    provisional_8bit_preview=prov_8bit,
+                    fitted_scale_factor=fitted_scale,
                     precomputed_true=ref_transport,
                     stack_axis=0,
                     gen_params=_count_params(srgan.gen),
@@ -516,6 +540,8 @@ def run_zn13x_study(
                     voxel_um,
                     source_kind=src_kind,
                     is_experimental_xct=is_exp,
+                    provisional_8bit_preview=prov_8bit,
+                    fitted_scale_factor=fitted_scale,
                     precomputed_true=ref_transport,
                     stack_axis=0,
                     gen_params=_count_params(rrdb_ragan.gen),
@@ -589,6 +615,8 @@ def run_zn13x_study(
                     voxel_um,
                     source_kind=src_kind,
                     is_experimental_xct=is_exp,
+                    provisional_8bit_preview=prov_8bit,
+                    fitted_scale_factor=fitted_scale,
                     precomputed_true=ref_transport,
                     stack_axis=0,
                     gen_params=_count_params(swin_l1.gen),
@@ -661,6 +689,8 @@ def run_zn13x_study(
                     voxel_um,
                     source_kind=src_kind,
                     is_experimental_xct=is_exp,
+                    provisional_8bit_preview=prov_8bit,
+                    fitted_scale_factor=fitted_scale,
                     precomputed_true=ref_transport,
                     stack_axis=0,
                     gen_params=_count_params(swin_phys.gen),
@@ -680,6 +710,8 @@ def run_zn13x_study(
                     voxel_um,
                     source_kind=src_kind,
                     is_experimental_xct=is_exp,
+                    provisional_8bit_preview=prov_8bit,
+                    fitted_scale_factor=fitted_scale,
                     precomputed_true=ref_transport,
                     stack_axis=0,
                     gen_params=_count_params(swin_phys.gen),
@@ -742,6 +774,12 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=120, help="Training epochs.")
     parser.add_argument("--seeds", type=int, nargs="+", default=None, help="Random seeds.")
     parser.add_argument("--raw-h5-dir", type=str, default=None, help="Optional raw I13-2 HDF5 dir.")
+    parser.add_argument(
+        "--certified-regions",
+        type=str,
+        default=None,
+        help="Optional MultimodalBenchmark certified_regions.yaml or SimilarityTransform3D JSON/YAML path.",
+    )
     parser.add_argument("--fast", action="store_true", help="Rapid CPU smoke benchmark.")
     parser.add_argument(
         "--allow-synthetic-fallback",
@@ -759,6 +797,7 @@ def main() -> None:
         epochs=ns.epochs,
         seeds=ns.seeds,
         raw_h5_dir=Path(ns.raw_h5_dir) if ns.raw_h5_dir else None,
+        certified_regions_path=Path(ns.certified_regions) if ns.certified_regions else None,
         fast=ns.fast,
         allow_synthetic_fallback=(True if ns.allow_synthetic_fallback else None),
     )

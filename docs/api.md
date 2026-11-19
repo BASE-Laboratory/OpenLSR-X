@@ -76,6 +76,14 @@
 
 ::: openlsrx.data.zn13x.prepare_zn13x_benchmark
 
+::: openlsrx.data.zn13x.SimilarityTransform3DSpec
+
+::: openlsrx.data.zn13x.compose_similarity_transforms_3d
+
+::: openlsrx.data.zn13x.resolve_zn13x_pair_7dof
+
+::: openlsrx.data.zn13x.resample_lr_to_hr_grid_7dof
+
 ::: openlsrx.data.zn13x.register_multires_pair_3d
 
 ::: openlsrx.data.zn13x.apply_hr_grid_shift_pair_3d
