@@ -27,6 +27,12 @@ Verify your installation:
 openlsrx --help
 ```
 
+*(Optional)* For direct SimpleITK runtime delegation of `Zn-13X` 7-DOF similarity resampling to `BASE-Laboratory/MultimodalBenchmark` (otherwise OpenLSR-X uses its built-in `float32` bit-exact `scipy.ndimage` evaluator of the same `certified_regions.yaml` transforms):
+
+```bash
+uv pip install "multimodal-benchmark[registration] @ git+https://github.com/BASE-Laboratory/MultimodalBenchmark.git"
+```
+
 ---
 
 ## Core CLI Workflows

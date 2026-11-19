@@ -2,7 +2,7 @@ cff-version: 1.2.0
 title: "OpenLSR-X: A Python Framework for 2D-to-3D Orthogonal Super-Resolution and Petrophysical Validation in X-Ray Computed Tomography"
 message: "If you use OpenLSR-X in your research, please cite this software using the metadata below."
 type: software
-version: 0.2.0
+version: 0.2.1
 date-released: "2026-11-19"
 license: BSD-3-Clause
 repository-code: "https://github.com/BASE-Laboratory/OpenLSR-X"

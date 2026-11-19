@@ -1,5 +1,7 @@
-# Diamond Light Source I13 Synchrotron XCT configuration (e.g., Zn13X zeolite NeXus/HDF5)
-# Preserves Calum Green's calibrated TomopyRecon attenuation bounds and spatial ROI alignment
+# Diamond Light Source I13 Synchrotron XCT legacy NeXus slicing configuration (Zn-13X)
+# NOTE: Direct raw .nxs index slicing assumes nominal 2.000x objective magnification and exhibits ~1.3%
+# edge scale drift across 1,280 HR px. For 7-DOF similarity-registered slabs (configs/i13-xct/certified_regions.yaml),
+# stage via `openlsrx download-zn13x --pair 2x --raw-h5-dir <dir>` and use zn13x_2x_1625_to_08125.yaml.
 seed_everything: 42
 
 trainer:

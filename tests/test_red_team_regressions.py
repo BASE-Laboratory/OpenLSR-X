@@ -869,3 +869,166 @@ def test_stage5_fourier_diagonal_edge_thin_fsc_ms_ssim_and_openimpala_blocking(
     _, inp_odd = export_for_openimpala(odd_vol, output_dir=tmp_path / "imp_odd", name="core225")
     inp_txt = inp_odd.read_text(encoding="utf-8")
     assert "amr.blocking_factor = 1" in inp_txt
+
+
+def test_zn13x_7dof_similarity_resampling_chained_8x_and_certified_regions_cli(
+    tmp_path: Path,
+) -> None:
+    """Verify MultimodalBenchmark 7-DOF similarity registration, chained 8x composition, edge-drift fix, & CLI."""
+    import json
+
+    import h5py
+    from scipy.ndimage import affine_transform
+
+    from openlsrx.cli import main as cli_main
+    from openlsrx.data import (
+        DEFAULT_CERTIFIED_REGIONS_PATH,
+        SimilarityTransform3DSpec,
+        compose_similarity_transforms_3d,
+        load_zn13x_certified_regions,
+        resample_lr_to_hr_grid_7dof,
+        resolve_zn13x_pair_7dof,
+    )
+
+    # 1) Canonical certified_regions.yaml exists and chained 3-rung 8x matches sequential composition to <1e-11 um
+    assert DEFAULT_CERTIFIED_REGIONS_PATH.is_file()
+    cert_doc, _, cert_sha = load_zn13x_certified_regions()
+    assert len(cert_sha) == 64
+
+    tx_8x_prev, hr_center_8x, meta_8x_prev = resolve_zn13x_pair_7dof(
+        "8x", tier_section="zenodo_14245751_preview_8bit"
+    )
+    assert hr_center_8x is not None
+    assert meta_8x_prev["transform_chain_hr_to_lr"] == [
+        "169066_from_169065",
+        "169067_from_169066",
+        "169068_from_169067",
+    ]
+    assert tx_8x_prev.scale == pytest.approx(0.987968, abs=1e-5)
+
+    rungs_raw = cert_doc["zenodo_14245751_preview_8bit"]["adjacent_rungs"]
+    seq_specs = [
+        SimilarityTransform3DSpec.from_dict(rungs_raw[k]["similarity_transform_hr_to_lr"])
+        for k in ("169066_from_169065", "169067_from_169066", "169068_from_169067")
+    ]
+    composed_manual = compose_similarity_transforms_3d(seq_specs)
+    rng = np.random.default_rng(2026)
+    pts_hr = rng.uniform(0.0, 325.0, size=(64, 3))
+    pts_seq = pts_hr.copy()
+    for sp in seq_specs:
+        pts_seq = sp.transform_points_xyz_um(pts_seq)
+    pts_comp = composed_manual.transform_points_xyz_um(pts_hr)
+    assert float(np.max(np.abs(pts_seq - pts_comp))) < 1e-11
+
+    # 2) ~1.36% objective magnification drift (scale=0.9864) + sub-voxel shift:
+    #    nominal integer slicing loses outer-shell correlation, whereas 7-DOF keeps HR bit-exact & fixes edges!
+    _, hr_full = synthesize_zn13x_phantom_pair(pair="2x", lr_shape=(48, 48, 48), seed=19)
+    center_um = (38.998, 38.998, 19.499)
+    trans_um = (3.10, -2.45, 1.85)
+    sim_spec = SimilarityTransform3DSpec(
+        matrix_3x3=((0.9864, 0.0, 0.0), (0.0, 0.9864, 0.0), (0.0, 0.0, 0.9864)),
+        translation_xyz_um=trans_um,
+        center_xyz_um=center_um,
+        scale=0.9864,
+        versor_xyzw=(0.0, 0.0, 0.0, 1.0),
+    )
+    hr_smooth = gaussian_filter(hr_full, sigma=0.75).astype(np.float32)
+    lr_shape_raw = (54, 54, 54)
+    c_zyx = np.array([center_um[2], center_um[1], center_um[0]], dtype=np.float64)
+    t_zyx = np.array([trans_um[2], trans_um[1], trans_um[0]], dtype=np.float64)
+    inv_scale = 1.0 / 0.9864
+    a_fwd = np.diag([2.0 * inv_scale, 2.0 * inv_scale, 2.0 * inv_scale])
+    b_fwd = ((-t_zyx - c_zyx) * inv_scale + c_zyx) / 0.8125
+    lr_drifted = affine_transform(
+        hr_smooth, a_fwd, offset=b_fwd, output_shape=lr_shape_raw, order=1, mode="nearest"
+    ).astype(np.float32)
+
+    nom_lr, nom_hr, _ = register_multires_pair_3d(
+        lr_drifted[:48, :48, :48], hr_full, scale_factor=2
+    )
+    nom_hr_ds = nom_hr.reshape(nom_lr.shape[0], 2, nom_lr.shape[1], 2, nom_lr.shape[2], 2).mean(
+        axis=(1, 3, 5)
+    )
+    edge_mask_nom = np.ones(nom_lr.shape, dtype=bool)
+    edge_mask_nom[8:-8, 8:-8, 8:-8] = False
+    r_edge_nom = float(np.corrcoef(nom_lr[edge_mask_nom], nom_hr_ds[edge_mask_nom])[0, 1])
+
+    lr_7dof, hr_7dof, info_7dof = resample_lr_to_hr_grid_7dof(
+        lr_drifted,
+        hr_full,
+        lr_shape_zyx=(40, 40, 40),
+        hr_center_zyx=None,
+        sp_lo_um=1.625,
+        sp_hi_um=0.8125,
+        scale_factor=2,
+        tx_hr_to_lr=sim_spec,
+    )
+    assert info_7dof["hr_resampled"] is False
+    hr_roi = info_7dof["hr_roi_zyx"]
+    assert isinstance(hr_roi, list)
+    hz0, hz1 = int(hr_roi[0][0]), int(hr_roi[0][1])
+    hy0, hy1 = int(hr_roi[1][0]), int(hr_roi[1][1])
+    hx0, hx1 = int(hr_roi[2][0]), int(hr_roi[2][1])
+    assert np.array_equal(hr_7dof, hr_full[hz0:hz1, hy0:hy1, hx0:hx1])
+    hr_7dof_ds = hr_7dof.reshape(40, 2, 40, 2, 40, 2).mean(axis=(1, 3, 5))
+    edge_mask_7d = np.ones((40, 40, 40), dtype=bool)
+    edge_mask_7d[8:-8, 8:-8, 8:-8] = False
+    r_edge_7dof = float(np.corrcoef(lr_7dof[edge_mask_7d], hr_7dof_ds[edge_mask_7d])[0, 1])
+    mse_edge_nom = float(np.mean((nom_lr[edge_mask_nom] - nom_hr_ds[edge_mask_nom]) ** 2))
+    mse_edge_7dof = float(np.mean((lr_7dof[edge_mask_7d] - hr_7dof_ds[edge_mask_7d]) ** 2))
+    assert r_edge_7dof > 0.94
+    assert r_edge_7dof > r_edge_nom + 0.03
+    assert mse_edge_7dof < 0.70 * mse_edge_nom
+
+    # 3) Standalone MultimodalBenchmark SimilarityTransform3D .json via `openlsrx download-zn13x --certified-regions`
+    raw_dir = tmp_path / "mock_h5"
+    raw_dir.mkdir()
+    with h5py.File(raw_dir / "169067_8bit_cropped.h5", "w") as f_lo:
+        f_lo.create_dataset("data", data=np.clip(lr_drifted * 255.0, 0, 255).astype(np.uint8))
+    with h5py.File(raw_dir / "169066_8bit_cropped.h5", "w") as f_hi:
+        f_hi.create_dataset("data", data=np.clip(hr_full * 255.0, 0, 255).astype(np.uint8))
+
+    tx_json = tmp_path / "mmb_2x_transform.json"
+    tx_json.write_text(json.dumps(sim_spec.to_dict(), indent=2), encoding="utf-8")
+
+    bench_dir = tmp_path / "zn_bench"
+    bench_dir.mkdir()
+    tifffile.imwrite(bench_dir / "zn13x_2x_lr.tif", np.zeros((20, 20, 20), dtype=np.float32))
+    tifffile.imwrite(bench_dir / "zn13x_2x_hr.tif", np.zeros((40, 40, 40), dtype=np.float32))
+    (bench_dir / "zn13x_2x_manifest.json").write_text(
+        json.dumps(
+            {
+                "source_kind": "local_i13_preview_h5_registered",
+                "is_experimental_xct": True,
+                "requested_lr_size": 20,
+                "lr_shape": [20, 20, 20],
+                "hr_shape": [40, 40, 40],
+                "registration": {"scale_factor": 2},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc_dl:
+        cli_main(
+            [
+                "download-zn13x",
+                "--pair",
+                "2x",
+                "--lr-size",
+                "20",
+                "--dest",
+                str(bench_dir),
+                "--raw-h5-dir",
+                str(raw_dir),
+                "--certified-regions",
+                str(tx_json),
+                "--no-offline-fallback",
+            ]
+        )
+    assert exc_dl.value.code == 0
+    manifest_new = json.loads((bench_dir / "zn13x_2x_manifest.json").read_text(encoding="utf-8"))
+    assert manifest_new["provisional_8bit_preview"] is True
+    assert manifest_new["registration"]["registration_schema"] == "multimodal_benchmark_7dof_v2"
+    assert manifest_new["registration"]["hr_resampled"] is False
+    assert manifest_new["registration"]["fitted_scale_factor"] == pytest.approx(0.9864)

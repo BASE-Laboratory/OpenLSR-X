@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "openlsrx"
-version = "0.2.0"
+version = "0.2.1"
 description = "2D/2.5D-to-3D Orthogonal Super-Resolution and Petrophysical Transport Validation Suite for X-Ray Computed Tomography (XCT)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -84,6 +84,9 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+openlsrx = ["data/*.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

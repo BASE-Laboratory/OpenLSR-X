@@ -12,7 +12,7 @@ This guide documents the scientific thesis, methodology equations, ablation matr
 
 ## 150-Word Draft Abstract
 
-Quantitative X-ray computed tomography (XCT) of functional porous materials at synchrotron beamlines is constrained by the hardware coupling between spatial resolution, field of view (FOV), and X-ray dose. Existing deep super-resolution methods either incur cubic memory scaling in 3D convolutional networks or rely on 2D natural-image adversarial priors that distort greyscale attenuation consistency and pinch off sub-micron pore throats without diagnostic error indicators. Here we introduce a cell-centered `2.5D`-to-3D orthogonal super-resolution framework (`OpenLSR-X`) combining multi-axis shifted-window self-attention (`SwinIR`), linear-attenuation downsampling consistency (`2.5D` $z$-PSF corrected), and differentiable soft-skeleton (`soft-clDice`) pore-throat topology supervision. Across three orthogonal sweeps (`yz`, `xz`, `xy`), outlier-suppressed 3D Fourier synthesis yields zero-overhead voxel-wise view-disagreement maps $\sigma_{\text{ortho}}(\mathbf{x})$ that correlate spatially with reconstruction error and propagate into 3D Fickian diffusive tortuosity sensitivity bounds. Evaluated on sub-voxel-registered multi-magnification Diamond Light Source I13-2 tomograms of reactive Zn-doped Zeolite 13X (`2×` and `8×`), our method improves reference `FSC = 0.5` spectral recovery, tri-phase `Pore / Na-13X / Zn-13X` segmentation, and pore-scale diffusivity fidelity.
+Quantitative X-ray computed tomography (XCT) of functional porous materials at synchrotron beamlines is constrained by the hardware coupling between spatial resolution, field of view (FOV), and X-ray dose. Existing deep super-resolution methods either incur cubic memory scaling in 3D convolutional networks or rely on 2D natural-image adversarial priors that distort greyscale attenuation consistency and pinch off sub-micron pore throats without diagnostic error indicators. Here we introduce a cell-centered `2.5D`-to-3D orthogonal super-resolution framework (`OpenLSR-X`) combining multi-axis shifted-window self-attention (`SwinIR`), linear-attenuation downsampling consistency (`2.5D` $z$-PSF corrected), and differentiable soft-skeleton (`soft-clDice`) pore-throat topology supervision. Across three orthogonal sweeps (`yz`, `xz`, `xy`), outlier-suppressed 3D Fourier synthesis yields zero-overhead voxel-wise view-disagreement maps $\sigma_{\text{ortho}}(\mathbf{x})$ that correlate spatially with reconstruction error and propagate into 3D Fickian diffusive tortuosity sensitivity bounds. Evaluated on 7-DOF similarity-registered multi-magnification Diamond Light Source I13-2 tomograms of reactive Zn-doped Zeolite 13X (`2×` and chained `8×`), our method improves reference `FSC = 0.5` spectral recovery, tri-phase `Pore / Na-13X / Zn-13X` segmentation, and pore-scale diffusivity fidelity.
 
 ---
 
@@ -25,7 +25,7 @@ Quantitative X-ray computed tomography (XCT) of functional porous materials at s
 3. **Multi-Axis Native-LR-Strided `SwinIR-2.5D` + Outlier-Suppressed Fourier Synthesis:**
    Samples `[z - s, z, z + s]` neighbors at true physical LR slice spacing ($\pm \Delta z_{\text{LR}}$) across all three training orientations (`train_axes=("yz", "xz", "xy")`) at `< 0.3%` parameter overhead over 2D models, paired with Winsorized `confidence_fourier` fusion tested in a controlled 9-arm stepwise ablation ladder (`SwinIR-2.5D-L1-Fourier` $\to$ `+Physics-Fourier` $\to$ `+ConfFourier`).
 4. **Full-Reference `3D FSC` Metrology & Tri-Phase Reactive Zeolite Validation (`Zn-13X`):**
-   Evaluates blur-sensitive prediction-vs-reference **`FSC = 0.5` crossover frequencies and spectral AUC (`compute_fsc_3d`)** alongside reference-locked petrophysics and three-phase (`Macropore` / `Na-13X Core` / `Zn-Exchanged Shell`) segmentation fidelity on coaxial sub-voxel-registered Diamond I13-2 scans (Green et al., *Sci. Data* 2025, `10.1038/s41597-025-04605-9`).
+   Evaluates blur-sensitive prediction-vs-reference **`FSC = 0.5` crossover frequencies and spectral AUC (`compute_fsc_3d`)** alongside reference-locked petrophysics and three-phase (`Macropore` / `Na-13X Core` / `Zn-Exchanged Shell`) segmentation fidelity on 7-DOF similarity-registered Diamond I13-2 scans (Green et al., *Sci. Data* 2025, `10.1038/s41597-025-04605-9`, consuming `MultimodalBenchmark`'s `certified_regions.yaml` transforms across `2×` and chained 3-rung `8×`).
 
 ---
 
@@ -44,9 +44,9 @@ Quantitative X-ray computed tomography (XCT) of functional porous materials at s
 
 ## Running the Full Isambard-AI Experimental Campaign
 
-1. **Stage Real Diamond I13-2 `Zn-13X` Zenodo Sub-Volumes (`14245751` or raw `169065`–`169068` HDF5):**
+1. **Stage Real Diamond I13-2 `Zn-13X` 32-Bit Savu HDF5s (`--raw-h5-dir`; note Zenodo `14245751` 8-bit previews are provisional):**
    ```bash
-   openlsrx download-zn13x --dest data/benchmarks --lr-size 48
+   openlsrx download-zn13x --dest data/benchmarks --lr-size 48 --raw-h5-dir /path/to/savu_recon_h5
    openlsrx download-benchmarks --dest data/benchmarks --size 128
    ```
 2. **Launch Multi-Seed Array Campaign on Isambard-AI (`GH200`):**
