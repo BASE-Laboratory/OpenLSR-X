@@ -1,5 +1,6 @@
-# Diamond Light Source I13 Synchrotron XCT orthogonal prediction configuration
-# Pass --ckpt_path path/to/zn13x.ckpt and --data.init_args.predict_path path/to/low_res_recon.nxs
+# Diamond Light Source I13 Synchrotron XCT legacy NeXus orthogonal prediction configuration
+# NOTE: For 7-DOF similarity-registered slabs (configs/i13-xct/certified_regions.yaml) and automatic
+# restoration of checkpoint-fitted radiometric calibration, prefer `openlsrx predict-volume --ckpt <ckpt> --input data/benchmarks/zn13x_2x_lr.tif`.
 seed_everything: 42
 
 trainer:

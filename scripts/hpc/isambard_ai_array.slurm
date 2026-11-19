@@ -72,7 +72,10 @@ elif [ "${SUITE_IDX}" -eq 1 ]; then
 elif [ "${SUITE_IDX}" -eq 2 ]; then
     EXTRA_H5_ARGS=()
     if [ -n "${I13_RAW_H5_DIR:-}" ] && [ -d "${I13_RAW_H5_DIR}" ]; then
-        EXTRA_H5_ARGS=(--raw-h5-dir "${I13_RAW_H5_DIR}")
+        EXTRA_H5_ARGS+=(--raw-h5-dir "${I13_RAW_H5_DIR}")
+    fi
+    if [ -n "${I13_CERTIFIED_REGIONS:-}" ] && [ -f "${I13_CERTIFIED_REGIONS}" ]; then
+        EXTRA_H5_ARGS+=(--certified-regions "${I13_CERTIFIED_REGIONS}")
     fi
     python scripts/benchmarks/zn13x_synchrotron_study.py \
         --output-dir "results/campaign/zn13x_s${SEED}" \

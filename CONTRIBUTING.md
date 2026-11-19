@@ -26,10 +26,12 @@ uv pip install -e ".[dev,docs]"
 
 Before opening a pull request, ensure all checks pass locally:
 
-1. **Linting & formatting:**
+1. **Lockfile, linting, formatting & static typing:**
    ```bash
-   uv run --no-sync ruff check src tests scripts
-   uv run --no-sync ruff format --check src tests scripts
+   uv lock --check
+   uv run --no-sync ruff check src tests scripts examples
+   uv run --no-sync ruff format --check src tests scripts examples
+   uv run --no-sync mypy src tests scripts examples
    ```
 2. **Unit, analytical metric, and config schema tests:**
    ```bash

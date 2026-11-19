@@ -207,7 +207,7 @@ def _download_https_file(url: str, dest: Path, timeout_s: float = 30.0) -> None:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme.lower() != "https":
         raise ValueError(f"Refusing non-HTTPS benchmark download URL: {url!r}")
-    req = urllib.request.Request(url, headers={"User-Agent": "OpenLSR-X/0.2.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "OpenLSR-X/0.2.1"})
     with urllib.request.urlopen(req, timeout=timeout_s) as resp, dest.open("wb") as out_f:  # noqa: S310
         shutil.copyfileobj(resp, out_f)
 
