@@ -1,14 +1,10 @@
 """Diamond Light Source I13-2 multi-resolution Zn-13X synchrotron dataset & 7-DOF aligner.
 
-Consumes canonical 7-DOF similarity registration transforms (``certified_regions.yaml`` /
-``SimilarityTransform3D``) produced by ``BASE-Laboratory/MultimodalBenchmark``
-(``registration.i13_ladder``), chaining adjacent-rung transforms for ``8x``
-(``169068 <- 169067 <- 169066 <- 169065``) and resampling LR onto the cell-centered
-coarsened physical grid of the unresampled HR target for the open dataset published in:
-
-    Green, C., Ahmed, S., Marathe, S. et al., "Three-dimensional, multimodal synchrotron
-    data for machine learning applications", Scientific Data 12, 329 (2025),
-    https://doi.org/10.1038/s41597-025-04605-9
+.. note::
+    Dataset-specific Zn-13X constants in this module are retained in ``v0.2.x`` for manuscript
+    reproducibility and scheduled to reside exclusively in ``BASE-Laboratory/MultimodalBenchmark``
+    in ``v0.3.0``. All Savu HDF5 slicing, TIFF writing, 7-DOF similarity chaining, and cell-centred
+    resampling delegate directly to ``basecoat`` (Layer 1).
 """
 
 from __future__ import annotations
@@ -16,6 +12,7 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
+import math
 import os
 import shutil
 import urllib.parse
@@ -25,11 +22,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-import h5py
 import numpy as np
-import tifffile
 import yaml
-from scipy.ndimage import affine_transform, gaussian_filter
+from basecoat import (
+    AxisSpec,
+    LazyVolume,
+    Volume,
+    open_savu_h5,
+    resample_volume,
+    write_volume,
+)
+from basecoat import (
+    SimilarityTransform3D as BasecoatSimilarityTransform3D,
+)
+from scipy.ndimage import gaussian_filter
 from skimage.metrics import structural_similarity
 from skimage.registration import phase_cross_correlation
 
@@ -402,13 +408,42 @@ def synthesize_zn13x_phantom_pair(
     return lr_vol.astype(np.float32, copy=False), hr_vol.astype(np.float32, copy=False)
 
 
+def _rotmat_xyz_to_versor_xyzw(r_xyz: np.ndarray) -> tuple[float, float, float, float]:
+    """Convert an orthonormal right-handed 3x3 XYZ rotation matrix to an ITK unit versor ``(qx, qy, qz, qw)``."""
+    tr = float(r_xyz[0, 0] + r_xyz[1, 1] + r_xyz[2, 2])
+    if tr > 0.0:
+        s = math.sqrt(tr + 1.0) * 2.0
+        qw = 0.25 * s
+        qx = (r_xyz[2, 1] - r_xyz[1, 2]) / s
+        qy = (r_xyz[0, 2] - r_xyz[2, 0]) / s
+        qz = (r_xyz[1, 0] - r_xyz[0, 1]) / s
+    elif r_xyz[0, 0] > r_xyz[1, 1] and r_xyz[0, 0] > r_xyz[2, 2]:
+        s = math.sqrt(1.0 + r_xyz[0, 0] - r_xyz[1, 1] - r_xyz[2, 2]) * 2.0
+        qw = (r_xyz[2, 1] - r_xyz[1, 2]) / s
+        qx = 0.25 * s
+        qy = (r_xyz[0, 1] + r_xyz[1, 0]) / s
+        qz = (r_xyz[0, 2] + r_xyz[2, 0]) / s
+    elif r_xyz[1, 1] > r_xyz[2, 2]:
+        s = math.sqrt(1.0 + r_xyz[1, 1] - r_xyz[0, 0] - r_xyz[2, 2]) * 2.0
+        qw = (r_xyz[0, 2] - r_xyz[2, 0]) / s
+        qx = (r_xyz[0, 1] + r_xyz[1, 0]) / s
+        qy = 0.25 * s
+        qz = (r_xyz[1, 2] + r_xyz[2, 1]) / s
+    else:
+        s = math.sqrt(1.0 + r_xyz[2, 2] - r_xyz[0, 0] - r_xyz[1, 1]) * 2.0
+        qw = (r_xyz[1, 0] - r_xyz[0, 1]) / s
+        qx = (r_xyz[0, 2] + r_xyz[2, 0]) / s
+        qy = (r_xyz[1, 2] + r_xyz[2, 1]) / s
+        qz = 0.25 * s
+    if qw < 0.0:
+        qx, qy, qz, qw = -qx, -qy, -qz, -qw
+    nrm = math.sqrt(qx * qx + qy * qy + qz * qz + qw * qw)
+    return (float(qx / nrm), float(qy / nrm), float(qz / nrm), float(qw / nrm))
+
+
 @dataclass(frozen=True)
 class SimilarityTransform3DSpec:
-    """7-DOF 3D similarity transform in physical micron coordinates (SimpleITK XYZ convention).
-
-    Schema-identical to ``registration.i13_ladder.SimilarityTransform3D`` in
-    ``BASE-Laboratory/MultimodalBenchmark``, where ``matrix_3x3`` equals ``scale * R``.
-    """
+    """7-DOF 3D similarity transform DTO in physical micron coordinates (backed by ``basecoat.SimilarityTransform3D``)."""
 
     matrix_3x3: tuple[
         tuple[float, float, float],
@@ -420,13 +455,51 @@ class SimilarityTransform3DSpec:
     scale: float
     versor_xyzw: tuple[float, float, float, float]
 
+    def to_basecoat(
+        self,
+        from_space: str = "fixed",
+        to_space: str = "moving",
+    ) -> BasecoatSimilarityTransform3D:
+        """Convert to a ``basecoat.SimilarityTransform3D`` in canonical ``('z', 'y', 'x')`` order."""
+        scaled_xyz = np.asarray(self.matrix_3x3, dtype=np.float64)
+        r_xyz = scaled_xyz / float(self.scale)
+        r_zyx = r_xyz[::-1, ::-1]
+        cx, cy, cz = self.center_xyz_um
+        tx, ty, tz = self.translation_xyz_um
+        return BasecoatSimilarityTransform3D(
+            rotation_zyx=r_zyx,
+            scale=float(self.scale),
+            center_zyx=(float(cz), float(cy), float(cx)),
+            translation_zyx=(float(tz), float(ty), float(tx)),
+            from_space=from_space,
+            to_space=to_space,
+            unit="um",
+        )
+
+    @classmethod
+    def from_basecoat(cls, tx: BasecoatSimilarityTransform3D) -> SimilarityTransform3DSpec:
+        """Construct from a ``basecoat.SimilarityTransform3D``."""
+        r_xyz = np.asarray(tx.rotation_zyx, dtype=np.float64)[::-1, ::-1]
+        scaled_xyz = float(tx.scale) * r_xyz
+        cz, cy, cx = tx.center_zyx
+        tz, ty, tx_um = tx.translation_zyx
+        rows = tuple(
+            (float(scaled_xyz[r, 0]), float(scaled_xyz[r, 1]), float(scaled_xyz[r, 2]))
+            for r in range(3)
+        )
+        return cls(
+            matrix_3x3=(rows[0], rows[1], rows[2]),
+            translation_xyz_um=(float(tx_um), float(ty), float(tz)),
+            center_xyz_um=(float(cx), float(cy), float(cz)),
+            scale=float(tx.scale),
+            versor_xyzw=_rotmat_xyz_to_versor_xyzw(r_xyz),
+        )
+
     def transform_points_xyz_um(self, pts_xyz_um: np.ndarray) -> np.ndarray:
-        """Map fixed physical points ``(N, 3)`` in ``(x, y, z)`` um to moving physical points."""
-        pts = np.asarray(pts_xyz_um, dtype=np.float64)
-        mat = np.asarray(self.matrix_3x3, dtype=np.float64)
-        cen = np.asarray(self.center_xyz_um, dtype=np.float64)
-        trn = np.asarray(self.translation_xyz_um, dtype=np.float64)
-        return (pts - cen) @ mat.T + cen + trn
+        """Map fixed physical points ``(N, 3)`` in ``(x, y, z)`` um to moving physical points via ``basecoat``."""
+        pts_xyz = np.asarray(pts_xyz_um, dtype=np.float64)
+        mapped_zyx = self.to_basecoat().transform_points(pts_xyz[..., ::-1])
+        return mapped_zyx[..., ::-1]
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -456,58 +529,21 @@ class SimilarityTransform3DSpec:
         )
 
 
-def _quat_mul_xyzw(
-    q_left: tuple[float, float, float, float],
-    q_right: tuple[float, float, float, float],
-) -> tuple[float, float, float, float]:
-    """Hamilton product ``q_left * q_right`` for unit versors in ``(x, y, z, w)`` order."""
-    x1, y1, z1, w1 = q_left
-    x2, y2, z2, w2 = q_right
-    qx = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
-    qy = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
-    qz = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
-    qw = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
-    norm = float(np.hypot(np.hypot(qx, qy), np.hypot(qz, qw)))
-    if norm <= 0.0:
-        return (0.0, 0.0, 0.0, 1.0)
-    sign = -1.0 if qw < 0.0 else 1.0
-    return (sign * qx / norm, sign * qy / norm, sign * qz / norm, sign * qw / norm)
-
-
 def compose_similarity_transforms_3d(
     transforms_hr_to_lr: Sequence[SimilarityTransform3DSpec],
 ) -> SimilarityTransform3DSpec:
-    """Compose ``x_lr = T_k(... T_1(x_hr))`` across adjacent magnification rungs into one 7-DOF transform."""
+    """Compose ``x_lr = T_k(... T_1(x_hr))`` across adjacent magnification rungs via ``basecoat.SimilarityTransform3D``."""
     if not transforms_hr_to_lr:
         raise ValueError("transforms_hr_to_lr must contain at least one SimilarityTransform3DSpec.")
     if len(transforms_hr_to_lr) == 1:
         return transforms_hr_to_lr[0]
 
-    m_tot = np.eye(3, dtype=np.float64)
-    b_tot = np.zeros(3, dtype=np.float64)
-    scale_prod = 1.0
-    q_tot: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 1.0)
-
-    for tx in transforms_hr_to_lr:
-        m_i = np.asarray(tx.matrix_3x3, dtype=np.float64)
-        c_i = np.asarray(tx.center_xyz_um, dtype=np.float64)
-        t_i = np.asarray(tx.translation_xyz_um, dtype=np.float64)
-        b_i = c_i + t_i - c_i @ m_i.T
-        m_tot = m_i @ m_tot
-        b_tot = b_tot @ m_i.T + b_i
-        scale_prod *= float(tx.scale)
-        q_tot = _quat_mul_xyzw(tx.versor_xyzw, q_tot)
-
-    c_ref = np.asarray(transforms_hr_to_lr[0].center_xyz_um, dtype=np.float64)
-    t_ref = b_tot - c_ref + c_ref @ m_tot.T
-    rows = tuple((float(m_tot[r, 0]), float(m_tot[r, 1]), float(m_tot[r, 2])) for r in range(3))
-    return SimilarityTransform3DSpec(
-        matrix_3x3=(rows[0], rows[1], rows[2]),
-        translation_xyz_um=(float(t_ref[0]), float(t_ref[1]), float(t_ref[2])),
-        center_xyz_um=(float(c_ref[0]), float(c_ref[1]), float(c_ref[2])),
-        scale=float(scale_prod),
-        versor_xyzw=q_tot,
-    )
+    chained = transforms_hr_to_lr[0].to_basecoat(from_space="r0", to_space="r1")
+    for idx, step in enumerate(transforms_hr_to_lr[1:], start=1):
+        chained = chained.then_similarity(
+            step.to_basecoat(from_space=f"r{idx}", to_space=f"r{idx + 1}")
+        )
+    return SimilarityTransform3DSpec.from_basecoat(chained)
 
 
 def resample_moving_to_fixed_7dof(
@@ -515,84 +551,39 @@ def resample_moving_to_fixed_7dof(
     moving_spacing_zyx_um: tuple[float, float, float],
     fixed_shape_zyx: tuple[int, int, int],
     fixed_spacing_zyx_um: tuple[float, float, float],
-    transform: SimilarityTransform3DSpec,
+    transform: SimilarityTransform3DSpec | BasecoatSimilarityTransform3D,
     moving_origin_zyx_um: tuple[float, float, float] = (0.0, 0.0, 0.0),
     fixed_origin_zyx_um: tuple[float, float, float] = (0.0, 0.0, 0.0),
 ) -> tuple[np.ndarray, bool]:
-    """Resample ``moving_zyx`` onto ``fixed_shape_zyx`` using ``SimilarityTransform3DSpec``.
-
-    Delegates directly to ``BASE-Laboratory/MultimodalBenchmark``
-    (``registration.i13_ladder.resample_moving_to_fixed_zyx``) when installed; otherwise
-    evaluates the identical ``SimilarityTransform3D`` coordinate map via ``scipy.ndimage.affine_transform``
-    (verified ``float32`` bit-exact, ``max_abs_diff == 0.0``).
-    """
-    mov = np.asarray(moving_zyx, dtype=np.float32)
-    try:
-        from registration.i13_ladder import (  # type: ignore[import-not-found]
-            SimilarityTransform3D,
-            resample_moving_to_fixed_zyx,
+    """Resample ``moving_zyx`` onto ``fixed_shape_zyx`` via ``basecoat.resample_volume``."""
+    bc_tx = (
+        transform
+        if isinstance(transform, BasecoatSimilarityTransform3D)
+        else transform.to_basecoat(from_space="fixed", to_space="moving")
+    )
+    moving_axes = tuple(
+        AxisSpec(name=ax, kind="space", unit="um", scale=float(sp), offset=float(orig))
+        for ax, sp, orig in zip(
+            ("z", "y", "x"), moving_spacing_zyx_um, moving_origin_zyx_um, strict=True
         )
-
-        mmb_tx = SimilarityTransform3D(
-            matrix_3x3=transform.matrix_3x3,
-            translation_xyz_um=transform.translation_xyz_um,
-            center_xyz_um=transform.center_xyz_um,
-            scale=transform.scale,
-            versor_xyzw=transform.versor_xyzw,
+    )
+    fixed_axes = tuple(
+        AxisSpec(name=ax, kind="space", unit="um", scale=float(sp), offset=float(orig))
+        for ax, sp, orig in zip(
+            ("z", "y", "x"), fixed_spacing_zyx_um, fixed_origin_zyx_um, strict=True
         )
-        out_mmb = resample_moving_to_fixed_zyx(
-            moving_zyx=mov,
-            moving_spacing_zyx_um=moving_spacing_zyx_um,
-            fixed_shape_zyx=fixed_shape_zyx,
-            fixed_spacing_zyx_um=fixed_spacing_zyx_um,
-            transform=mmb_tx,
-            moving_origin_zyx_um=moving_origin_zyx_um,
-            fixed_origin_zyx_um=fixed_origin_zyx_um,
-        )
-        return np.asarray(out_mmb, dtype=np.float32), True
-    except ImportError:
-        pass
-
-    p_perm = np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 0.0]], dtype=np.float64)
-    s_mov_inv = np.diag(
-        [
-            1.0 / float(moving_spacing_zyx_um[2]),
-            1.0 / float(moving_spacing_zyx_um[1]),
-            1.0 / float(moving_spacing_zyx_um[0]),
-        ]
     )
-    s_fix = np.diag(
-        [
-            float(fixed_spacing_zyx_um[2]),
-            float(fixed_spacing_zyx_um[1]),
-            float(fixed_spacing_zyx_um[0]),
-        ]
+    mov_vol = Volume(
+        np.asarray(moving_zyx, dtype=np.float32), axes=moving_axes, space=bc_tx.to_space
     )
-    mat = np.asarray(transform.matrix_3x3, dtype=np.float64)
-    cen = np.asarray(transform.center_xyz_um, dtype=np.float64)
-    trn = np.asarray(transform.translation_xyz_um, dtype=np.float64)
-    o_mov = np.array(
-        [moving_origin_zyx_um[2], moving_origin_zyx_um[1], moving_origin_zyx_um[0]],
-        dtype=np.float64,
-    )
-    o_fix = np.array(
-        [fixed_origin_zyx_um[2], fixed_origin_zyx_um[1], fixed_origin_zyx_um[0]],
-        dtype=np.float64,
-    )
-
-    a_zyx = p_perm @ s_mov_inv @ mat @ s_fix @ p_perm
-    b_zyx = p_perm @ s_mov_inv @ (mat @ (o_fix - cen) + cen + trn - o_mov)
-    cval = float(np.percentile(mov, 5.0))
-    resampled = affine_transform(
-        mov,
-        a_zyx,
-        offset=b_zyx,
-        output_shape=fixed_shape_zyx,
+    out_vol = resample_volume(
+        mov_vol,
+        fixed_axes,
+        target_shape=(int(fixed_shape_zyx[0]), int(fixed_shape_zyx[1]), int(fixed_shape_zyx[2])),
+        transform=bc_tx,
         order=1,
-        mode="constant",
-        cval=cval,
     )
-    return np.asarray(resampled, dtype=np.float32), False
+    return np.asarray(out_vol.data, dtype=np.float32), True
 
 
 def load_zn13x_certified_regions(
@@ -743,7 +734,21 @@ def resample_lr_to_hr_grid_7dof(
     hz1, hy1, hx1 = hz0 + hz_len, hy0 + hy_len, hx0 + hx_len
 
     # 1. Slice native HR target volume WITHOUT any resampling!
-    if savu_xzy_disk:
+    if isinstance(high_dset_or_vol, LazyVolume):
+        if savu_xzy_disk:
+            raw_hi = sanitize_xct_volume(
+                high_dset_or_vol.read_region(
+                    (slice(hx0, hx1), slice(hz0, hz1), slice(hy0, hy1))
+                ).data
+            )
+            hr_native = np.transpose(raw_hi, (1, 2, 0)).copy()
+        else:
+            hr_native = sanitize_xct_volume(
+                high_dset_or_vol.read_region(
+                    (slice(hz0, hz1), slice(hy0, hy1), slice(hx0, hx1))
+                ).data
+            ).copy()
+    elif savu_xzy_disk:
         raw_hi = sanitize_xct_volume(np.asarray(high_dset_or_vol[hx0:hx1, hz0:hz1, hy0:hy1]))
         hr_native = np.transpose(raw_hi, (1, 2, 0)).copy()
     else:
@@ -777,7 +782,21 @@ def resample_lr_to_hr_grid_7dof(
     ly1 = int(np.clip(np.ceil(mapped_zyx_vox[:, 1].max()) + pad + 1, ly0 + 1, lo_shape_zyx[1]))
     lx1 = int(np.clip(np.ceil(mapped_zyx_vox[:, 2].max()) + pad + 1, lx0 + 1, lo_shape_zyx[2]))
 
-    if savu_xzy_disk:
+    if isinstance(low_dset_or_vol, LazyVolume):
+        if savu_xzy_disk:
+            raw_lo = sanitize_xct_volume(
+                low_dset_or_vol.read_region(
+                    (slice(lx0, lx1), slice(lz0, lz1), slice(ly0, ly1))
+                ).data
+            )
+            lo_win = np.transpose(raw_lo, (1, 2, 0)).copy()
+        else:
+            lo_win = sanitize_xct_volume(
+                low_dset_or_vol.read_region(
+                    (slice(lz0, lz1), slice(ly0, ly1), slice(lx0, lx1))
+                ).data
+            ).copy()
+    elif savu_xzy_disk:
         raw_lo = sanitize_xct_volume(np.asarray(low_dset_or_vol[lx0:lx1, lz0:lz1, ly0:ly1]))
         lo_win = np.transpose(raw_lo, (1, 2, 0)).copy()
     else:
@@ -818,6 +837,7 @@ def resample_lr_to_hr_grid_7dof(
         "lr_source_window_zyx": [[lz0, lz1], [ly0, ly1], [lx0, lx1]],
         "hr_resampled": False,
         "lr_resampled_7dof": True,
+        "delegated_to_basecoat": used_mmb,
         "delegated_to_multimodal_benchmark": used_mmb,
         "pearson_r_7dof": round(pearson_r, 5),
         "coarse_mid_slice_ssim": round(mid_ssim, 5),
@@ -844,9 +864,10 @@ def extract_aligned_slab_from_h5(
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
     """Extract and 7-DOF-align a 3D slab from raw >50 GB I13-2 Savu HDF5 files out-of-core.
 
-    Uses ``MultimodalBenchmark``'s 7-DOF similarity transforms (chained across adjacent rungs for
-    ``8x``) to resample LR onto the cell-centered ``s``-coarsened physical grid of the untouched
-    native HR slab, eliminating the ~1.3% objective magnification drift toward crop edges.
+    Delegates Savu ``(X, Z, Y)`` HDF5 slicing and cell-centred 7-DOF similarity resampling to
+    ``basecoat`` (Layer 1), resampling LR onto the cell-centered ``s``-coarsened physical grid of
+    the untouched native HR slab and eliminating the ~1.3% objective magnification drift toward
+    crop edges.
     """
     if pair == "2x":
         lo_spec = ZN13X_I13_RESOLUTIONS["1p625um"]
@@ -866,26 +887,27 @@ def extract_aligned_slab_from_h5(
     )
     eff_yx = int(lr_crop_yx) if lr_crop_yx is not None else default_lr_yx
 
-    with h5py.File(low_h5_path, "r") as f_lo, h5py.File(high_h5_path, "r") as f_hi:
-        dset_lo = f_lo[dataset_key]
-        dset_hi = f_hi[dataset_key]
-        # Savu TomopyRecon stores (X, Z, Y) when shape[0] == shape[2] != shape[1]
-        is_savu_xzy = (
-            dset_hi.ndim == 3
-            and int(dset_hi.shape[0]) == int(dset_hi.shape[2])
-            and int(dset_hi.shape[1]) != int(dset_hi.shape[0])
-        )
-        slab_lo, slab_hi, reg_info = resample_lr_to_hr_grid_7dof(
-            dset_lo,
-            dset_hi,
-            lr_shape_zyx=(int(lr_slab_depth), eff_yx, eff_yx),
-            hr_center_zyx=hr_center if is_savu_xzy else None,
-            sp_lo_um=lo_spec.voxel_size_um,
-            sp_hi_um=hi_spec.voxel_size_um,
-            scale_factor=scale,
-            tx_hr_to_lr=tx_7dof,
-            savu_xzy_disk=is_savu_xzy,
-        )
+    with open_savu_h5(
+        high_h5_path, dataset_path=dataset_key, voxel_size_um=hi_spec.voxel_size_um
+    ) as lv_hi:
+        is_savu_xzy = bool(lv_hi.provenance.get("savu_xzy_transposed", False))
+        with open_savu_h5(
+            low_h5_path,
+            dataset_path=dataset_key,
+            savu_xzy=is_savu_xzy,
+            voxel_size_um=lo_spec.voxel_size_um,
+        ) as lv_lo:
+            slab_lo, slab_hi, reg_info = resample_lr_to_hr_grid_7dof(
+                lv_lo,
+                lv_hi,
+                lr_shape_zyx=(int(lr_slab_depth), eff_yx, eff_yx),
+                hr_center_zyx=hr_center if is_savu_xzy else None,
+                sp_lo_um=lo_spec.voxel_size_um,
+                sp_hi_um=hi_spec.voxel_size_um,
+                scale_factor=scale,
+                tx_hr_to_lr=tx_7dof,
+                savu_xzy_disk=False,
+            )
 
     if consistent_attenuation_window:
         joint_vmin = min(lo_spec.vmin, hi_spec.vmin)
@@ -921,7 +943,7 @@ def _read_7dof_preview_h5_pair(
     lr_size: int,
     certified_regions_path: str | Path | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
-    """Align 8-bit preview HDF5 sub-volumes (Zenodo 14245751) via MultimodalBenchmark 7-DOF transforms."""
+    """Align 8-bit preview HDF5 sub-volumes (Zenodo 14245751) via basecoat 7-DOF transforms."""
     scale = 2 if pair == "2x" else 8
     lo_spec = ZN13X_I13_RESOLUTIONS["1p625um" if pair == "2x" else "2p600um"]
     hi_spec = ZN13X_I13_RESOLUTIONS["0p8125um" if pair == "2x" else "0p325um"]
@@ -930,49 +952,62 @@ def _read_7dof_preview_h5_pair(
         tier_section="zenodo_14245751_preview_8bit",
         certified_regions_path=certified_regions_path,
     )
-    with h5py.File(lo_h5_path, "r") as f_lo, h5py.File(hi_h5_path, "r") as f_hi:
-        lo_keys = [k for k in f_lo.keys() if isinstance(f_lo[k], h5py.Dataset)]
-        hi_keys = [k for k in f_hi.keys() if isinstance(f_hi[k], h5py.Dataset)]
-        if not lo_keys or not hi_keys:
-            raise KeyError("Zenodo preview HDF5 file contained no top-level dataset.")
-        d_lo = f_lo[lo_keys[0]]
-        d_hi = f_hi[hi_keys[0]]
-        # Only use full (500, 1000, 1000) global transform when preview HDF5 matches canonical size;
-        # synthetic tiny unit-test HDF5 mocks fall back cleanly to centered identity-frame slicing.
-        is_canonical_preview = (
-            tuple(int(v) for v in d_lo.shape) == (500, 1000, 1000)
-            and tuple(int(v) for v in d_hi.shape) == (500, 1000, 1000)
-            and certified_regions_path is None
-        ) or (certified_regions_path is not None)
-        if is_canonical_preview:
-            lr_aligned, hr_native, reg_info = resample_lr_to_hr_grid_7dof(
-                d_lo,
-                d_hi,
-                lr_shape_zyx=(int(lr_size), int(lr_size), int(lr_size)),
-                hr_center_zyx=hr_center
-                if tuple(int(v) for v in d_hi.shape) == (500, 1000, 1000)
-                else None,
-                sp_lo_um=lo_spec.voxel_size_um,
-                sp_hi_um=hi_spec.voxel_size_um,
-                scale_factor=scale,
-                tx_hr_to_lr=tx_7dof,
-                savu_xzy_disk=False,
-            )
-            reg_info.update(reg_meta)
-            return (
-                normalize_volume(lr_aligned, mode="none"),
-                normalize_volume(hr_native, mode="none"),
-                reg_info,
-            )
+    try:
+        ctx_lo = open_savu_h5(lo_h5_path, savu_xzy=False, voxel_size_um=lo_spec.voxel_size_um)
+    except (KeyError, ValueError) as exc:
+        raise KeyError("Zenodo preview HDF5 file contained no top-level dataset.") from exc
 
-        # Fallback for synthetic small mock preview HDF5s in unit tests
-        eff_dz = min(int(lr_size), int(d_lo.shape[0]), int(d_hi.shape[0]) // scale)
-        eff_dy = min(int(lr_size), int(d_lo.shape[1]), int(d_hi.shape[1]) // scale)
-        eff_dx = min(int(lr_size), int(d_lo.shape[2]), int(d_hi.shape[2]) // scale)
-        lo_arr = sanitize_xct_volume(np.asarray(d_lo[:eff_dz, :eff_dy, :eff_dx]))
-        hi_arr = sanitize_xct_volume(
-            np.asarray(d_hi[: eff_dz * scale, : eff_dy * scale, : eff_dx * scale])
-        )
+    with ctx_lo as lv_lo:
+        try:
+            ctx_hi = open_savu_h5(hi_h5_path, savu_xzy=False, voxel_size_um=hi_spec.voxel_size_um)
+        except (KeyError, ValueError) as exc:
+            raise KeyError("Zenodo preview HDF5 file contained no top-level dataset.") from exc
+
+        with ctx_hi as lv_hi:
+            # Only use full (500, 1000, 1000) global transform when preview HDF5 matches canonical size;
+            # synthetic tiny unit-test HDF5 mocks fall back cleanly to centered identity-frame slicing.
+            is_canonical_preview = (
+                tuple(int(v) for v in lv_lo.shape) == (500, 1000, 1000)
+                and tuple(int(v) for v in lv_hi.shape) == (500, 1000, 1000)
+                and certified_regions_path is None
+            ) or (certified_regions_path is not None)
+            if is_canonical_preview:
+                lr_aligned, hr_native, reg_info = resample_lr_to_hr_grid_7dof(
+                    lv_lo,
+                    lv_hi,
+                    lr_shape_zyx=(int(lr_size), int(lr_size), int(lr_size)),
+                    hr_center_zyx=hr_center
+                    if tuple(int(v) for v in lv_hi.shape) == (500, 1000, 1000)
+                    else None,
+                    sp_lo_um=lo_spec.voxel_size_um,
+                    sp_hi_um=hi_spec.voxel_size_um,
+                    scale_factor=scale,
+                    tx_hr_to_lr=tx_7dof,
+                    savu_xzy_disk=False,
+                )
+                reg_info.update(reg_meta)
+                return (
+                    normalize_volume(lr_aligned, mode="none"),
+                    normalize_volume(hr_native, mode="none"),
+                    reg_info,
+                )
+
+            # Fallback for synthetic small mock preview HDF5s in unit tests
+            eff_dz = min(int(lr_size), int(lv_lo.shape[0]), int(lv_hi.shape[0]) // scale)
+            eff_dy = min(int(lr_size), int(lv_lo.shape[1]), int(lv_hi.shape[1]) // scale)
+            eff_dx = min(int(lr_size), int(lv_lo.shape[2]), int(lv_hi.shape[2]) // scale)
+            lo_arr = sanitize_xct_volume(
+                lv_lo.read_region((slice(0, eff_dz), slice(0, eff_dy), slice(0, eff_dx))).data
+            )
+            hi_arr = sanitize_xct_volume(
+                lv_hi.read_region(
+                    (
+                        slice(0, eff_dz * scale),
+                        slice(0, eff_dy * scale),
+                        slice(0, eff_dx * scale),
+                    )
+                ).data
+            )
     lo_n = normalize_volume(lo_arr, mode="none")
     hi_n = normalize_volume(hi_arr, mode="none")
     _, _, mock_info = register_multires_pair_3d(lo_n, hi_n, scale_factor=scale)
@@ -1028,9 +1063,9 @@ def prepare_zn13x_benchmark(
 ) -> tuple[Path, Path, dict[str, object]]:
     """Prepare 7-DOF-aligned LR & HR 3D TIFF volumes + provenance manifest for Diamond I13-2 ``Zn-13X``.
 
-    Experimental pairs consume ``BASE-Laboratory/MultimodalBenchmark``'s Stage 0B 7-DOF similarity
-    transforms (``certified_regions.yaml``, chained across adjacent rungs for ``8x``), resampling
-    LR onto the cell-centered coarsened grid of the unresampled HR target.
+    Experimental pairs consume Stage 0B 7-DOF similarity transforms (``certified_regions.yaml``,
+    chained across adjacent rungs for ``8x`` via ``basecoat``), resampling LR onto the
+    cell-centered coarsened grid of the unresampled HR target.
     """
     out_dir = Path(dest_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1163,8 +1198,18 @@ def prepare_zn13x_benchmark(
         lr_tmp = out_dir / f".{name}_lr.{pid}.tif"
         hr_tmp = out_dir / f".{name}_hr.{pid}.tif"
         man_tmp = out_dir / f".{name}_manifest.{pid}.json"
-        tifffile.imwrite(lr_tmp, lr_vol.astype(np.float32), photometric="minisblack")
-        tifffile.imwrite(hr_tmp, hr_vol.astype(np.float32), photometric="minisblack")
+        write_volume(
+            Volume.from_array(lr_vol.astype(np.float32), voxel_size_um=lo_spec.voxel_size_um),
+            lr_tmp,
+            compression=None,
+            overwrite=True,
+        )
+        write_volume(
+            Volume.from_array(hr_vol.astype(np.float32), voxel_size_um=hi_spec.voxel_size_um),
+            hr_tmp,
+            compression=None,
+            overwrite=True,
+        )
 
         is_exp = source_kind in {
             "local_i13_hdf5_slab",

@@ -1,19 +1,70 @@
-"""Direct geometry & AMReX ParmParse input exporter for BASE-Laboratory/OpenImpala."""
+"""OME-Zarr v0.4 data-contract exporter and deprecated legacy OpenImpala input exporter."""
 
 from __future__ import annotations
 
 import math
 import re
+import warnings
 from pathlib import Path
 from typing import Literal
 
 import numpy as np
-import tifffile
+from basecoat import Volume, VolumeSet, write_ome_zarr, write_volume
 
 from ..metrics.petrophysics import ThresholdMethod, segment_pore_space
 
 ImpalaDirection = Literal["x", "y", "z"]
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def export_volume_ome_zarr(
+    volume: np.ndarray,
+    store_path: str | Path,
+    *,
+    voxel_size_um: float | tuple[float, float, float] | None = None,
+    include_pore_labels: bool = True,
+    threshold_method: ThresholdMethod = "otsu",
+    fixed_threshold: float | None = None,
+    pore_is_low: bool = True,
+    pore_label: int = 1,
+    solid_label: int = 0,
+    multiscale_levels: int = 2,
+    overwrite: bool = True,
+) -> Path:
+    """Export a 3D XCT volume (and optional mode-downsampled pore labels) as an OME-Zarr v0.4 store.
+
+    Follows the BASE Lab ``ECOSYSTEM.md`` data contract via ``basecoat`` so Layer 3 solvers
+    and Layer 4 evaluators consume calibrated volumes and labels without tool-specific glue.
+    """
+    arr = np.asarray(volume, dtype=np.float32)
+    if arr.ndim != 3:
+        raise ValueError(
+            f"export_volume_ome_zarr expects a 3D volume (D, H, W), got shape {arr.shape}."
+        )
+
+    img_vol = Volume.from_array(arr, voxel_size_um=voxel_size_um)
+    if not include_pore_labels:
+        return write_ome_zarr(
+            img_vol, store_path, multiscale_levels=multiscale_levels, overwrite=overwrite
+        )
+
+    pore_mask, thresh_val = segment_pore_space(
+        arr,
+        method=threshold_method,
+        fixed_value=fixed_threshold,
+        pore_is_low=pore_is_low,
+    )
+    labeled = np.where(pore_mask, np.uint8(pore_label), np.uint8(solid_label))
+    lbl_vol = Volume(
+        labeled,
+        axes=img_vol.axes,
+        label_names={int(solid_label): "solid", int(pore_label): "pore"},
+        provenance={"threshold_method": threshold_method, "threshold_value": float(thresh_val)},
+    )
+    vset = VolumeSet(img_vol, labels={"phase": lbl_vol})
+    return write_ome_zarr(
+        vset, store_path, multiscale_levels=multiscale_levels, overwrite=overwrite
+    )
 
 
 def export_for_openimpala(
@@ -27,17 +78,25 @@ def export_for_openimpala(
     solid_label: int = 0,
     direction: ImpalaDirection = "x",
     max_grid_size: int = 64,
+    *,
+    _warn_deprecated: bool = True,
 ) -> tuple[Path, Path]:
-    """Export a 3D XCT volume or binary mask for direct simulation in ``BASE-Laboratory/OpenImpala``.
+    """Export a 3D XCT volume or binary mask as uncompressed 8-bit TIFF + AMReX ParmParse ``.inputs``.
 
-    Writes:
-    1. ``<output_dir>/<name>.tif``: Uncompressed 8-bit multi-page TIFF (``uint8``, shape ``(D, H, W)``)
-       with ``pore_label`` marking the active diffusive phase and ``solid_label`` marking solid.
-    2. ``<output_dir>/<name>_openimpala.inputs``: Ready-to-run AMReX ``ParmParse`` input deck for
-       ``OpenImpala``'s ``Tortuosity`` / ``Diffusion`` executable, setting ``amr.blocking_factor``
-       automatically to ``gcd(W, H, D, 8)`` so arbitrary odd or thin-slab domain dimensions never
-       trigger an AMReX grid-divisibility abort.
+    .. deprecated:: 0.2.2
+        Tool-to-solver bespoke exporters are deprecated under ``ECOSYSTEM.md`` and will be
+        removed in ``v0.3.0`` once ``OpenImpala v5.1`` reads ``.ome.zarr`` directly; prefer
+        :func:`export_volume_ome_zarr` (or ``basecoat.write_ome_zarr``) for new workflows.
     """
+    if _warn_deprecated:
+        warnings.warn(
+            "export_for_openimpala is deprecated under ECOSYSTEM.md and scheduled for removal "
+            "in OpenLSR-X v0.3.0 once OpenImpala v5.1 accepts OME-Zarr directly; prefer "
+            "openlsrx.io.export_volume_ome_zarr (or basecoat.write_ome_zarr).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+
     clean_name = str(name).strip()
     if not clean_name or ".." in clean_name or _SAFE_NAME_RE.fullmatch(clean_name) is None:
         raise ValueError(
@@ -72,11 +131,13 @@ def export_for_openimpala(
     tiff_path = out_root / f"{clean_name}.tif"
     inputs_path = out_root / f"{clean_name}_openimpala.inputs"
 
-    tifffile.imwrite(
+    write_volume(
+        Volume.uncalibrated(
+            labeled, label_names={int(solid_label): "solid", int(pore_label): "pore"}
+        ),
         tiff_path,
-        labeled,
-        photometric="minisblack",
         compression=None,
+        overwrite=True,
     )
 
     depth_z, height_y, width_x = labeled.shape

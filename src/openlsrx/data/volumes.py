@@ -6,12 +6,11 @@ import re
 from pathlib import Path
 from typing import Literal
 
-import h5py
 import imageio.v3 as iio
 import numpy as np
 import pytorch_lightning as pl
-import tifffile
 import torch.nn.functional as F
+from basecoat import open_volume, read_volume
 from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 
@@ -43,6 +42,13 @@ def _natural_key(path: Path) -> list[int | str]:
     return [int(tok) if tok.isdigit() else tok.lower() for tok in _NATURAL_RE.split(path.name)]
 
 
+def _is_zarr_store(path: Path) -> bool:
+    lname = path.name.lower()
+    return lname.endswith((".zarr", ".ome.zarr")) or (
+        path.is_dir() and ((path / ".zgroup").exists() or (path / ".zarray").exists())
+    )
+
+
 def load_volume_any(
     path: str | Path,
     h5_dataset_key: str = "4-TomopyRecon-tomo/data",
@@ -51,11 +57,10 @@ def load_volume_any(
     roi_slices: tuple[slice, slice, slice] | None = None,
     preserve_2d: bool = False,
 ) -> np.ndarray:
-    """Load a 2D/3D XCT volume from multi-page TIFF, a slice directory, `.npy`, or HDF5/NeXus.
+    """Load a 2D/3D XCT volume from OME-Zarr (`.ome.zarr`), multi-page TIFF, a slice directory, `.npy`, or HDF5/NeXus.
 
-    When loading large synchrotron HDF5 reconstructions (e.g., 53 GB Savu/TomoPy files),
-    ``roi_slices`` (specified in post-transpose ``(Z, Y, X)`` coordinates) are mapped back to
-    the on-disk HDF5 axis order and sliced *before* materializing the array in host RAM.
+    Delegates OME-Zarr, HDF5, TIFF, and `.npy` I/O to ``basecoat`` so out-of-core ``roi_slices``
+    are read lazily before materialising arrays in host RAM.
     """
     p = Path(path)
     if not p.exists():
@@ -63,7 +68,26 @@ def load_volume_any(
 
     roi_applied_on_disk = False
     max_slices_applied = False
-    if p.is_dir():
+    if _is_zarr_store(p):
+        with open_volume(p) as lv:
+            if roi_slices is not None and lv.ndim == 3:
+                raw_slices = [slice(None), slice(None), slice(None)]
+                if transpose_axes is not None:
+                    for out_ax, sl in enumerate(roi_slices):
+                        raw_slices[transpose_axes[out_ax]] = sl
+                else:
+                    raw_slices = list(roi_slices)
+                vol = sanitize_xct_volume(lv.read_region(tuple(raw_slices)).data)
+                roi_applied_on_disk = True
+            elif max_slices is not None and lv.ndim == 3:
+                raw_slices = [slice(None), slice(None), slice(None)]
+                ax0 = transpose_axes[0] if transpose_axes is not None else 0
+                raw_slices[ax0] = slice(0, int(max_slices))
+                vol = sanitize_xct_volume(lv.read_region(tuple(raw_slices)).data)
+                max_slices_applied = True
+            else:
+                vol = sanitize_xct_volume(lv.to_volume(max_bytes=16 * 1024**3).data)
+    elif p.is_dir():
         exts = {".tif", ".tiff", ".png", ".bmp", ".jpg", ".jpeg"}
         files = sorted([f for f in p.iterdir() if f.suffix.lower() in exts], key=_natural_key)
         if not files:
@@ -73,49 +97,43 @@ def load_volume_any(
             max_slices_applied = True
         raw_slices_list = []
         for f in files:
-            img = tifffile.imread(f) if f.suffix.lower() in {".tif", ".tiff"} else iio.imread(f)
+            img = (
+                read_volume(f, max_bytes=2 * 1024**3).data
+                if f.suffix.lower() in {".tif", ".tiff"}
+                else iio.imread(f)
+            )
             if img.ndim == 3:
                 img = img[..., 0]
             raw_slices_list.append(np.asarray(img))
         vol = sanitize_xct_volume(np.stack(raw_slices_list, axis=0))
     elif p.suffix.lower() in {".h5", ".hdf5", ".nxs"}:
-        with h5py.File(p, "r") as hf:
-            if h5_dataset_key not in hf:
-                # Fall back to single top-level dataset when unambiguous (e.g., Zenodo cropped .h5)
-                top_dsets = [k for k in hf.keys() if isinstance(hf[k], h5py.Dataset)]
-                if len(top_dsets) == 1:
-                    dset = hf[top_dsets[0]]
-                else:
-                    raise KeyError(
-                        f"HDF5 dataset key {h5_dataset_key!r} not found in {p}. "
-                        f"Top-level keys: {list(hf.keys())}"
-                    )
-            else:
-                dset = hf[h5_dataset_key]
-
-            if roi_slices is not None and dset.ndim == 3:
+        try:
+            lv_cm = open_volume(p, dataset_path=h5_dataset_key)
+        except KeyError:
+            try:
+                lv_cm = open_volume(p, dataset_path=None)
+            except (KeyError, ValueError) as exc:
+                raise KeyError(f"HDF5 dataset key {h5_dataset_key!r} not found in {p}.") from exc
+        with lv_cm as lv:
+            if roi_slices is not None and lv.ndim == 3:
                 raw_slices = [slice(None), slice(None), slice(None)]
                 if transpose_axes is not None:
                     for out_ax, sl in enumerate(roi_slices):
                         raw_slices[transpose_axes[out_ax]] = sl
                 else:
                     raw_slices = list(roi_slices)
-                vol = sanitize_xct_volume(np.asarray(dset[tuple(raw_slices)]))
+                vol = sanitize_xct_volume(lv.read_region(tuple(raw_slices)).data)
                 roi_applied_on_disk = True
-            elif max_slices is not None and dset.ndim == 3:
-                if transpose_axes is not None:
-                    raw_slices = [slice(None), slice(None), slice(None)]
-                    raw_slices[transpose_axes[0]] = slice(0, int(max_slices))
-                    vol = sanitize_xct_volume(np.asarray(dset[tuple(raw_slices)]))
-                else:
-                    vol = sanitize_xct_volume(np.asarray(dset[: int(max_slices)]))
+            elif max_slices is not None and lv.ndim == 3:
+                raw_slices = [slice(None), slice(None), slice(None)]
+                ax0 = transpose_axes[0] if transpose_axes is not None else 0
+                raw_slices[ax0] = slice(0, int(max_slices))
+                vol = sanitize_xct_volume(lv.read_region(tuple(raw_slices)).data)
                 max_slices_applied = True
             else:
-                vol = sanitize_xct_volume(np.asarray(dset[()]))
-    elif p.suffix.lower() in {".tif", ".tiff"}:
-        vol = sanitize_xct_volume(tifffile.imread(p))
-    elif p.suffix.lower() == ".npy":
-        vol = sanitize_xct_volume(np.load(p))
+                vol = sanitize_xct_volume(lv.to_volume(max_bytes=16 * 1024**3).data)
+    elif p.suffix.lower() in {".tif", ".tiff", ".npy"}:
+        vol = sanitize_xct_volume(read_volume(p, max_bytes=16 * 1024**3).data)
     else:
         raise ValueError(f"Unsupported XCT volume file format: {p.suffix} ({p})")
 

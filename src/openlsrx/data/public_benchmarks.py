@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import tifffile
+from basecoat import Volume, read_volume, write_volume
 from scipy.ndimage import distance_transform_edt, gaussian_filter
 
 from .synthetic import _porespy_blobs
@@ -321,7 +321,8 @@ def fetch_or_generate_rock_sample(
         vol: np.ndarray | None = None
 
         if spec.url is not None and not prefer_offline:
-            raw_tmp = out_dir / f".{spec.name}.{pid}.download"
+            dl_ext = "tif" if spec.file_format == "tif" else "raw"
+            raw_tmp = out_dir / f".{spec.name}.{pid}.{dl_ext}"
             try:
                 _download_https_file(spec.url, raw_tmp, timeout_s=timeout_s)
                 if spec.sha256 is not None:
@@ -338,18 +339,19 @@ def fetch_or_generate_rock_sample(
                         )
 
                 if spec.file_format == "tif":
-                    loaded = tifffile.imread(raw_tmp)
+                    loaded = read_volume(raw_tmp).data
                     cropped = _center_crop_3d(loaded, shape=shape)
                     vol = normalize_volume(
                         cropped, mode="percentile", lower_pct=0.2, upper_pct=99.8
                     )
                 else:
-                    raw_bytes = np.fromfile(raw_tmp, dtype=spec.raw_dtype)
-                    expected_elems = int(np.prod(spec.raw_shape))
-                    if raw_bytes.size >= expected_elems:
-                        arr = raw_bytes[:expected_elems].reshape(spec.raw_shape)
-                        cropped = _center_crop_3d(arr, shape=shape)
-                        vol = normalize_volume(cropped, mode="minmax")
+                    arr = read_volume(
+                        raw_tmp,
+                        raw_shape=spec.raw_shape,
+                        raw_dtype=spec.raw_dtype,
+                    ).data
+                    cropped = _center_crop_3d(arr, shape=shape)
+                    vol = normalize_volume(cropped, mode="minmax")
             except Exception as exc:
                 if not allow_offline_fallback:
                     raise RuntimeError(
@@ -371,7 +373,12 @@ def fetch_or_generate_rock_sample(
         is_exp = source_kind.startswith("downloaded")
         tif_tmp = out_dir / f".{spec.name}_hr.{pid}.tif"
         man_tmp = out_dir / f".{spec.name}_manifest.{pid}.json"
-        tifffile.imwrite(tif_tmp, vol.astype(np.float32), photometric="minisblack")
+        write_volume(
+            Volume.from_array(vol.astype(np.float32)),
+            tif_tmp,
+            compression=None,
+            overwrite=True,
+        )
         sha = _hash_file(tif_tmp, "sha256")
         manifest: dict[str, object] = {
             "name": spec.name,
@@ -502,21 +509,14 @@ def _read_verified_uint16_raw(
     raw_dtype: str = "<u2",
     expected_md5: str | None = None,
 ) -> np.ndarray:
-    """Load a raw binary volume, verify MD5 when requested, and scale linearly by 1/65535."""
+    """Load a raw binary volume via basecoat, verify MD5 when requested, and scale linearly by 1/65535."""
     if expected_md5 is not None:
         actual_md5 = _hash_file(raw_path, "md5")
         if actual_md5.lower() != expected_md5.lower():
             raise ValueError(
                 f"MD5 mismatch for {raw_path.name}: expected {expected_md5}, got {actual_md5}"
             )
-    expected_elems = int(np.prod(expected_shape))
-    arr = np.fromfile(raw_path, dtype=raw_dtype)
-    if arr.size != expected_elems:
-        raise ValueError(
-            f"Raw element count mismatch for {raw_path.name}: "
-            f"expected {expected_elems} ({expected_shape}), got {arr.size}"
-        )
-    reshaped = arr.reshape(expected_shape)
+    reshaped = read_volume(raw_path, raw_shape=expected_shape, raw_dtype=raw_dtype).data
     if np.dtype(raw_dtype).kind == "u" and np.dtype(raw_dtype).itemsize == 2:
         return (reshaped.astype(np.float32) / 65535.0).astype(np.float32, copy=False)
     return normalize_volume(reshaped.astype(np.float32), mode="minmax")
@@ -744,8 +744,18 @@ def prepare_bentheimer_dualscan_benchmark(
         lr_tmp = out_dir / f".{spec.name}_lr.{pid}.tif"
         hr_tmp = out_dir / f".{spec.name}_hr.{pid}.tif"
         man_tmp = out_dir / f".{spec.name}_manifest.{pid}.json"
-        tifffile.imwrite(lr_tmp, lr_vol.astype(np.float32), photometric="minisblack")
-        tifffile.imwrite(hr_tmp, hr_vol.astype(np.float32), photometric="minisblack")
+        write_volume(
+            Volume.from_array(lr_vol.astype(np.float32), voxel_size_um=spec.low_voxel_size_um),
+            lr_tmp,
+            compression=None,
+            overwrite=True,
+        )
+        write_volume(
+            Volume.from_array(hr_vol.astype(np.float32), voxel_size_um=spec.high_voxel_size_um),
+            hr_tmp,
+            compression=None,
+            overwrite=True,
+        )
 
         manifest: dict[str, object] = {
             "name": spec.name,
