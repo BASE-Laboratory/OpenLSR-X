@@ -1,0 +1,58 @@
+# Cross-Beamline Task T2 SwinIR-2.5D Configuration (I13-2 169067 1.625 um -> K11 DIAD 43334 0.54 um, 3x)
+# Strictly gated on MultimodalBenchmark Stage 0C octant TRE <= 1.0 um (--stage0c-yaml),
+# with AstraReconGpu X-axis chirality correction and quantile cross-beamline spectral calibration.
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 300
+  check_val_every_n_epoch: 10
+  log_every_n_steps: 20
+
+model:
+  backbone: swinir
+  context_slices: 3
+  out_channels: 48
+  num_blocks: 4
+  swin_window_size: 8
+  swin_num_heads: 4
+  output_activation: clamp
+  pixel_loss_type: l1
+  learning_rate: 1.5e-4
+  adaptive_size: 8
+  accumulate_n_batches: 1
+  super_res_factor: 3
+  use_adversarial_loss: false
+  use_vgg_loss: false
+  conservation_loss_weight: 0.25
+  conservation_psf_sigma: 0.8
+  topology_loss_weight: 0.05
+  gradient_loss_weight: 0.10
+  ffl_loss_weight: 0.05
+  sample_id: Zn13X_T2_DIAD_3x_SwinIR_25D_Physics
+
+data:
+  class_path: openlsrx.data.PairedVolumeDataModule
+  init_args:
+    low_path: data/benchmarks/zn13x_t2_diad_3x_lr.tif
+    high_path: data/benchmarks/zn13x_t2_diad_3x_hr.tif
+    scale_factor: 3
+    context_slices: 3
+    norm_mode: percentile
+    cross_scan_calibration: quantile
+    calibration_psf_sigma: 0.8
+    train_frac: 0.70
+    val_frac: 0.15
+    guard_slices_lr: 1
+    train_axes: ["yz", "xz", "xy"]
+    test_axis: perpendicular
+    predict_axis: xy
+    patch_size_lr: 24
+    augment: true
+    batch_size: 4
+    eval_batch_size: 4
+    num_workers: 2
+    pin_memory: true
+    seed: 42

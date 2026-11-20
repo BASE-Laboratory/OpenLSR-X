@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Iterator
 from dataclasses import dataclass
+from fractions import Fraction
 from typing import Literal
 
 import cv2
@@ -17,6 +18,14 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset, Sampler
 
 NormMode = Literal["minmax", "percentile", "fixed", "none"]
 CrossScanCalibrationMode = Literal["none", "affine", "quantile"]
+
+
+def rational_scale_pq(scale_factor: float) -> tuple[int, int]:
+    """Return exact rational ``(num_p, den_q)`` for rational XCT scales (e.g. ``1.6 -> (8, 5)``, ``2.5 -> (5, 2)``)."""
+    frac = Fraction(float(scale_factor)).limit_denominator(16)
+    if math.isclose(float(frac), float(scale_factor), rel_tol=1e-5, abs_tol=1e-5):
+        return int(frac.numerator), int(frac.denominator)
+    return max(1, int(round(float(scale_factor) * 100))), 100
 
 
 @dataclass(frozen=True)
@@ -439,6 +448,7 @@ def split_volume_spatially(
     if hr.ndim != 3:
         raise ValueError(f"Expected 3D HR volume, got shape {hr.shape}.")
     s_float = float(scale_factor)
+    _, den_q = rational_scale_pq(s_float)
     total_hr = hr.shape[split_axis]
     total_lr = (
         int(lr_volume.shape[split_axis])
@@ -451,21 +461,43 @@ def split_volume_spatially(
             f"at scale_factor={scale_factor}."
         )
 
-    usable_lr = total_lr - 2 * guard_slices_lr
-    if usable_lr < 3:
-        raise ValueError("guard_slices_lr leaves fewer than 3 LR slices across splits.")
-
-    n_train_lr = max(1, int(round(usable_lr * train_frac)))
-    n_val_lr = max(1, int(round(usable_lr * val_frac)))
-    if n_train_lr + n_val_lr >= usable_lr:
-        n_train_lr = max(1, usable_lr - 2)
-        n_val_lr = 1
-    n_test_lr = usable_lr - n_train_lr - n_val_lr
+    eff_guard = int(guard_slices_lr)
+    if den_q > 1 and total_lr % den_q == 0 and total_lr >= 3 * den_q:
+        snapped_guard = ((eff_guard + den_q - 1) // den_q) * den_q if eff_guard > 0 else 0
+        if total_lr - 2 * snapped_guard >= 3 * den_q:
+            eff_guard = snapped_guard
+            usable_lr = total_lr - 2 * eff_guard
+            n_train_lr = max(den_q, int(round((usable_lr * train_frac) / den_q)) * den_q)
+            n_val_lr = max(den_q, int(round((usable_lr * val_frac) / den_q)) * den_q)
+            if n_train_lr + n_val_lr > usable_lr - den_q:
+                n_train_lr = max(den_q, usable_lr - 2 * den_q)
+                n_val_lr = den_q
+            n_test_lr = usable_lr - n_train_lr - n_val_lr
+        else:
+            usable_lr = total_lr - 2 * eff_guard
+            if usable_lr < 3:
+                raise ValueError("guard_slices_lr leaves fewer than 3 LR slices across splits.")
+            n_train_lr = max(1, int(round(usable_lr * train_frac)))
+            n_val_lr = max(1, int(round(usable_lr * val_frac)))
+            if n_train_lr + n_val_lr >= usable_lr:
+                n_train_lr = max(1, usable_lr - 2)
+                n_val_lr = 1
+            n_test_lr = usable_lr - n_train_lr - n_val_lr
+    else:
+        usable_lr = total_lr - 2 * eff_guard
+        if usable_lr < 3:
+            raise ValueError("guard_slices_lr leaves fewer than 3 LR slices across splits.")
+        n_train_lr = max(1, int(round(usable_lr * train_frac)))
+        n_val_lr = max(1, int(round(usable_lr * val_frac)))
+        if n_train_lr + n_val_lr >= usable_lr:
+            n_train_lr = max(1, usable_lr - 2)
+            n_val_lr = 1
+        n_test_lr = usable_lr - n_train_lr - n_val_lr
 
     t0_lr, t1_lr = 0, n_train_lr
-    v0_lr = t1_lr + guard_slices_lr
+    v0_lr = t1_lr + eff_guard
     v1_lr = v0_lr + n_val_lr
-    s0_lr = v1_lr + guard_slices_lr
+    s0_lr = v1_lr + eff_guard
     s1_lr = s0_lr + n_test_lr
 
     def _slice_axis(arr: np.ndarray, start: int, stop: int) -> np.ndarray:
@@ -649,7 +681,10 @@ class PairedSliceDataset(Dataset[tuple[Tensor, Tensor]]):
         )
 
         if self.patch_size_lr is not None and self.high_res is not None:
+            _, den_q = rational_scale_pq(self.scale_factor)
             p_lr = self.patch_size_lr
+            if den_q > 1 and p_lr >= den_q:
+                p_lr = max(den_q, (p_lr // den_q) * den_q)
             p_hr = max(1, int(round(p_lr * self.scale_factor)))
             h_lr, w_lr = int(lr.shape[-2]), int(lr.shape[-1])
             if h_lr < p_lr or w_lr < p_lr:
@@ -663,8 +698,12 @@ class PairedSliceDataset(Dataset[tuple[Tensor, Tensor]]):
                 hr = torch.from_numpy(hr_np)
                 h_lr, w_lr = int(lr.shape[-2]), int(lr.shape[-1])
 
-            top = int(torch.randint(0, h_lr - p_lr + 1, (1,)).item())
-            left = int(torch.randint(0, w_lr - p_lr + 1, (1,)).item())
+            if den_q > 1 and (h_lr - p_lr) >= 0 and (w_lr - p_lr) >= 0:
+                top = int(torch.randint(0, (h_lr - p_lr) // den_q + 1, (1,)).item()) * den_q
+                left = int(torch.randint(0, (w_lr - p_lr) // den_q + 1, (1,)).item()) * den_q
+            else:
+                top = int(torch.randint(0, h_lr - p_lr + 1, (1,)).item())
+                left = int(torch.randint(0, w_lr - p_lr + 1, (1,)).item())
             lr = lr[..., top : top + p_lr, left : left + p_lr]
 
             h_hr, w_hr = int(hr.shape[-2]), int(hr.shape[-1])

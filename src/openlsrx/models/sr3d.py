@@ -68,6 +68,32 @@ class ResidualBlock3D(nn.Module):
         return x + self.res_scale * h
 
 
+def _rational_3d_pq(scale_factor: float) -> tuple[int, int]:
+    from fractions import Fraction
+
+    frac = Fraction(float(scale_factor)).limit_denominator(16)
+    if math.isclose(float(frac), float(scale_factor), rel_tol=1e-5, abs_tol=1e-5):
+        return int(frac.numerator), int(frac.denominator)
+    return max(1, int(round(float(scale_factor) * 100))), 100
+
+
+def _factor_3d_steps(scale_factor: float) -> tuple[list[int], int]:
+    s_round = int(round(scale_factor))
+    if s_round >= 1 and math.isclose(scale_factor, float(s_round), rel_tol=1e-6, abs_tol=1e-6):
+        rem = s_round
+        steps_23: list[int] = []
+        while rem % 2 == 0:
+            steps_23.append(2)
+            rem //= 2
+        while rem % 3 == 0:
+            steps_23.append(3)
+            rem //= 3
+        if rem == 1:
+            return steps_23, s_round
+    n_pow2 = int(math.floor(math.log2(scale_factor) + 1e-9))
+    return [2] * n_pow2, 2**n_pow2
+
+
 class Generator3D(nn.Module):
     """3D residual super-resolution network using trilinear resize-Conv3d upsampling."""
 
@@ -76,28 +102,20 @@ class Generator3D(nn.Module):
         in_channels: int = 1,
         out_channels: int = 24,
         num_blocks: int = 4,
-        super_res_factor: int = 2,
+        super_res_factor: float | int = 2,
     ) -> None:
         super().__init__()
-        if super_res_factor < 1:
+        sf = float(super_res_factor)
+        if sf < 1.0:
             raise ValueError(f"Generator3D super_res_factor must be >= 1, got {super_res_factor}.")
-        rem = int(super_res_factor)
-        up_steps: list[int] = []
-        while rem % 2 == 0:
-            up_steps.append(2)
-            rem //= 2
-        while rem % 3 == 0:
-            up_steps.append(3)
-            rem //= 3
-        if rem != 1:
-            raise ValueError(
-                f"Generator3D super_res_factor must factor into 2s and 3s (1, 2, 3, 4, 6, 8, ...), "
-                f"got {super_res_factor}."
-            )
+        up_steps, base_scale = _factor_3d_steps(sf)
         self.in_channels = int(in_channels)
         self.out_channels = int(out_channels)
         self.num_blocks = int(num_blocks)
-        self.super_res_factor = int(super_res_factor)
+        self.super_res_factor: float | int = int(round(sf)) if sf.is_integer() else sf
+        self._has_residual_up = not math.isclose(
+            sf / float(base_scale), 1.0, rel_tol=1e-5, abs_tol=1e-5
+        )
 
         self.conv_first = nn.Conv3d(
             self.in_channels, self.out_channels, kernel_size=3, padding=1, padding_mode="reflect"
@@ -121,6 +139,14 @@ class Generator3D(nn.Module):
                 ]
             )
         self.upsample = nn.Sequential(*up_layers)
+        self.residual_refine: nn.Sequential | None = (
+            nn.Sequential(
+                _SafeReflectConv3d(self.out_channels, self.out_channels, kernel_size=3, padding=1),
+                nn.LeakyReLU(0.2, inplace=True),
+            )
+            if self._has_residual_up
+            else None
+        )
         self.conv_last = nn.Conv3d(
             self.out_channels, self.in_channels, kernel_size=3, padding=1, padding_mode="reflect"
         )
@@ -128,15 +154,26 @@ class Generator3D(nn.Module):
         self.conv_last.weight.data.mul_(0.1)
 
     def forward(self, x: Tensor) -> Tensor:
+        sf = float(self.super_res_factor)
+        target_dhw = (
+            max(1, int(round(x.shape[2] * sf))),
+            max(1, int(round(x.shape[3] * sf))),
+            max(1, int(round(x.shape[4] * sf))),
+        )
         base = F.interpolate(
             x,
-            scale_factor=self.super_res_factor,
+            size=target_dhw,
             mode="trilinear",
             align_corners=False,
         )
         feat = _safe_conv3d(self.conv_first, x)
         feat = feat + _safe_conv3d(self.trunk_conv, self.trunk(feat))
-        out = base + _safe_conv3d(self.conv_last, self.upsample(feat))
+        up_feat = self.upsample(feat)
+        if self.residual_refine is not None or up_feat.shape[2:] != target_dhw:
+            up_feat = F.interpolate(up_feat, size=target_dhw, mode="trilinear", align_corners=False)
+            if self.residual_refine is not None:
+                up_feat = self.residual_refine(up_feat)
+        out = base + _safe_conv3d(self.conv_last, up_feat)
         clamped = torch.clamp(out, 0.0, 1.0)
         return out + (clamped - out).detach() if self.training else clamped
 
@@ -148,7 +185,7 @@ class PairedSubCubeDataset(Dataset[tuple[Tensor, Tensor]]):
         self,
         lr_vol: np.ndarray,
         hr_vol: np.ndarray,
-        scale_factor: int = 2,
+        scale_factor: float | int = 2,
         patch_size_lr: int = 16,
         samples_per_epoch: int = 32,
         deterministic: bool = False,
@@ -157,8 +194,13 @@ class PairedSubCubeDataset(Dataset[tuple[Tensor, Tensor]]):
     ) -> None:
         self.lr_vol = np.asarray(lr_vol, dtype=np.float32)
         self.hr_vol = np.asarray(hr_vol, dtype=np.float32)
-        self.scale_factor = int(scale_factor)
-        self.patch_size_lr = tuple(min(int(patch_size_lr), s) for s in self.lr_vol.shape)
+        self.scale_factor = float(scale_factor)
+        _, self._den_q = _rational_3d_pq(self.scale_factor)
+        q = self._den_q
+        raw_ps = tuple(min(int(patch_size_lr), s) for s in self.lr_vol.shape)
+        self.patch_size_lr = tuple(
+            max(q, (p // q) * q) if (q > 1 and p >= q) else p for p in raw_ps
+        )
         self.samples_per_epoch = int(samples_per_epoch)
         self.deterministic = bool(deterministic)
         self.augment = bool(augment) and not self.deterministic
@@ -170,31 +212,32 @@ class PairedSubCubeDataset(Dataset[tuple[Tensor, Tensor]]):
     def __getitem__(self, idx: int) -> tuple[Tensor, Tensor]:
         pd, ph, pw = self.patch_size_lr
         d, h, w = self.lr_vol.shape
-        if self.deterministic:
-            rng = np.random.default_rng(idx + 1000)
+        q = self._den_q
+        rng = np.random.default_rng(idx + 1000) if self.deterministic else self.rng
+        if q > 1 and d >= pd and h >= ph and w >= pw:
+            z0 = int(rng.integers(0, (d - pd) // q + 1)) * q
+            y0 = int(rng.integers(0, (h - ph) // q + 1)) * q
+            x0 = int(rng.integers(0, (w - pw) // q + 1)) * q
+        else:
             z0 = int(rng.integers(0, max(1, d - pd + 1)))
             y0 = int(rng.integers(0, max(1, h - ph + 1)))
             x0 = int(rng.integers(0, max(1, w - pw + 1)))
-        else:
-            z0 = int(self.rng.integers(0, max(1, d - pd + 1)))
-            y0 = int(self.rng.integers(0, max(1, h - ph + 1)))
-            x0 = int(self.rng.integers(0, max(1, w - pw + 1)))
 
-        s = self.scale_factor
+        sf = self.scale_factor
+        hz0, hy0, hx0 = int(round(z0 * sf)), int(round(y0 * sf)), int(round(x0 * sf))
+        hpd, hph, hpw = int(round(pd * sf)), int(round(ph * sf)), int(round(pw * sf))
+        hz0 = min(max(0, hz0), max(0, self.hr_vol.shape[0] - hpd))
+        hy0 = min(max(0, hy0), max(0, self.hr_vol.shape[1] - hph))
+        hx0 = min(max(0, hx0), max(0, self.hr_vol.shape[2] - hpw))
+
         lr_patch = self.lr_vol[z0 : z0 + pd, y0 : y0 + ph, x0 : x0 + pw]
-        hr_patch = self.hr_vol[
-            z0 * s : (z0 + pd) * s,
-            y0 * s : (y0 + ph) * s,
-            x0 * s : (x0 + pw) * s,
-        ]
+        hr_patch = self.hr_vol[hz0 : hz0 + hpd, hy0 : hy0 + hph, hx0 : hx0 + hpw]
 
         if self.augment:
-            # 1) Independent 3D reflections along (Z, Y, X)
             for ax in range(3):
                 if bool(self.rng.integers(0, 2)):
                     lr_patch = np.flip(lr_patch, axis=ax)
                     hr_patch = np.flip(hr_patch, axis=ax)
-            # 2) Shape-preserving 3D axis permutations (full 48-element O_h group on cubic patches)
             if pd == ph == pw:
                 perm = tuple(int(a) for a in self.rng.permutation(3))
                 if perm != (0, 1, 2):
@@ -215,7 +258,7 @@ def build_3d_subcube_dataloaders(
     hr_train: np.ndarray,
     lr_val: np.ndarray,
     hr_val: np.ndarray,
-    scale_factor: int = 2,
+    scale_factor: float | int = 2,
     patch_size_lr: int = 16,
     train_samples: int = 32,
     val_samples: int = 8,
@@ -256,7 +299,7 @@ class SR3DResNet(pl.LightningModule):
     def __init__(
         self,
         learning_rate: float = 2e-4,
-        super_res_factor: int = 2,
+        super_res_factor: float | int = 2,
         out_channels: int = 24,
         num_blocks: int = 4,
         loss_type: Literal["l1", "mse"] = "l1",
@@ -270,7 +313,8 @@ class SR3DResNet(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters()
         self.learning_rate = float(learning_rate)
-        self.super_res_factor = int(super_res_factor)
+        sf = float(super_res_factor)
+        self.super_res_factor: float | int = int(round(sf)) if sf.is_integer() else sf
         self.pore_is_low = bool(pore_is_low)
         self.conservation_loss_weight = float(conservation_loss_weight)
         self.conservation_psf_sigma = float(conservation_psf_sigma)
@@ -409,12 +453,12 @@ class SR3DResNet(pl.LightningModule):
 def super_resolve_volume_3d(
     generator_3d: nn.Module,
     low_volume: np.ndarray,
-    scale_factor: int = 2,
+    scale_factor: float | int = 2,
     patch_size_lr: int = 24,
     overlap_lr: int = 4,
     device: torch.device | str | None = None,
 ) -> np.ndarray:
-    """Sliding-window 3D inference with raised-cosine feathering to eliminate tile seams."""
+    """Sliding-window 3D inference with raised-cosine feathering across integer and rational scales."""
     vol = np.asarray(low_volume, dtype=np.float32)
     if vol.ndim != 3:
         raise ValueError(f"Expected 3D LR volume, got shape {vol.shape}.")
@@ -430,15 +474,30 @@ def super_resolve_volume_3d(
     was_training = generator_3d.training
     generator_3d.eval()
 
+    sf = float(scale_factor)
+    _, q = _rational_3d_pq(sf)
     d, h, w = vol.shape
-    pd, ph, pw = min(patch_size_lr, d), min(patch_size_lr, h), min(patch_size_lr, w)
-    step_d = max(1, pd - overlap_lr)
-    step_h = max(1, ph - overlap_lr)
-    step_w = max(1, pw - overlap_lr)
+    raw_pd, raw_ph, raw_pw = min(patch_size_lr, d), min(patch_size_lr, h), min(patch_size_lr, w)
+    pd = max(q, (raw_pd // q) * q) if (q > 1 and raw_pd >= q) else raw_pd
+    ph = max(q, (raw_ph // q) * q) if (q > 1 and raw_ph >= q) else raw_ph
+    pw = max(q, (raw_pw // q) * q) if (q > 1 and raw_pw >= q) else raw_pw
 
-    s = int(scale_factor)
-    out_sum = np.zeros((d * s, h * s, w * s), dtype=np.float32)
-    weight_sum = np.zeros((d * s, h * s, w * s), dtype=np.float32)
+    step_d = max(q, ((max(1, pd - overlap_lr)) // q) * q) if q > 1 else max(1, pd - overlap_lr)
+    step_h = max(q, ((max(1, ph - overlap_lr)) // q) * q) if q > 1 else max(1, ph - overlap_lr)
+    step_w = max(q, ((max(1, pw - overlap_lr)) // q) * q) if q > 1 else max(1, pw - overlap_lr)
+
+    out_d, out_h, out_w = (
+        max(1, int(round(d * sf))),
+        max(1, int(round(h * sf))),
+        max(1, int(round(w * sf))),
+    )
+    hpd, hph, hpw = (
+        max(1, int(round(pd * sf))),
+        max(1, int(round(ph * sf))),
+        max(1, int(round(pw * sf))),
+    )
+    out_sum = np.zeros((out_d, out_h, out_w), dtype=np.float32)
+    weight_sum = np.zeros((out_d, out_h, out_w), dtype=np.float32)
 
     def _window_1d(n: int) -> np.ndarray:
         if n <= 2:
@@ -446,17 +505,18 @@ def super_resolve_volume_3d(
         return (0.5 - 0.5 * np.cos(2.0 * np.pi * np.arange(n) / (n - 1))).astype(np.float32) + 1e-3
 
     win_3d = (
-        _window_1d(pd * s)[:, None, None]
-        * _window_1d(ph * s)[None, :, None]
-        * _window_1d(pw * s)[None, None, :]
+        _window_1d(hpd)[:, None, None]
+        * _window_1d(hph)[None, :, None]
+        * _window_1d(hpw)[None, None, :]
     )
 
     def _starts(total: int, patch: int, step: int) -> list[int]:
         if total <= patch:
             return [0]
         pts = list(range(0, total - patch, step))
-        if not pts or pts[-1] != total - patch:
-            pts.append(total - patch)
+        last = ((total - patch) // q) * q if (q > 1 and total % q == 0) else (total - patch)
+        if not pts or pts[-1] != last:
+            pts.append(last)
         return pts
 
     try:
@@ -465,18 +525,13 @@ def super_resolve_volume_3d(
                 for x0 in _starts(w, pw, step_w):
                     patch = vol[z0 : z0 + pd, y0 : y0 + ph, x0 : x0 + pw]
                     inp = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).to(dev)
-                    pred = F.pad(inp, (0, 0, 0, 0, 0, 0))  # keep contiguous tensor
+                    pred = F.pad(inp, (0, 0, 0, 0, 0, 0))
                     sr_patch = generator_3d(pred)[0, 0].to(torch.float32).cpu().numpy()
-                    out_sum[
-                        z0 * s : (z0 + pd) * s,
-                        y0 * s : (y0 + ph) * s,
-                        x0 * s : (x0 + pw) * s,
-                    ] += sr_patch * win_3d
-                    weight_sum[
-                        z0 * s : (z0 + pd) * s,
-                        y0 * s : (y0 + ph) * s,
-                        x0 * s : (x0 + pw) * s,
-                    ] += win_3d
+                    hz0 = min(max(0, int(round(z0 * sf))), max(0, out_d - hpd))
+                    hy0 = min(max(0, int(round(y0 * sf))), max(0, out_h - hph))
+                    hx0 = min(max(0, int(round(x0 * sf))), max(0, out_w - hpw))
+                    out_sum[hz0 : hz0 + hpd, hy0 : hy0 + hph, hx0 : hx0 + hpw] += sr_patch * win_3d
+                    weight_sum[hz0 : hz0 + hpd, hy0 : hy0 + hph, hx0 : hx0 + hpw] += win_3d
     finally:
         if was_training:
             generator_3d.train()

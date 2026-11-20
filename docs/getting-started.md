@@ -91,6 +91,7 @@ openlsrx evaluate \
 
 Ready-to-customize batch scripts are provided in `scripts/hpc/`:
 
-- **Isambard-AI (`GH200` SLURM array):** `sbatch scripts/hpc/isambard_ai_array.slurm`
+- **University of Greenwich (`A100` 40/80 GB node):** `sbatch scripts/hpc/greenwich_a100_campaign.slurm`
+- **STFC `SCARF` (53 GB Savu resampling, 5-rung `T1` overflow & OpenImpala):** `sbatch scripts/hpc/scarf_campaign.slurm`
 - **Generic SLURM clusters:** `sbatch scripts/hpc/slurm_train.sh configs/porespy/High_Noise/ps_hn_hf_config.yaml`
 - **Sun Grid Engine (e.g., UCL MMM Hub `Young`):** `qsub -v CONFIG_PATH=configs/labxct/bs_config.yaml scripts/hpc/sge_young_train.sh`

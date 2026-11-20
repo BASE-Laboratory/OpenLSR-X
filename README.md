@@ -12,11 +12,11 @@
 
 ## Highlights
 
-- **Cell-Centered 2D & `2.5D` Training → Isotropic 3D Reconstruction:** Train memory-efficient `1`-slice or native-LR-strided `2k + 1` multi-slice (`2.5D`) generators (`SwinIR`, `RRDB` + `RaGAN`, `SRGAN`/`SRResNet`) alongside native `SR3DResNet` baselines across integer and fractional laboratory/synchrotron magnifications (`2x`, `2.5x`, `3x`, `4x`, `6x`, `8x`, with native $2^a 3^b$ sub-pixel `PixelShuffle`), and fuse cell-centered (`grid_mode=True`) orthogonal sweeps (`yz + xz + xy`) via **Confidence-Weighted Directional Fourier Fusion** (`confidence_fourier`) with zero-overhead voxel-wise **orthogonal view-disagreement uncertainty** $\sigma_{\text{ortho}}(\mathbf{x})$ ($n=3$ views).
+- **Cell-Centered 2D & `2.5D` Training → Isotropic 3D Reconstruction:** Train memory-efficient `1`-slice or native-LR-strided `2k + 1` multi-slice (`2.5D`) generators (`SwinIR`, `RRDB` + `RaGAN`, `SRGAN`/`SRResNet`) alongside native `SR3DResNet` baselines across integer and rational laboratory/synchrotron magnifications (`1.6x`, `2x`, `2.5x`, `3x`, `4x`, `5x`, `6x`, `8x`, with zero-jitter rational grid snapping and $2^a 3^b$ sub-pixel `PixelShuffle`), and fuse cell-centered (`grid_mode=True`) orthogonal sweeps (`yz + xz + xy`) via **Confidence-Weighted Directional Fourier Fusion** (`confidence_fourier`) with zero-overhead voxel-wise **orthogonal view-disagreement uncertainty** $\sigma_{\text{ortho}}(\mathbf{x})$ ($n=3$ views).
 - **Physics- & Topology-Guided Objectives:** Combines **approximate slice/`2.5D` linear-attenuation ($\mu$) downsampling consistency** (`AttenuationConservationLoss`, with local `2.5D` discrete $z$-Laplacian PSF curvature reduction), differentiable **bimodal pore-throat skeleton preservation** (`SoftCLDiceLoss`), 2D/3D **Sobel phase-boundary sharpness** (`SobelGradientLoss`), and **Focal Frequency Loss** (`FocalFrequencyLoss`).
-- **Split-Isolated 3D Spatial Splitting, Normalization & Cross-Scan Calibration:** Partitions 3D volumes into disjoint sub-volume slabs (separated by PSF guard margins) *before* fitting intensity normalization bounds and optional `train`-only monotonic cross-scan radiometric calibration (`cross_scan_calibration="quantile" | "affine"`) on `train` only, and *before* per-split synthetic PSF degradation.
-- **Synchrotron Spectral, Petrophysical & Diffusive Transport Metrology:** Evaluates **3D Fourier Shell Correlation (FSC)** & **2D Fourier Ring Correlation (FRC)** (`FSC = 0.5` prediction-vs-reference crossover frequency & spectral AUC), ground-truth-thresholded porosity/Euler/surface-area metrics, tri-phase `Zn-13X` reactive core-rim segmentation (`Macropore` / `Na-13X` / `Zn-13X`), quasi-static drainage capillary pressure $S_{\text{nwp}}(P_c)$, and residual-verified **3D steady-state Laplace diffusive tortuosity** ($D_{\text{eff}} / D_0$, $\tau$) with view-disagreement sensitivity bounds $[D_{\text{eff}}^-, D_{\text{eff}}^+]$ and direct **OpenImpala** export.
-- **Provenance-Verified Open Benchmarks:** Ships with deterministic **Factorial PoreSpy** benchmarks, **Open Rock Micro-CT** (both synthetic-$2\times$ and physical independent $18\ \mu\text{m} \to 6\ \mu\text{m}$ $3\times$ dual-scan Bentheimer Sandstone pairs from Zenodo `5542624`, plus calibrated carbonate phantoms), and **7-DOF similarity-registered** staging (`configs/i13-xct/certified_regions.yaml` from [`BASE-Laboratory/MultimodalBenchmark`](https://github.com/BASE-Laboratory/MultimodalBenchmark), correcting $\sim 1.3\%$ objective magnification scale drift and chaining adjacent rungs for $8\times$) + explicit provenance tracking (`source_kind`, `is_experimental_xct`, `provisional_8bit_preview`) for the Diamond Light Source I13-2 multi-resolution `Zn-13X` dataset ([*Scientific Data*, 2025](https://doi.org/10.1038/s41597-025-04605-9); Zenodo `10.5281/zenodo.14245751` 8-bit previews are flagged provisional, while `--raw-h5-dir` stages quantitative 32-bit Savu slabs).
+- **Split-Isolated 3D Spatial Splitting, Normalization & Cross-Scan Calibration:** Partitions 3D volumes into disjoint sub-volume slabs (separated by PSF guard margins, or exact $\ge 36\ \mu\text{m}$ guard-banded $256^3$ blocks via `benchmark_splits_v1.json`) *before* fitting intensity normalization bounds and optional `train`-only monotonic cross-scan radiometric calibration (`cross_scan_calibration="quantile" | "affine"`) on `train` only, and *before* per-split synthetic PSF degradation.
+- **Synchrotron Spectral, Petrophysical & Diffusive Transport Metrology:** Evaluates **3D Fourier Shell Correlation (FSC)** & **2D Fourier Ring Correlation (FRC)** (`FSC = 0.5` prediction-vs-reference crossover frequency & spectral AUC), ground-truth-thresholded porosity/Euler/surface-area metrics (with optional Paganin-like tie-homogeneity Fresnel fringe guarding strictly inside binary pore thresholding via `--fringe-guard-alpha`), tri-phase `Zn-13X` reactive core-rim segmentation (`Macropore` / `Na-13X` / `Zn-13X`), quasi-static drainage capillary pressure $S_{\text{nwp}}(P_c)$, and residual-verified **3D steady-state Laplace diffusive tortuosity** ($D_{\text{eff}} / D_0$, $\tau$) with view-disagreement sensitivity bounds $[D_{\text{eff}}^-, D_{\text{eff}}^+]$ and direct **OpenImpala** export.
+- **Provenance-Verified Open Benchmarks & Conservative XCT Cleanup:** Ships with deterministic **Factorial PoreSpy** benchmarks, **Open Rock Micro-CT** (both synthetic-$2\times$ and physical independent $18\ \mu\text{m} \to 6\ \mu\text{m}$ $3\times$ dual-scan Bentheimer Sandstone pairs from Zenodo `5542624`, plus calibrated carbonate phantoms), and **7-DOF similarity-registered + conservatively cleaned** staging (`configs/i13-xct/certified_regions.yaml` and `benchmark_splits_v1.json` from [`BASE-Laboratory/MultimodalBenchmark`](https://github.com/BASE-Laboratory/MultimodalBenchmark)) across all **5 Diamond I13-2 `Task T1` rungs (`1.6x`, `2x`, `2.5x`, `5x`, `8x`)** and Stage 0C-gated cross-beamline `Task T2` (`I13-2 1.625 µm -> DIAD 0.54 µm`, `3x`), applying edge-protected polar de-ringing, 7-term local-tomo cupping detrend on truncated `0.325 µm` (`169065`), and `500 µm` ruby sphere $z$-shadow exclusion.
 
 ---
 
@@ -33,10 +33,10 @@ uv pip install -e ".[dev,docs]"
 
 ### 2. Train, Reconstruct 3D Volumes, and Evaluate via Unified CLI
 
-Stage the 7-DOF similarity-registered Diamond Light Source I13-2 `Zn-13X` (`2x` & `8x`) benchmark (defaults to provisional 8-bit Zenodo `14245751` sub-volumes; pass `--raw-h5-dir <dir>` for quantitative 32-bit Savu `.h5` volumes or `--offline` on air-gapped nodes for explicit synthetic phantoms) and train the multi-axis `2.5D SwinIR` configuration:
+Stage the 7-DOF similarity-registered, conservatively cleaned Diamond Light Source I13-2 `Zn-13X` benchmark (`--pair all` for `2x` & `8x`, or `--pair t1_all` for all 5 `Task T1` rungs `1.6x`/`2x`/`2.5x`/`5x`/`8x`; pass `--raw-h5-dir <dir>` for quantitative 32-bit Savu `.h5` volumes or `--offline` on air-gapped nodes for explicit synthetic phantoms) and train the multi-axis `2.5D SwinIR` configuration:
 
 ```bash
-openlsrx download-zn13x --dest data/benchmarks
+openlsrx download-zn13x --pair t1_all --dest data/benchmarks
 openlsrx fit -c configs/i13-xct/zn13x_2x_swinir_25d_physics.yaml
 ```
 
@@ -76,7 +76,7 @@ openlsrx evaluate \
 
 ## Reproducing Manuscript Benchmarks
 
-Run the Factorial PoreSpy, Open Rock Micro-CT, and 9-arm Diamond I13-2 `Zn-13X` studies and generate publication-ready LaTeX `booktabs` tables and comparison figures (production runs fail loudly if real Zenodo/HDF5 data are unavailable unless `--allow-synthetic-fallback` is explicitly passed):
+Run the Factorial PoreSpy, Open Rock Micro-CT, and Diamond I13-2 `Zn-13X` studies and generate publication-ready LaTeX `booktabs` tables and comparison figures (production runs fail loudly if real Zenodo/HDF5 data are unavailable unless `--allow-synthetic-fallback` is explicitly passed):
 
 ```bash
 # Closed-form analytical accuracy tests (~15s) & full visual + Bentheimer verification suite
@@ -93,8 +93,8 @@ python scripts/benchmarks/public_rock_xct.py --fast --dualscan
 python scripts/benchmarks/zn13x_synchrotron_study.py --fast
 python scripts/benchmarks/aggregate_campaign.py --inputs results --output-dir results/campaign_summary
 
-# Full multi-seed GPU campaign on real Zenodo / beamline HDF5 data (see docs/npj-study-design.md)
-python scripts/benchmarks/zn13x_synchrotron_study.py --lr-size 48 --epochs 120 --seeds 42 43 44
+# Full multi-seed GPU campaign on Greenwich A100 / STFC SCARF (see docs/npj-study-design.md)
+python scripts/benchmarks/zn13x_synchrotron_study.py --pairs 1.6x 2x 2.5x 5x 8x --lr-size 48 --epochs 120 --seeds 42 43 44
 python scripts/benchmarks/aggregate_campaign.py --inputs results --output-dir results/campaign_summary
 ```
 
@@ -109,7 +109,7 @@ OpenLSR-X/
 ├── paper/                    # JOSS manuscript (paper.md) and bibliography (paper.bib)
 ├── scripts/
 │   ├── benchmarks/           # PoreSpy, Rock XCT & I13-2 Zn-13X runners + multi-seed campaign aggregator
-│   ├── hpc/                  # Isambard-AI GH200 SLURM array, generic SLURM, and SGE ('Young') templates
+│   ├── hpc/                  # Greenwich A100, STFC SCARF, generic SLURM, and SGE ('Young') templates
 │   └── verification/         # End-to-end closed-form analytical & visual verification suite
 ├── src/openlsrx/
 │   ├── baselines/            # Cell-centered 2D & 3D classical interpolation baselines

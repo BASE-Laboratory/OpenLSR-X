@@ -1,43 +1,43 @@
 #!/bin/bash
-#SBATCH --job-name=openlsrx-campaign
-#SBATCH --partition=workq
+#SBATCH --job-name=openlsrx-greenwich-a100
+#SBATCH --partition=gpu
+#SBATCH --gres=gpu:a100:1
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=120G
-#SBATCH --time=08:00:00
-#SBATCH --array=0-11
-#SBATCH --output=logs/slurm_%A_%a.out
-#SBATCH --error=logs/slurm_%A_%a.err
+#SBATCH --mem=64G
+#SBATCH --time=12:00:00
+#SBATCH --array=0-11%2
+#SBATCH --output=logs/greenwich_a100_%A_%a.out
+#SBATCH --error=logs/greenwich_a100_%A_%a.err
 
 # ==============================================================================
-# OpenLSR-X Reproducible Multi-Seed HPC Campaign for Isambard-AI (NVIDIA GH200)
-# Acknowledgements: UKRI Isambard-AI National AIRR (FIELF001) & Diamond I13-2
+# OpenLSR-X Reproducible Multi-Seed Campaign — University of Greenwich A100 Node
+# Compute tier: Greenwich NVIDIA A100 (40/80 GB) primary training & baselines
 #
-# Submits 12 independent GPU jobs (4 benchmark suites x 3 random seeds: 42,43,44):
+# Submits 12 independent GPU tasks (throttled %2 for local A100 node residency,
+# 4 benchmark suites x 3 random seeds: 42, 43, 44):
 #   Array 0..2  -> Factorial PoreSpy 3D XCT Study (seeds 42, 43, 44)
 #   Array 3..5  -> Public Micro-CT Rock Suite (Bentheimer & Indiana, seeds 42, 43, 44)
-#   Array 6..8  -> Diamond I13-2 Multi-Resolution Zn-13X Synchrotron Study (2x & 8x)
+#   Array 6..8  -> Diamond I13-2 Cleaned Task T1 5-Rung Zn-13X Study (1.6x/2x/2.5x/5x/8x)
 #   Array 9..11 -> Physical 18 um -> 6 um (3x) Bentheimer Dual-Scan Suite (Core 1 & Core 2)
 #
-# Usage (stage Zenodo benchmarks on the login node first if compute nodes are air-gapped):
+# Can also be executed directly without SLURM on an interactive Greenwich A100 shell:
+#   for id in $(seq 0 11); do SLURM_ARRAY_TASK_ID=$id bash scripts/hpc/greenwich_a100_campaign.slurm; done
+#
+# Usage:
 #   mkdir -p logs data/benchmarks
 #   openlsrx download-benchmarks \
-#       --datasets bentheimer_sandstone indiana_limestone bentheimer_dualscan_core1 bentheimer_dualscan_core2 zn13x_2x zn13x_8x \
+#       --datasets bentheimer_sandstone indiana_limestone bentheimer_dualscan_core1 bentheimer_dualscan_core2 zn13x_1p6x zn13x_2x zn13x_2p5x zn13x_5x zn13x_8x \
 #       --dest data/benchmarks
-#   export I13_RAW_H5_DIR=/lus/lfs1aip1/projects/openlsrx/i13_zn13x_h5  # optional
-#   sbatch scripts/hpc/isambard_ai_array.slurm
-#
-# After array completion, aggregate into booktabs LaTeX + Pareto figures:
-#   python scripts/benchmarks/aggregate_campaign.py --inputs results/campaign --output-dir results/campaign_summary
+#   export I13_RAW_H5_DIR=/data/base_lab/i13_zn13x_h5   # optional 32-bit Savu HDF5 root
+#   sbatch scripts/hpc/greenwich_a100_campaign.slurm
 # ==============================================================================
 
 set -euo pipefail
 
 mkdir -p logs results/campaign data/benchmarks
 
-# Activate project virtual environment (uv / venv)
 if [ -f ".venv/bin/activate" ]; then
     # shellcheck disable=SC1091
     source .venv/bin/activate
@@ -46,12 +46,13 @@ fi
 export OMP_NUM_THREADS=8
 export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
 
+TASK_ID="${SLURM_ARRAY_TASK_ID:-0}"
 SEEDS=(42 43 44)
-SUITE_IDX=$(( SLURM_ARRAY_TASK_ID / 3 ))
-SEED_IDX=$(( SLURM_ARRAY_TASK_ID % 3 ))
+SUITE_IDX=$(( TASK_ID / 3 ))
+SEED_IDX=$(( TASK_ID % 3 ))
 SEED="${SEEDS[$SEED_IDX]}"
 
-echo "[OpenLSR-X] Task ${SLURM_ARRAY_TASK_ID}: suite=${SUITE_IDX}, seed=${SEED}, host=$(hostname)"
+echo "[OpenLSR-X | Greenwich A100] Task ${TASK_ID}: suite=${SUITE_IDX}, seed=${SEED}, host=$(hostname)"
 nvidia-smi || true
 
 if [ "${SUITE_IDX}" -eq 0 ]; then
@@ -77,10 +78,15 @@ elif [ "${SUITE_IDX}" -eq 2 ]; then
     if [ -n "${I13_CERTIFIED_REGIONS:-}" ] && [ -f "${I13_CERTIFIED_REGIONS}" ]; then
         EXTRA_H5_ARGS+=(--certified-regions "${I13_CERTIFIED_REGIONS}")
     fi
+    ZN13X_PAIRS=(1.6x 2x 2.5x 5x 8x)
+    if [ -n "${I13_STAGE0C_YAML:-}" ] && [ -f "${I13_STAGE0C_YAML}" ]; then
+        EXTRA_H5_ARGS+=(--stage0c-yaml "${I13_STAGE0C_YAML}")
+        ZN13X_PAIRS+=(t2_diad_3x)
+    fi
     python scripts/benchmarks/zn13x_synchrotron_study.py \
         --output-dir "results/campaign/zn13x_s${SEED}" \
         --data-dir "data/benchmarks" \
-        --pairs 2x 8x \
+        --pairs "${ZN13X_PAIRS[@]}" \
         --lr-size 48 \
         --epochs 150 \
         --seeds "${SEED}" \
@@ -95,4 +101,4 @@ elif [ "${SUITE_IDX}" -eq 3 ]; then
         --seeds "${SEED}"
 fi
 
-echo "[OpenLSR-X] Completed Task ${SLURM_ARRAY_TASK_ID} cleanly."
+echo "[OpenLSR-X | Greenwich A100] Completed Task ${TASK_ID} cleanly."

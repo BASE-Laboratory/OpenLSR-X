@@ -23,7 +23,7 @@ import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 import h5py
 import numpy as np
@@ -33,17 +33,79 @@ from scipy.ndimage import affine_transform, gaussian_filter
 from skimage.metrics import structural_similarity
 from skimage.registration import phase_cross_correlation
 
-from .transforms import normalize_volume, sanitize_xct_volume
+from .artifact_cleanup import (
+    clean_synchrotron_xct_slab,
+    compute_ruby_beam_hardening_clean_z_mask,
+)
+from .transforms import (
+    normalize_volume,
+    rational_scale_pq,
+    sanitize_xct_volume,
+    zoom_cell_centered,
+)
 
-Zn13XPairName = Literal["2x", "8x"]
+Zn13XPairName = Literal["1.6x", "2x", "2.5x", "5x", "8x", "t2_diad_3x"]
 Zn13XTier = Literal["preview", "full"]
 
+ZN13X_T1_PAIRS: tuple[Zn13XPairName, ...] = ("1.6x", "2x", "2.5x", "5x", "8x")
+ZN13X_ALL_PAIRS: tuple[Zn13XPairName, ...] = (*ZN13X_T1_PAIRS, "t2_diad_3x")
+
 DEFAULT_CERTIFIED_REGIONS_PATH = Path(__file__).with_name("zn13x_certified_regions.yaml")
+DEFAULT_BENCHMARK_SPLITS_PATH = Path(__file__).with_name("zn13x_benchmark_splits_v1.json")
+
+_PAIR_ALIASES: dict[str, Zn13XPairName] = {
+    "1.6x": "1.6x",
+    "1p6x": "1.6x",
+    "zn13x_1p6x": "1.6x",
+    "zn13x_1.6x": "1.6x",
+    "2x": "2x",
+    "zn13x_2x": "2x",
+    "2.5x": "2.5x",
+    "2p5x": "2.5x",
+    "zn13x_2p5x": "2.5x",
+    "zn13x_2.5x": "2.5x",
+    "5x": "5x",
+    "zn13x_5x": "5x",
+    "8x": "8x",
+    "zn13x_8x": "8x",
+    "t2": "t2_diad_3x",
+    "t2_diad_3x": "t2_diad_3x",
+    "zn13x_t2_diad_3x": "t2_diad_3x",
+}
+
+
+def normalize_zn13x_pair_name(pair: str) -> Zn13XPairName:
+    """Normalize CLI/config pair aliases (e.g. ``1p6x`` -> ``1.6x``, ``t2`` -> ``t2_diad_3x``)."""
+    key = str(pair).strip().lower()
+    if key not in _PAIR_ALIASES:
+        raise ValueError(
+            f"Unsupported Zn-13X pair {pair!r}. Expected one of {list(ZN13X_ALL_PAIRS)} "
+            "(or aliases '1p6x', '2p5x', 't2')."
+        )
+    return _PAIR_ALIASES[key]
+
+
+def zn13x_pair_file_slug(pair: str) -> str:
+    """Return filesystem-safe stem suffix (preserving ``2x`` and ``8x`` compatibility)."""
+    return normalize_zn13x_pair_name(pair).replace(".", "p")
+
+
+def zn13x_pair_scale_factor(pair: str) -> int | float:
+    """Return exact voxel super-resolution factor for a canonical Zn-13X track."""
+    table: dict[Zn13XPairName, int | float] = {
+        "1.6x": 1.6,
+        "2x": 2,
+        "2.5x": 2.5,
+        "5x": 5,
+        "8x": 8,
+        "t2_diad_3x": 3,
+    }
+    return table[normalize_zn13x_pair_name(pair)]
 
 
 @dataclass(frozen=True)
 class Zn13XResolutionSpec:
-    """Metadata and calibrated alignment anchors for one I13-2 magnification."""
+    """Metadata and calibrated alignment anchors for one I13-2 or K11 DIAD magnification."""
 
     key: str
     scan_id: str
@@ -58,6 +120,9 @@ class Zn13XResolutionSpec:
     anchor_z: int
     roi_1040um_yx: tuple[tuple[int, int], tuple[int, int]] | None
     roi_812um_yx: tuple[tuple[int, int], tuple[int, int]]
+    h5_dataset_key: str = "4-TomopyRecon-tomo/data"
+    local_tomography_truncated: bool = False
+    flip_x_astra: bool = False
 
 
 ZN13X_SUBVOLUMES_ZENODO_RECORD = "14245751"
@@ -75,8 +140,8 @@ ZN13X_I13_RESOLUTIONS: dict[str, Zn13XResolutionSpec] = {
         vmin=-5.41e-4,
         vmax=1.68e-3,
         anchor_z=934,
-        roi_1040um_yx=((1102, 1502), (1006, 1406)),  # 400 x 400 px (1040 um)
-        roi_812um_yx=((1099, 1411), (1096, 1408)),  # 312 x 312 px centered at chained (1255, 1252)
+        roi_1040um_yx=((1102, 1502), (1006, 1406)),
+        roi_812um_yx=((1099, 1411), (1096, 1408)),
     ),
     "1p625um": Zn13XResolutionSpec(
         key="1p625um",
@@ -90,8 +155,8 @@ ZN13X_I13_RESOLUTIONS: dict[str, Zn13XResolutionSpec] = {
         vmin=-5.23e-4,
         vmax=1.11e-3,
         anchor_z=894,
-        roi_1040um_yx=((1010, 1650), (858, 1498)),  # 640 x 640 px (1040 um) -> 2x = 1280 px
-        roi_812um_yx=((1005, 1505), (1002, 1502)),  # 500 x 500 px centered at chained (1255, 1252)
+        roi_1040um_yx=((1010, 1650), (858, 1498)),
+        roi_812um_yx=((1005, 1505), (1002, 1502)),
     ),
     "0p8125um": Zn13XResolutionSpec(
         key="0p8125um",
@@ -105,8 +170,8 @@ ZN13X_I13_RESOLUTIONS: dict[str, Zn13XResolutionSpec] = {
         vmin=-2.50e-4,
         vmax=6.79e-4,
         anchor_z=804,
-        roi_1040um_yx=((763, 2043), (466, 1746)),  # 1280 x 1280 px (1040 um)
-        roi_812um_yx=((753, 1753), (753, 1753)),  # 1000 x 1000 px (812.5 um) -> 2.5x = 2500 px
+        roi_1040um_yx=((763, 2043), (466, 1746)),
+        roi_812um_yx=((753, 1753), (753, 1753)),
     ),
     "0p325um": Zn13XResolutionSpec(
         key="0p325um",
@@ -121,9 +186,44 @@ ZN13X_I13_RESOLUTIONS: dict[str, Zn13XResolutionSpec] = {
         vmax=6.79e-4,
         anchor_z=509,
         roi_1040um_yx=None,
-        roi_812um_yx=((0, 2496), (0, 2496)),  # 2496 x 2496 px (811.2 um)
+        roi_812um_yx=((0, 2496), (0, 2496)),
+        local_tomography_truncated=True,
+    ),
+    "diad_0p54um": Zn13XResolutionSpec(
+        key="diad_0p54um",
+        scan_id="k11-43334",
+        magnification="DIAD",
+        voxel_size_um=0.540,
+        calibrated_voxel_size_um=0.540,
+        zenodo_record="13349402",
+        recon_filename="tomo_p4_astra_recon_gpu.h5",
+        preview_filename="k11-43334_8bit_cropped.h5",
+        vmin=-4.00e-4,
+        vmax=1.20e-3,
+        anchor_z=1080,
+        roi_1040um_yx=((316, 2242), (316, 2242)),
+        roi_812um_yx=((528, 2032), (528, 2032)),
+        h5_dataset_key="4-AstraReconGpu-tomo/data",
+        flip_x_astra=True,
     ),
 }
+
+_PAIR_RESOLUTION_MAP: dict[Zn13XPairName, tuple[str, str, int | float, int]] = {
+    "1.6x": ("2p600um", "1p625um", 1.6, 400),
+    "2x": ("1p625um", "0p8125um", 2, 640),
+    "2.5x": ("0p8125um", "0p325um", 2.5, 600),
+    "5x": ("1p625um", "0p325um", 5, 384),
+    "8x": ("2p600um", "0p325um", 8, 240),
+    "t2_diad_3x": ("1p625um", "diad_0p54um", 3, 480),
+}
+
+
+def _resolve_pair_specs(
+    pair: str,
+) -> tuple[Zn13XPairName, Zn13XResolutionSpec, Zn13XResolutionSpec, int | float, int]:
+    canon = normalize_zn13x_pair_name(pair)
+    lo_key, hi_key, scale, default_lr_yx = _PAIR_RESOLUTION_MAP[canon]
+    return canon, ZN13X_I13_RESOLUTIONS[lo_key], ZN13X_I13_RESOLUTIONS[hi_key], scale, default_lr_yx
 
 
 def _sha256_file(path: Path) -> str:
@@ -158,6 +258,15 @@ def _block_downsample_3d(vol: np.ndarray, factor: int) -> np.ndarray:
         cw // factor,
         factor,
     ).mean(axis=(1, 3, 5), dtype=np.float32)
+
+
+def _downsample_3d_rational(vol: np.ndarray, scale_factor: float | int) -> np.ndarray:
+    """Downsample 3D HR volume to cell-centered LR grid across integer or rational ``scale_factor``."""
+    sf = float(scale_factor)
+    s_int = int(round(sf))
+    if abs(sf - float(s_int)) < 1e-6:
+        return _block_downsample_3d(vol, s_int)
+    return zoom_cell_centered(vol, zoom_factors=1.0 / sf, order=1)
 
 
 def _triplanar_mid_ssim(a: np.ndarray, b: np.ndarray) -> tuple[float, float]:
@@ -342,61 +451,59 @@ def register_multires_pair_3d(
 
 
 def synthesize_zn13x_phantom_pair(
-    pair: Zn13XPairName = "2x",
+    pair: str = "2x",
     lr_shape: tuple[int, int, int] = (48, 48, 48),
     seed: int = 42,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Synthesize a calibrated tri-phase Zn-doped Zeolite 13X synchrotron XCT pair (low-RAM float32).
-
-    Models the physical structure described in Green et al. (*Sci. Data* 2025):
-    - Cleaved Zeolite 13X fragment inside a thin-walled capillary FOV
-    - Higher-attenuation outer Zn-exchanged rim (~0.88) and Na-13X core (~0.68)
-    - Hierarchical connected macro- and meso-pore network (~0.14 attenuation)
-    - Distinct objective-specific scintillator PSF and detector noise at LR vs HR
-    """
-    scale = 2 if pair == "2x" else 8
-    hr_shape = (lr_shape[0] * scale, lr_shape[1] * scale, lr_shape[2] * scale)
+    """Synthesize a calibrated tri-phase Zn-doped Zeolite 13X synchrotron XCT pair across any T1/T2 track."""
+    canon = normalize_zn13x_pair_name(pair)
+    scale = zn13x_pair_scale_factor(canon)
+    num_p, den_q = rational_scale_pq(float(scale))
+    eff_lr_shape = tuple(
+        max(den_q, (int(s) // den_q) * den_q) if den_q > 1 else max(1, int(s)) for s in lr_shape
+    )
+    hr_shape = (
+        (eff_lr_shape[0] * num_p) // den_q,
+        (eff_lr_shape[1] * num_p) // den_q,
+        (eff_lr_shape[2] * num_p) // den_q,
+    )
     rng = np.random.default_rng(seed)
 
-    # Broadcasted 1D grids avoid allocating three full 3D coordinate tensors
     zz = np.linspace(-1.0, 1.0, hr_shape[0], dtype=np.float32)[:, np.newaxis, np.newaxis]
     yy = np.linspace(-1.0, 1.0, hr_shape[1], dtype=np.float32)[np.newaxis, :, np.newaxis]
     xx = np.linspace(-1.0, 1.0, hr_shape[2], dtype=np.float32)[np.newaxis, np.newaxis, :]
     radial_sq = 0.85 * (zz * zz) + (yy * yy) + 1.1 * (xx * xx)
 
-    # Generate float32 random fields directly (half the peak RAM of float64 standard_normal)
+    sf_f = float(scale)
     coarse_field = rng.standard_normal(hr_shape, dtype=np.float32)
-    gaussian_filter(coarse_field, sigma=max(2.0, scale * 1.4), output=coarse_field)
+    gaussian_filter(coarse_field, sigma=max(2.0, sf_f * 1.4), output=coarse_field)
     stride = max(1, int(round((hr_shape[0] * hr_shape[1] * hr_shape[2] / 500_000) ** (1.0 / 3.0))))
     q_coarse = float(np.quantile(coarse_field[::stride, ::stride, ::stride], 0.78))
     pore_mask = coarse_field > q_coarse
     del coarse_field
 
     fine_field = rng.standard_normal(hr_shape, dtype=np.float32)
-    gaussian_filter(fine_field, sigma=max(0.9, scale * 0.45), output=fine_field)
+    gaussian_filter(fine_field, sigma=max(0.9, sf_f * 0.45), output=fine_field)
     q_fine = float(np.quantile(fine_field[::stride, ::stride, ::stride], 0.84))
     pore_mask |= fine_field > q_fine
     del fine_field
 
-    # Zn2+ ion-exchange rim (radial > 0.52 <=> radial_sq > 0.2704)
     hr_clean = np.where(radial_sq > (0.52 * 0.52), np.float32(0.88), np.float32(0.68))
     del radial_sq
     hr_clean[pore_mask] = np.float32(0.14)
     del pore_mask
 
-    # High-magnification GGG:Eu / LuAG scintillator PSF + mild FBP noise
     hr_vol = gaussian_filter(hr_clean, sigma=0.55, mode="reflect")
     hr_noise = rng.normal(0.0, 0.015, size=hr_shape).astype(np.float32, copy=False)
     hr_vol += hr_noise
     del hr_noise
     np.clip(hr_vol, 0.0, 1.0, out=hr_vol)
 
-    # Lower-magnification thick LuAG (500 um) scintillator blur + lens browning noise
-    lr_blurred = gaussian_filter(hr_clean, sigma=0.85 * scale, mode="reflect")
+    lr_blurred = gaussian_filter(hr_clean, sigma=0.85 * sf_f, mode="reflect")
     del hr_clean
-    lr_binned = _block_downsample_3d(lr_blurred, scale)
+    lr_binned = _downsample_3d_rational(lr_blurred, scale)
     del lr_blurred
-    noise_sigma = 0.024 if pair == "2x" else 0.035
+    noise_sigma = 0.024 if sf_f <= 3.0 else 0.035
     lr_vol = lr_binned + rng.normal(0.0, noise_sigma, size=lr_binned.shape).astype(np.float32)
     np.clip(lr_vol, 0.0, 1.0, out=lr_vol)
     return lr_vol.astype(np.float32, copy=False), hr_vol.astype(np.float32, copy=False)
@@ -619,16 +726,165 @@ def load_zn13x_certified_regions(
     return data, label, sha
 
 
+def load_zn13x_benchmark_splits(
+    splits_path: str | Path | None = None,
+) -> tuple[dict[str, Any], str, str]:
+    """Load canonical ``benchmark_splits_v1.json`` (>= 36 um guard-banded 256^3 3D blocks)."""
+    path = Path(splits_path) if splits_path is not None else DEFAULT_BENCHMARK_SPLITS_PATH
+    if not path.is_file():
+        raise FileNotFoundError(f"Benchmark splits JSON not found: {path}")
+    raw_bytes = path.read_bytes()
+    sha = hashlib.sha256(raw_bytes).hexdigest()
+    data = json.loads(raw_bytes.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected JSON object in {path}, got {type(data).__name__}.")
+    label = "bundled:zn13x_benchmark_splits_v1.json" if splits_path is None else str(path.resolve())
+    return data, label, sha
+
+
+def resolve_zn13x_split_block(
+    pair: str,
+    block_id: str,
+    splits_path: str | Path | None = None,
+) -> tuple[tuple[tuple[int, int], tuple[int, int], tuple[int, int]], dict[str, Any]]:
+    """Resolve an exact ``((z0, z1), (y0, y1), (x0, x1))`` HR block from ``benchmark_splits_v1.json``."""
+    canon = normalize_zn13x_pair_name(pair)
+    splits_doc, src_label, src_sha = load_zn13x_benchmark_splits(splits_path)
+    key_map: dict[Zn13XPairName, str] = {
+        "2x": "t1_0p8125um_hr_blocks",
+        "2.5x": "t1_0p325um_hr_blocks",
+        "5x": "t1_0p325um_hr_blocks",
+        "8x": "t1_0p325um_hr_blocks",
+        "t2_diad_3x": "t2_t4_diad_0p54um_blocks",
+    }
+    if canon not in key_map:
+        raise ValueError(
+            f"Pair {canon!r} does not have a dedicated 256^3 HR block table in benchmark_splits_v1.json "
+            f"(available for {list(key_map.keys())})."
+        )
+    sec_key = key_map[canon]
+    blocks = splits_doc.get(sec_key, [])
+    matches = [b for b in blocks if isinstance(b, dict) and str(b.get("block_id")) == str(block_id)]
+    if not matches:
+        raise KeyError(f"Block {block_id!r} not found in {sec_key} ({len(blocks)} blocks).")
+    blk = matches[0]
+    scale = zn13x_pair_scale_factor(canon)
+    num_p, _ = rational_scale_pq(float(scale))
+
+    def _trim_interior(a: int, b: int) -> tuple[int, int]:
+        span = int(b) - int(a)
+        valid_span = (span // num_p) * num_p
+        if valid_span <= 0:
+            raise ValueError(f"Split block span {span} smaller than HR step {num_p} for {canon}.")
+        trim = span - valid_span
+        left = trim // 2
+        return int(a) + left, int(a) + left + valid_span
+
+    roi = (
+        _trim_interior(int(blk["z0"]), int(blk["z1"])),
+        _trim_interior(int(blk["y0"]), int(blk["y1"])),
+        _trim_interior(int(blk["x0"]), int(blk["x1"])),
+    )
+    meta = {
+        "splits_source": src_label,
+        "splits_sha256": src_sha,
+        "splits_section": sec_key,
+        "block_id": str(blk["block_id"]),
+        "split": str(blk["split"]),
+        "min_spatial_guard_band_um": splits_doc.get("min_spatial_guard_band_um", 32.0),
+    }
+    return roi, meta
+
+
+def verify_stage0c_cross_beamline_gate(
+    stage0c_path: str | Path | None,
+    max_tre_um: float = 1.0,
+    allow_uncertified: bool = False,
+) -> tuple[SimilarityTransform3DSpec, bool, dict[str, Any]]:
+    """Enforce MultimodalBenchmark's Stage 0C <= 1.0 um octant TRE gate for Task T2 (I13-2 -> DIAD)."""
+    if stage0c_path is None:
+        if not allow_uncertified:
+            raise ValueError(
+                "Task T2 ('t2_diad_3x': I13-2 169067 -> DIAD k11-43334) is gated on Stage 0C "
+                f"(octant TRE <= {max_tre_um:.2f} um). Provide --stage0c-yaml generated by "
+                "MultimodalBenchmark `registration/cross_beamline_audit.py` or pass "
+                "--allow-uncertified-t2 for exploratory diagnostics."
+            )
+        ident = SimilarityTransform3DSpec(
+            matrix_3x3=((1.0, 0.0, 0.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0)),
+            translation_xyz_um=(0.0, 0.0, 0.0),
+            center_xyz_um=(0.0, 0.0, 0.0),
+            scale=1.0,
+            versor_xyzw=(0.0, 0.0, 0.0, 1.0),
+        )
+        return ident, True, {"stage0c_certified": False, "exploratory_uncertified_override": True}
+
+    doc, src_label, src_sha = load_zn13x_certified_regions(stage0c_path)
+    tx_raw = doc.get("global_pellet_transform") or (doc if "matrix_3x3" in doc else None)
+    if not isinstance(tx_raw, dict):
+        raise ValueError(
+            f"Stage 0C file {stage0c_path} missing 'global_pellet_transform' or 'matrix_3x3'."
+        )
+    tx = SimilarityTransform3DSpec.from_dict(tx_raw)
+
+    oct_drifts: list[float] = []
+    if isinstance(doc.get("octant_drifts_um"), list):
+        oct_drifts = [float(v) for v in doc["octant_drifts_um"]]
+    elif isinstance(doc.get("octants"), dict):
+        for ov in doc["octants"].values():
+            if isinstance(ov, dict) and "local_drift_um" in ov:
+                oct_drifts.append(float(ov["local_drift_um"]))
+    max_oct = (
+        float(doc["max_octant_drift_um"])
+        if "max_octant_drift_um" in doc
+        else (max(oct_drifts) if oct_drifts else None)
+    )
+    slip_um = (
+        float(doc["pellet_vs_fiducial_slip_um"]) if "pellet_vs_fiducial_slip_um" in doc else None
+    )
+    explicitly_cert = doc.get("stage0c_certified")
+    if explicitly_cert is None and isinstance(doc.get("certified_octants"), list):
+        explicitly_cert = len(doc["certified_octants"]) > 0 and (
+            max_oct is None or max_oct <= float(max_tre_um)
+        )
+    passed = (
+        bool(explicitly_cert)
+        if explicitly_cert is not None
+        else (max_oct is not None and max_oct <= float(max_tre_um))
+    )
+    if not passed and not allow_uncertified:
+        raise ValueError(
+            f"Stage 0C gate rejected {stage0c_path}: max_octant_drift_um={max_oct} exceeds "
+            f"threshold {max_tre_um:.2f} um (pellet_vs_fiducial_slip_um={slip_um}). "
+            "Pass --allow-uncertified-t2 only for exploratory non-benchmark runs."
+        )
+
+    prov = doc.get("provenance", {})
+    flip_x = bool(prov.get("diad_astra_flip_x_detected", True)) if isinstance(prov, dict) else True
+    meta = {
+        "registration_schema": "multimodal_benchmark_7dof_v2",
+        "certified_regions_source": src_label,
+        "certified_regions_sha256": src_sha,
+        "composition_mode": "stage0c_cross_beamline_7dof",
+        "stage0c_certified": bool(passed),
+        "max_octant_drift_um": max_oct,
+        "pellet_vs_fiducial_slip_um": slip_um,
+        "diad_astra_flip_x": flip_x,
+        "fitted_scale_factor": round(tx.scale, 6),
+    }
+    return tx, flip_x, meta
+
+
 def resolve_zn13x_pair_7dof(
-    pair: Zn13XPairName,
+    pair: str,
     tier_section: Literal["zenodo_14245751_preview_8bit", "full_savu_32bit"],
     certified_regions_path: str | Path | None = None,
 ) -> tuple[SimilarityTransform3DSpec, tuple[int, int, int] | None, dict[str, Any]]:
-    """Resolve the exact 7-DOF HR->LR similarity transform (chained for ``8x``) from MultimodalBenchmark config."""
+    """Resolve the exact 7-DOF HR->LR similarity transform (chained for ``5x`` / ``8x``) from MultimodalBenchmark config."""
+    canon = normalize_zn13x_pair_name(pair)
     doc, src_label, src_sha = load_zn13x_certified_regions(certified_regions_path)
-    nominal_scale = 2 if pair == "2x" else 8
+    nominal_scale = float(zn13x_pair_scale_factor(canon))
 
-    # Case 1: Direct MultimodalBenchmark SimilarityTransform3D JSON/YAML
     if "matrix_3x3" in doc and "translation_xyz_um" in doc and "scale" in doc:
         tx_direct = SimilarityTransform3DSpec.from_dict(doc)
         meta_direct = {
@@ -641,7 +897,6 @@ def resolve_zn13x_pair_7dof(
         }
         return tx_direct, None, meta_direct
 
-    # Case 2: MultimodalBenchmark stage0c_cross_beamline_regions.yaml (global_pellet_transform)
     if "global_pellet_transform" in doc and isinstance(doc["global_pellet_transform"], dict):
         tx_pellet = SimilarityTransform3DSpec.from_dict(doc["global_pellet_transform"])
         meta_pellet = {
@@ -654,15 +909,14 @@ def resolve_zn13x_pair_7dof(
         }
         return tx_pellet, None, meta_pellet
 
-    # Case 3: Canonical multi-rung certified_regions.yaml
     if tier_section not in doc or not isinstance(doc[tier_section], dict):
         raise KeyError(f"Section {tier_section!r} missing from certified regions file {src_label}.")
     sec = doc[tier_section]
     rungs = sec.get("adjacent_rungs", {})
     pairs_cfg = sec.get("pairs", {})
-    if pair not in pairs_cfg:
-        raise KeyError(f"Pair {pair!r} missing from {tier_section}.pairs in {src_label}.")
-    p_cfg = pairs_cfg[pair]
+    if canon not in pairs_cfg:
+        raise KeyError(f"Pair {canon!r} missing from {tier_section}.pairs in {src_label}.")
+    p_cfg = pairs_cfg[canon]
     chain_keys: list[str] = list(p_cfg["transform_chain_hr_to_lr"])
     chain_specs = [
         SimilarityTransform3DSpec.from_dict(rungs[rk]["similarity_transform_hr_to_lr"])
@@ -694,6 +948,45 @@ def resolve_zn13x_pair_7dof(
     return composed, hr_center, meta
 
 
+def _resolve_preview_cleanup_hints(
+    cert_doc: dict[str, Any],
+    lo_scan_id: str,
+    hi_scan_id: str,
+    hi_shape_zyx: tuple[int, int, int],
+) -> tuple[tuple[float, float] | None, tuple[float, float] | None, int]:
+    """Read audited ring centers and 500 um ruby sphere shadow z-cutoffs for Zenodo 14245751."""
+    if hi_shape_zyx != (500, 1000, 1000):
+        return None, None, 0
+    defaults = cert_doc.get("artifact_cleanup_defaults", {})
+    if not isinstance(defaults, dict):
+        return None, None, 0
+    rc_map = defaults.get("preview_14245751_ring_centers_yx", {})
+    lo_rc = (
+        (float(rc_map[lo_scan_id][0]), float(rc_map[lo_scan_id][1]))
+        if isinstance(rc_map, dict) and lo_scan_id in rc_map
+        else None
+    )
+    hi_rc = (
+        (float(rc_map[hi_scan_id][0]), float(rc_map[hi_scan_id][1]))
+        if isinstance(rc_map, dict) and hi_scan_id in rc_map
+        else None
+    )
+    ruby_map = defaults.get("preview_14245751_ruby_sphere_z", {})
+    clean_z_min = 0
+    if isinstance(ruby_map, dict) and hi_scan_id in ruby_map:
+        r_cfg = ruby_map[hi_scan_id]
+        z_mask = compute_ruby_beam_hardening_clean_z_mask(
+            num_z_slices=hi_shape_zyx[0],
+            sphere_center_z_vox=float(r_cfg["sphere_center_z_vox"]),
+            sphere_radius_vox=float(r_cfg["sphere_radius_vox"]),
+            safety_margin_vox=int(r_cfg.get("safety_margin_vox", 12)),
+        )
+        false_idx = np.flatnonzero(~z_mask)
+        if false_idx.size > 0:
+            clean_z_min = int(false_idx.max()) + 1
+    return lo_rc, hi_rc, clean_z_min
+
+
 def resample_lr_to_hr_grid_7dof(
     low_dset_or_vol: Any,
     high_dset_or_vol: Any,
@@ -702,18 +995,21 @@ def resample_lr_to_hr_grid_7dof(
     hr_center_zyx: tuple[int, int, int] | None,
     sp_lo_um: float,
     sp_hi_um: float,
-    scale_factor: int,
+    scale_factor: float | int,
     tx_hr_to_lr: SimilarityTransform3DSpec,
     savu_xzy_disk: bool = False,
     margin_lr_vox: int = 4,
+    clean_artifacts: bool = False,
+    detrend_hr_cupping: bool = False,
+    flip_hr_x: bool = False,
+    lr_ring_center_full_yx: tuple[float, float] | None = None,
+    hr_ring_center_full_yx: tuple[float, float] | None = None,
+    hr_clean_z_min: int = 0,
+    hr_roi_override_zyx: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
-    """Slice unresampled ``hr_vol`` and resample ``lr_vol`` onto its cell-centered ``s``-coarsened grid via 7-DOF.
-
-    Supporting both out-of-core ``h5py.Dataset`` handles (including Savu ``(X, Z, Y)`` disk layout)
-    and in-memory ``np.ndarray`` volumes, this keeps ``hr_vol`` 100% native/unresampled so HR noise,
-    interfaces, and frozen-threshold pore-throat transport topology are untouched.
-    """
-    s = int(scale_factor)
+    """Slice unresampled ``hr_vol`` and resample ``lr_vol`` onto its cell-centered coarsened grid via 7-DOF."""
+    sf = float(scale_factor)
+    num_p, den_q = rational_scale_pq(sf)
     raw_lo_shape = tuple(int(v) for v in low_dset_or_vol.shape)
     raw_hi_shape = tuple(int(v) for v in high_dset_or_vol.shape)
     lo_shape_zyx = (
@@ -723,35 +1019,57 @@ def resample_lr_to_hr_grid_7dof(
         (raw_hi_shape[1], raw_hi_shape[2], raw_hi_shape[0]) if savu_xzy_disk else raw_hi_shape
     )
 
-    dz_lr = min(int(lr_shape_zyx[0]), lo_shape_zyx[0], hi_shape_zyx[0] // s)
-    dy_lr = min(int(lr_shape_zyx[1]), lo_shape_zyx[1], hi_shape_zyx[1] // s)
-    dx_lr = min(int(lr_shape_zyx[2]), lo_shape_zyx[2], hi_shape_zyx[2] // s)
-    if min(dz_lr, dy_lr, dx_lr) < 1:
-        raise ValueError(
-            f"Volumes {lo_shape_zyx} / {hi_shape_zyx} cannot satisfy scale_factor={s}."
+    if hr_roi_override_zyx is not None:
+        (hz0, hz1), (hy0, hy1), (hx0, hx1) = hr_roi_override_zyx
+        hz_len, hy_len, hx_len = hz1 - hz0, hy1 - hy0, hx1 - hx0
+        dz_lr = (hz_len * den_q) // num_p
+        dy_lr = (hy_len * den_q) // num_p
+        dx_lr = (hx_len * den_q) // num_p
+    else:
+        avail_hi_z = max(1, hi_shape_zyx[0] - max(0, int(hr_clean_z_min)))
+        max_dz_lr = min(int(lr_shape_zyx[0]), lo_shape_zyx[0], (avail_hi_z * den_q) // num_p)
+        max_dy_lr = min(int(lr_shape_zyx[1]), lo_shape_zyx[1], (hi_shape_zyx[1] * den_q) // num_p)
+        max_dx_lr = min(int(lr_shape_zyx[2]), lo_shape_zyx[2], (hi_shape_zyx[2] * den_q) // num_p)
+        dz_lr = (max_dz_lr // den_q) * den_q if den_q > 1 else max_dz_lr
+        dy_lr = (max_dy_lr // den_q) * den_q if den_q > 1 else max_dy_lr
+        dx_lr = (max_dx_lr // den_q) * den_q if den_q > 1 else max_dx_lr
+        if min(dz_lr, dy_lr, dx_lr) < max(1, den_q):
+            raise ValueError(
+                f"Volumes {lo_shape_zyx} / {hi_shape_zyx} cannot satisfy scale_factor={scale_factor}."
+            )
+        hz_len = (dz_lr * num_p) // den_q
+        hy_len = (dy_lr * num_p) // den_q
+        hx_len = (dx_lr * num_p) // den_q
+
+        cz_h, cy_h, cx_h = (
+            hr_center_zyx
+            if hr_center_zyx is not None
+            else (hi_shape_zyx[0] // 2, hi_shape_zyx[1] // 2, hi_shape_zyx[2] // 2)
         )
-    hz_len, hy_len, hx_len = dz_lr * s, dy_lr * s, dx_lr * s
+        z_floor = min(max(0, int(hr_clean_z_min)), max(0, hi_shape_zyx[0] - hz_len))
+        hz0 = int(np.clip(cz_h - hz_len // 2, z_floor, hi_shape_zyx[0] - hz_len))
+        hy0 = int(np.clip(cy_h - hy_len // 2, 0, hi_shape_zyx[1] - hy_len))
+        hx0 = int(np.clip(cx_h - hx_len // 2, 0, hi_shape_zyx[2] - hx_len))
+        hz1, hy1, hx1 = hz0 + hz_len, hy0 + hy_len, hx0 + hx_len
 
-    cz_h, cy_h, cx_h = (
-        hr_center_zyx
-        if hr_center_zyx is not None
-        else (hi_shape_zyx[0] // 2, hi_shape_zyx[1] // 2, hi_shape_zyx[2] // 2)
-    )
-    hz0 = int(np.clip(cz_h - hz_len // 2, 0, hi_shape_zyx[0] - hz_len))
-    hy0 = int(np.clip(cy_h - hy_len // 2, 0, hi_shape_zyx[1] - hy_len))
-    hx0 = int(np.clip(cx_h - hx_len // 2, 0, hi_shape_zyx[2] - hx_len))
-    hz1, hy1, hx1 = hz0 + hz_len, hy0 + hy_len, hx0 + hx_len
+    if flip_hr_x:
+        disk_hx0 = hi_shape_zyx[2] - hx1
+        disk_hx1 = hi_shape_zyx[2] - hx0
+    else:
+        disk_hx0, disk_hx1 = hx0, hx1
 
-    # 1. Slice native HR target volume WITHOUT any resampling!
     if savu_xzy_disk:
-        raw_hi = sanitize_xct_volume(np.asarray(high_dset_or_vol[hx0:hx1, hz0:hz1, hy0:hy1]))
+        raw_hi = sanitize_xct_volume(
+            np.asarray(high_dset_or_vol[disk_hx0:disk_hx1, hz0:hz1, hy0:hy1])
+        )
         hr_native = np.transpose(raw_hi, (1, 2, 0)).copy()
     else:
         hr_native = sanitize_xct_volume(
-            np.asarray(high_dset_or_vol[hz0:hz1, hy0:hy1, hx0:hx1])
+            np.asarray(high_dset_or_vol[hz0:hz1, hy0:hy1, disk_hx0:disk_hx1])
         ).copy()
+    if flip_hr_x:
+        hr_native = hr_native[:, :, ::-1].copy()
 
-    # 2. Compute tight out-of-core LR bounding box enclosing all 8 mapped HR corners
     corners_xyz_um = np.array(
         [
             [x_i * sp_hi_um, y_i * sp_hi_um, z_i * sp_hi_um]
@@ -783,16 +1101,39 @@ def resample_lr_to_hr_grid_7dof(
     else:
         lo_win = sanitize_xct_volume(np.asarray(low_dset_or_vol[lz0:lz1, ly0:ly1, lx0:lx1])).copy()
 
-    # 3. Cell-centered s-coarsened physical LR grid of hr_native:
-    # HR block [0 .. s-1] has center at 0.5 * (s - 1) * sp_hi_um relative to HR voxel 0!
+    cleanup_meta: dict[str, Any] = {"enabled": bool(clean_artifacts)}
+    if clean_artifacts:
+        lo_rc_local = (
+            (lr_ring_center_full_yx[0] - ly0, lr_ring_center_full_yx[1] - lx0)
+            if lr_ring_center_full_yx is not None
+            else None
+        )
+        hi_rc_local = (
+            (hr_ring_center_full_yx[0] - hy0, hr_ring_center_full_yx[1] - hx0)
+            if hr_ring_center_full_yx is not None
+            else None
+        )
+        lo_win, lo_clean_rep = clean_synchrotron_xct_slab(
+            lo_win, dering=True, detrend_cupping=False, ring_center_yx=lo_rc_local
+        )
+        hr_native, hi_clean_rep = clean_synchrotron_xct_slab(
+            hr_native,
+            dering=True,
+            detrend_cupping=bool(detrend_hr_cupping),
+            ring_center_yx=hi_rc_local,
+        )
+        cleanup_meta["lr"] = lo_clean_rep
+        cleanup_meta["hr"] = hi_clean_rep
+        cleanup_meta["ruby_clean_z_min_applied"] = int(hr_clean_z_min)
+
     hr_origin_zyx_um = (hz0 * sp_hi_um, hy0 * sp_hi_um, hx0 * sp_hi_um)
-    half_block_um = 0.5 * float(s - 1) * float(sp_hi_um)
+    half_block_um = 0.5 * (sf - 1.0) * float(sp_hi_um)
     lr_grid_origin_zyx_um = (
         hr_origin_zyx_um[0] + half_block_um,
         hr_origin_zyx_um[1] + half_block_um,
         hr_origin_zyx_um[2] + half_block_um,
     )
-    eff_lr_sp_um = float(s) * float(sp_hi_um)
+    eff_lr_sp_um = sf * float(sp_hi_um)
     lr_aligned, used_mmb = resample_moving_to_fixed_7dof(
         moving_zyx=lo_win,
         moving_spacing_zyx_um=(sp_lo_um, sp_lo_um, sp_lo_um),
@@ -803,8 +1144,7 @@ def resample_lr_to_hr_grid_7dof(
         fixed_origin_zyx_um=lr_grid_origin_zyx_um,
     )
 
-    # 4. Compute contrast-invariant alignment diagnostics on (lr_aligned, block_down(hr_native))
-    hr_coarse = _block_downsample_3d(hr_native, s)
+    hr_coarse = _downsample_3d_rational(hr_native, sf)
     lo_n = normalize_volume(lr_aligned, mode="percentile", lower_pct=0.5, upper_pct=99.5)
     hi_n = normalize_volume(hr_coarse, mode="percentile", lower_pct=0.5, upper_pct=99.5)
     mid_ssim, tri_ssim = _triplanar_mid_ssim(lo_n, hi_n)
@@ -818,7 +1158,9 @@ def resample_lr_to_hr_grid_7dof(
         "lr_source_window_zyx": [[lz0, lz1], [ly0, ly1], [lx0, lx1]],
         "hr_resampled": False,
         "lr_resampled_7dof": True,
+        "diad_astra_flip_x_applied": bool(flip_hr_x),
         "delegated_to_multimodal_benchmark": used_mmb,
+        "artifact_cleanup": cleanup_meta,
         "pearson_r_7dof": round(pearson_r, 5),
         "coarse_mid_slice_ssim": round(mid_ssim, 5),
         "hr_triplanar_ssim": round(tri_ssim, 5),
@@ -826,50 +1168,77 @@ def resample_lr_to_hr_grid_7dof(
         "edge_scale_drift_prevented_hr_vox": round(edge_drift_prevented_hr_vox, 3),
         "aligned_lr_shape": list(lr_aligned.shape),
         "aligned_hr_shape": list(hr_native.shape),
-        "scale_factor": s,
+        "scale_factor": int(round(sf)) if sf.is_integer() else sf,
         "similarity_transform_hr_to_lr": tx_hr_to_lr.to_dict(),
     }
     return lr_aligned, hr_native, info
 
 
+def _open_h5_recon_dataset(h5_file: h5py.File, preferred_key: str) -> h5py.Dataset:
+    """Resolve reconstruction dataset across Savu TomopyRecon, K11 AstraReconGpu, or mock HDF5s."""
+    for candidate in (
+        preferred_key,
+        "4-TomopyRecon-tomo/data",
+        "4-AstraReconGpu-tomo/data",
+    ):
+        if candidate and candidate in h5_file and isinstance(h5_file[candidate], h5py.Dataset):
+            return cast(h5py.Dataset, h5_file[candidate])
+    top_dsets = [k for k in h5_file.keys() if isinstance(h5_file[k], h5py.Dataset)]
+    if top_dsets:
+        return cast(h5py.Dataset, h5_file[top_dsets[0]])
+    raise KeyError(
+        f"HDF5 file {h5_file.filename!r} did not contain {preferred_key!r} or top-level datasets."
+    )
+
+
 def extract_aligned_slab_from_h5(
     low_h5_path: str | Path,
     high_h5_path: str | Path,
-    pair: Zn13XPairName = "2x",
+    pair: Zn13XPairName | str = "2x",
     lr_slab_depth: int = 64,
     lr_crop_yx: int | None = None,
-    dataset_key: str = "4-TomopyRecon-tomo/data",
+    dataset_key: str | None = None,
     consistent_attenuation_window: bool = True,
     certified_regions_path: str | Path | None = None,
+    clean_artifacts: bool = True,
+    split_block_id: str | None = None,
+    splits_path: str | Path | None = None,
+    stage0c_path: str | Path | None = None,
+    allow_uncertified_t2: bool = False,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
-    """Extract and 7-DOF-align a 3D slab from raw >50 GB I13-2 Savu HDF5 files out-of-core.
+    """Extract, clean, and 7-DOF-align a 3D slab from raw >50 GB I13-2 / K11 DIAD Savu HDF5 files.
 
-    Uses ``MultimodalBenchmark``'s 7-DOF similarity transforms (chained across adjacent rungs for
-    ``8x``) to resample LR onto the cell-centered ``s``-coarsened physical grid of the untouched
-    native HR slab, eliminating the ~1.3% objective magnification drift toward crop edges.
+    Supports all 5 I13-2 ``Task T1`` pairs (``1.6x``, ``2x``, ``2.5x``, ``5x``, ``8x``),
+    Stage 0C-gated ``Task T2`` (``t2_diad_3x``), guard-banded ``256^3`` blocks from
+    ``benchmark_splits_v1.json``, and conservative polar de-ringing + 7-term cupping detrend.
     """
-    if pair == "2x":
-        lo_spec = ZN13X_I13_RESOLUTIONS["1p625um"]
-        hi_spec = ZN13X_I13_RESOLUTIONS["0p8125um"]
-        scale = 2
-        default_lr_yx = 640
-    else:
-        lo_spec = ZN13X_I13_RESOLUTIONS["2p600um"]
-        hi_spec = ZN13X_I13_RESOLUTIONS["0p325um"]
-        scale = 8
-        default_lr_yx = 240  # 1920 HR px inside non-cupping 0.325 um local-tomography interior
+    canon_pair, lo_spec, hi_spec, scale, default_lr_yx = _resolve_pair_specs(pair)
 
-    tx_7dof, hr_center, reg_meta = resolve_zn13x_pair_7dof(
-        pair=pair,
-        tier_section="full_savu_32bit",
-        certified_regions_path=certified_regions_path,
-    )
+    if canon_pair == "t2_diad_3x":
+        tx_7dof, flip_hr_x, reg_meta = verify_stage0c_cross_beamline_gate(
+            stage0c_path, allow_uncertified=allow_uncertified_t2
+        )
+        hr_center: tuple[int, int, int] | None = None
+    else:
+        tx_7dof, hr_center, reg_meta = resolve_zn13x_pair_7dof(
+            pair=canon_pair,
+            tier_section="full_savu_32bit",
+            certified_regions_path=certified_regions_path,
+        )
+        flip_hr_x = bool(hi_spec.flip_x_astra)
+
+    hr_roi_override: tuple[tuple[int, int], tuple[int, int], tuple[int, int]] | None = None
+    split_meta: dict[str, Any] | None = None
+    if split_block_id is not None:
+        hr_roi_override, split_meta = resolve_zn13x_split_block(
+            canon_pair, split_block_id, splits_path=splits_path
+        )
+
     eff_yx = int(lr_crop_yx) if lr_crop_yx is not None else default_lr_yx
 
     with h5py.File(low_h5_path, "r") as f_lo, h5py.File(high_h5_path, "r") as f_hi:
-        dset_lo = f_lo[dataset_key]
-        dset_hi = f_hi[dataset_key]
-        # Savu TomopyRecon stores (X, Z, Y) when shape[0] == shape[2] != shape[1]
+        dset_lo = _open_h5_recon_dataset(f_lo, dataset_key or lo_spec.h5_dataset_key)
+        dset_hi = _open_h5_recon_dataset(f_hi, dataset_key or hi_spec.h5_dataset_key)
         is_savu_xzy = (
             dset_hi.ndim == 3
             and int(dset_hi.shape[0]) == int(dset_hi.shape[2])
@@ -885,9 +1254,13 @@ def extract_aligned_slab_from_h5(
             scale_factor=scale,
             tx_hr_to_lr=tx_7dof,
             savu_xzy_disk=is_savu_xzy,
+            clean_artifacts=clean_artifacts,
+            detrend_hr_cupping=hi_spec.local_tomography_truncated,
+            flip_hr_x=flip_hr_x,
+            hr_roi_override_zyx=hr_roi_override,
         )
 
-    if consistent_attenuation_window:
+    if consistent_attenuation_window and canon_pair != "t2_diad_3x":
         joint_vmin = min(lo_spec.vmin, hi_spec.vmin)
         joint_vmax = max(lo_spec.vmax, hi_spec.vmax)
         norm_lo = normalize_volume(slab_lo, mode="fixed", vmin=joint_vmin, vmax=joint_vmax)
@@ -897,16 +1270,102 @@ def extract_aligned_slab_from_h5(
         norm_hi = normalize_volume(slab_hi, mode="fixed", vmin=hi_spec.vmin, vmax=hi_spec.vmax)
 
     reg_info.update(reg_meta)
+    if split_meta is not None:
+        reg_info["split_block"] = split_meta
     return norm_lo, norm_hi, reg_info
 
 
+def extract_zn13x_split_blocks(
+    low_h5_path: str | Path,
+    high_h5_path: str | Path,
+    dest_dir: str | Path,
+    pair: Zn13XPairName | str = "2x",
+    splits: Sequence[str] = ("train", "val", "test"),
+    max_blocks_per_split: int | None = None,
+    splits_path: str | Path | None = None,
+    certified_regions_path: str | Path | None = None,
+    stage0c_path: str | Path | None = None,
+    allow_uncertified_t2: bool = False,
+    clean_artifacts: bool = True,
+) -> list[dict[str, object]]:
+    """Batch-extract guard-banded ``256^3`` train/val/test blocks from ``benchmark_splits_v1.json``."""
+    canon_pair, _, _, _, _ = _resolve_pair_specs(pair)
+    splits_doc, _, _ = load_zn13x_benchmark_splits(splits_path)
+    sec_map: dict[Zn13XPairName, str] = {
+        "2x": "t1_0p8125um_hr_blocks",
+        "2.5x": "t1_0p325um_hr_blocks",
+        "5x": "t1_0p325um_hr_blocks",
+        "8x": "t1_0p325um_hr_blocks",
+        "t2_diad_3x": "t2_t4_diad_0p54um_blocks",
+    }
+    if canon_pair not in sec_map:
+        raise ValueError(
+            f"Pair {canon_pair!r} has no 256^3 HR block table in benchmark_splits_v1.json."
+        )
+    wanted_splits = {str(s) for s in splits}
+    all_blocks = [
+        b
+        for b in splits_doc.get(sec_map[canon_pair], [])
+        if isinstance(b, dict) and str(b.get("split")) in wanted_splits
+    ]
+    out_root = Path(dest_dir) / f"zn13x_{zn13x_pair_file_slug(canon_pair)}_blocks"
+    extracted: list[dict[str, object]] = []
+    counts: dict[str, int] = {}
+    for blk in all_blocks:
+        sp_name = str(blk["split"])
+        if max_blocks_per_split is not None and counts.get(sp_name, 0) >= int(max_blocks_per_split):
+            continue
+        bid = str(blk["block_id"])
+        lr_b, hr_b, info_b = extract_aligned_slab_from_h5(
+            low_h5_path,
+            high_h5_path,
+            pair=canon_pair,
+            certified_regions_path=certified_regions_path,
+            clean_artifacts=clean_artifacts,
+            split_block_id=bid,
+            splits_path=splits_path,
+            stage0c_path=stage0c_path,
+            allow_uncertified_t2=allow_uncertified_t2,
+        )
+        sp_dir = out_root / sp_name
+        sp_dir.mkdir(parents=True, exist_ok=True)
+        lr_p = sp_dir / f"{bid}_lr.tif"
+        hr_p = sp_dir / f"{bid}_hr.tif"
+        man_p = sp_dir / f"{bid}_manifest.json"
+        tifffile.imwrite(lr_p, lr_b.astype(np.float32), photometric="minisblack")
+        tifffile.imwrite(hr_p, hr_b.astype(np.float32), photometric="minisblack")
+        rec: dict[str, object] = {
+            "pair": canon_pair,
+            "split": sp_name,
+            "block_id": bid,
+            "lr_path": str(lr_p),
+            "hr_path": str(hr_p),
+            "lr_shape": list(lr_b.shape),
+            "hr_shape": list(hr_b.shape),
+            "registration": info_b,
+        }
+        man_p.write_text(json.dumps(rec, indent=2) + "\n", encoding="utf-8")
+        extracted.append(rec)
+        counts[sp_name] = counts.get(sp_name, 0) + 1
+    return extracted
+
+
 def _resolve_local_h5_path(h5_root: Path, spec: Zn13XResolutionSpec) -> Path | None:
-    """Locate local Diamond I13-2 Savu HDF5 under standard or Zenodo-extracted layouts."""
+    """Locate local Diamond I13-2 or K11 DIAD Savu HDF5 under standard or Zenodo-extracted layouts."""
+    bare_id = spec.scan_id.removeprefix("k11-")
     candidates = [
         h5_root / spec.recon_filename,
+        h5_root / f"{spec.scan_id}_recon.h5",
+        h5_root / f"{bare_id}_recon.h5",
         h5_root / f"{spec.scan_id}_tomo_p4_tomopy_recon.h5",
+        h5_root / f"{spec.scan_id}_tomo_p4_astra_recon_gpu.h5",
+        h5_root / f"{bare_id}_tomo_p4_astra_recon_gpu.h5",
+        h5_root / f"k11-{bare_id}_tomo_p4_astra_recon_gpu.h5",
         h5_root / spec.scan_id / "tomo_p4_tomopy_recon.h5",
+        h5_root / spec.scan_id / "tomo_p4_astra_recon_gpu.h5",
+        h5_root / bare_id / "tomo_p4_astra_recon_gpu.h5",
         h5_root / f"zenodo_{spec.zenodo_record}" / "tomo_p4_tomopy_recon.h5",
+        h5_root / f"zenodo_{spec.zenodo_record}" / "tomo_p4_astra_recon_gpu.h5",
     ]
     for p in candidates:
         if p.is_file():
@@ -917,19 +1376,24 @@ def _resolve_local_h5_path(h5_root: Path, spec: Zn13XResolutionSpec) -> Path | N
 def _read_7dof_preview_h5_pair(
     lo_h5_path: Path,
     hi_h5_path: Path,
-    pair: Zn13XPairName,
+    pair: Zn13XPairName | str,
     lr_size: int,
     certified_regions_path: str | Path | None = None,
+    clean_artifacts: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
-    """Align 8-bit preview HDF5 sub-volumes (Zenodo 14245751) via MultimodalBenchmark 7-DOF transforms."""
-    scale = 2 if pair == "2x" else 8
-    lo_spec = ZN13X_I13_RESOLUTIONS["1p625um" if pair == "2x" else "2p600um"]
-    hi_spec = ZN13X_I13_RESOLUTIONS["0p8125um" if pair == "2x" else "0p325um"]
+    """Align & clean 8-bit preview HDF5 sub-volumes (Zenodo 14245751) via MultimodalBenchmark 7-DOF transforms."""
+    canon_pair, lo_spec, hi_spec, scale, _ = _resolve_pair_specs(pair)
+    if canon_pair == "t2_diad_3x":
+        raise ValueError(
+            "Task T2 ('t2_diad_3x') requires full K11 DIAD + I13-2 Savu HDF5s (not in Zenodo 14245751 preview)."
+        )
     tx_7dof, hr_center, reg_meta = resolve_zn13x_pair_7dof(
-        pair=pair,
+        pair=canon_pair,
         tier_section="zenodo_14245751_preview_8bit",
         certified_regions_path=certified_regions_path,
     )
+    cert_doc, _, _ = load_zn13x_certified_regions(certified_regions_path)
+
     with h5py.File(lo_h5_path, "r") as f_lo, h5py.File(hi_h5_path, "r") as f_hi:
         lo_keys = [k for k in f_lo.keys() if isinstance(f_lo[k], h5py.Dataset)]
         hi_keys = [k for k in f_hi.keys() if isinstance(f_hi[k], h5py.Dataset)]
@@ -937,26 +1401,31 @@ def _read_7dof_preview_h5_pair(
             raise KeyError("Zenodo preview HDF5 file contained no top-level dataset.")
         d_lo = f_lo[lo_keys[0]]
         d_hi = f_hi[hi_keys[0]]
-        # Only use full (500, 1000, 1000) global transform when preview HDF5 matches canonical size;
-        # synthetic tiny unit-test HDF5 mocks fall back cleanly to centered identity-frame slicing.
+        hi_shape = (int(d_hi.shape[0]), int(d_hi.shape[1]), int(d_hi.shape[2]))
         is_canonical_preview = (
             tuple(int(v) for v in d_lo.shape) == (500, 1000, 1000)
-            and tuple(int(v) for v in d_hi.shape) == (500, 1000, 1000)
+            and hi_shape == (500, 1000, 1000)
             and certified_regions_path is None
         ) or (certified_regions_path is not None)
         if is_canonical_preview:
+            lo_rc, hi_rc, clean_z_min = _resolve_preview_cleanup_hints(
+                cert_doc, lo_spec.scan_id, hi_spec.scan_id, hi_shape
+            )
             lr_aligned, hr_native, reg_info = resample_lr_to_hr_grid_7dof(
                 d_lo,
                 d_hi,
                 lr_shape_zyx=(int(lr_size), int(lr_size), int(lr_size)),
-                hr_center_zyx=hr_center
-                if tuple(int(v) for v in d_hi.shape) == (500, 1000, 1000)
-                else None,
+                hr_center_zyx=hr_center if hi_shape == (500, 1000, 1000) else None,
                 sp_lo_um=lo_spec.voxel_size_um,
                 sp_hi_um=hi_spec.voxel_size_um,
                 scale_factor=scale,
                 tx_hr_to_lr=tx_7dof,
                 savu_xzy_disk=False,
+                clean_artifacts=clean_artifacts,
+                detrend_hr_cupping=hi_spec.local_tomography_truncated,
+                lr_ring_center_full_yx=lo_rc,
+                hr_ring_center_full_yx=hi_rc,
+                hr_clean_z_min=clean_z_min,
             )
             reg_info.update(reg_meta)
             return (
@@ -965,17 +1434,34 @@ def _read_7dof_preview_h5_pair(
                 reg_info,
             )
 
-        # Fallback for synthetic small mock preview HDF5s in unit tests
-        eff_dz = min(int(lr_size), int(d_lo.shape[0]), int(d_hi.shape[0]) // scale)
-        eff_dy = min(int(lr_size), int(d_lo.shape[1]), int(d_hi.shape[1]) // scale)
-        eff_dx = min(int(lr_size), int(d_lo.shape[2]), int(d_hi.shape[2]) // scale)
+        num_p, den_q = rational_scale_pq(float(scale))
+        max_dz = min(int(lr_size), int(d_lo.shape[0]), (int(d_hi.shape[0]) * den_q) // num_p)
+        max_dy = min(int(lr_size), int(d_lo.shape[1]), (int(d_hi.shape[1]) * den_q) // num_p)
+        max_dx = min(int(lr_size), int(d_lo.shape[2]), (int(d_hi.shape[2]) * den_q) // num_p)
+        eff_dz = (max_dz // den_q) * den_q
+        eff_dy = (max_dy // den_q) * den_q
+        eff_dx = (max_dx // den_q) * den_q
         lo_arr = sanitize_xct_volume(np.asarray(d_lo[:eff_dz, :eff_dy, :eff_dx]))
         hi_arr = sanitize_xct_volume(
-            np.asarray(d_hi[: eff_dz * scale, : eff_dy * scale, : eff_dx * scale])
+            np.asarray(
+                d_hi[
+                    : (eff_dz * num_p) // den_q,
+                    : (eff_dy * num_p) // den_q,
+                    : (eff_dx * num_p) // den_q,
+                ]
+            )
         )
     lo_n = normalize_volume(lo_arr, mode="none")
     hi_n = normalize_volume(hi_arr, mode="none")
-    _, _, mock_info = register_multires_pair_3d(lo_n, hi_n, scale_factor=scale)
+    if den_q == 1:
+        _, _, mock_info = register_multires_pair_3d(lo_n, hi_n, scale_factor=int(num_p))
+    else:
+        mock_info = {
+            "aligned_lr_shape": list(lo_n.shape),
+            "aligned_hr_shape": list(hi_n.shape),
+            "scale_factor": float(scale),
+            "hr_resampled": False,
+        }
     mock_info["registration_schema"] = "multimodal_benchmark_7dof_v2"
     return lo_n, hi_n, mock_info
 
@@ -986,9 +1472,13 @@ def _is_zn13x_cache_valid(
     raw_h5_dir: str | Path | None,
     prefer_offline: bool,
     certified_regions_sha256: str | None = None,
+    clean_artifacts: bool | None = None,
+    split_block_id: str | None = None,
 ) -> bool:
-    """Ensure cached Zn-13X files match requested ``lr_size``, 7-DOF schema, and provenance."""
-    if cached.get("requested_lr_size") != int(lr_size):
+    """Ensure cached Zn-13X files match requested ``lr_size``, 7-DOF schema, cleanup flag, and split block."""
+    if split_block_id is None and cached.get("requested_lr_size") != int(lr_size):
+        return False
+    if cached.get("split_block_id") != split_block_id:
         return False
     src = str(cached.get("source_kind", ""))
     is_exp = bool(cached.get("is_experimental_xct", False))
@@ -1004,6 +1494,12 @@ def _is_zn13x_cache_valid(
             and reg.get("certified_regions_sha256") != certified_regions_sha256
         ):
             return False
+        if (
+            clean_artifacts is not None
+            and "clean_artifacts" in cached
+            and bool(cached.get("clean_artifacts")) != bool(clean_artifacts)
+        ):
+            return False
     if raw_h5_dir is not None and src not in (
         "local_i13_hdf5_slab",
         "local_i13_preview_h5_registered",
@@ -1015,26 +1511,35 @@ def _is_zn13x_cache_valid(
 
 
 def prepare_zn13x_benchmark(
-    pair: Zn13XPairName = "2x",
+    pair: Zn13XPairName | str = "2x",
     dest_dir: str | Path = "data/benchmarks",
     tier: Zn13XTier = "preview",
     lr_size: int = 48,
     raw_h5_dir: str | Path | None = None,
     certified_regions_path: str | Path | None = None,
+    clean_artifacts: bool = True,
+    split_block_id: str | None = None,
+    splits_path: str | Path | None = None,
+    stage0c_path: str | Path | None = None,
+    allow_uncertified_t2: bool = False,
     allow_offline_fallback: bool = True,
     prefer_offline: bool = False,
     timeout_s: float = 10.0,
     seed: int = 42,
 ) -> tuple[Path, Path, dict[str, object]]:
-    """Prepare 7-DOF-aligned LR & HR 3D TIFF volumes + provenance manifest for Diamond I13-2 ``Zn-13X``.
+    """Prepare 7-DOF-aligned, conservatively cleaned LR & HR 3D TIFF volumes + provenance manifest for ``Zn-13X``.
 
-    Experimental pairs consume ``BASE-Laboratory/MultimodalBenchmark``'s Stage 0B 7-DOF similarity
-    transforms (``certified_regions.yaml``, chained across adjacent rungs for ``8x``), resampling
-    LR onto the cell-centered coarsened grid of the unresampled HR target.
+    Supports all 5 Diamond I13-2 ``Task T1`` pairs (``1.6x``, ``2x``, ``2.5x``, ``5x``, ``8x``)
+    and Stage 0C-gated ``Task T2`` (``t2_diad_3x``: I13-2 ``169067`` -> K11 DIAD ``43334``).
     """
+    canon_pair, lo_spec, hi_spec, scale, _ = _resolve_pair_specs(pair)
+    if canon_pair == "t2_diad_3x":
+        verify_stage0c_cross_beamline_gate(stage0c_path, allow_uncertified=allow_uncertified_t2)
+
     out_dir = Path(dest_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    name = f"zn13x_{pair}"
+    slug = zn13x_pair_file_slug(canon_pair)
+    name = f"zn13x_{slug}" if split_block_id is None else f"zn13x_{slug}_{split_block_id}"
     lr_tif = out_dir / f"{name}_lr.tif"
     hr_tif = out_dir / f"{name}_hr.tif"
     manifest_path = out_dir / f"{name}_manifest.json"
@@ -1052,14 +1557,14 @@ def prepare_zn13x_benchmark(
                 raw_h5_dir=raw_h5_dir,
                 prefer_offline=prefer_offline,
                 certified_regions_sha256=cert_sha if certified_regions_path is not None else None,
+                clean_artifacts=clean_artifacts,
+                split_block_id=split_block_id,
             ):
                 return lr_tif, hr_tif, cached
 
         pid = os.getpid()
-        scale = 2 if pair == "2x" else 8
-        lo_key, hi_key = ("1p625um", "0p8125um") if pair == "2x" else ("2p600um", "0p325um")
-        lo_spec = ZN13X_I13_RESOLUTIONS[lo_key]
-        hi_spec = ZN13X_I13_RESOLUTIONS[hi_key]
+        lo_key = lo_spec.key
+        hi_key = hi_spec.key
 
         lr_vol: np.ndarray | None = None
         hr_vol: np.ndarray | None = None
@@ -1071,30 +1576,47 @@ def prepare_zn13x_benchmark(
             h5_root = Path(raw_h5_dir)
             lo_h5 = _resolve_local_h5_path(h5_root, lo_spec)
             hi_h5 = _resolve_local_h5_path(h5_root, hi_spec)
-            lo_prev = h5_root / lo_spec.preview_filename
-            hi_prev = h5_root / hi_spec.preview_filename
+            lo_prev = (h5_root / lo_spec.preview_filename) if lo_spec.preview_filename else None
+            hi_prev = (h5_root / hi_spec.preview_filename) if hi_spec.preview_filename else None
             if lo_h5 is not None and hi_h5 is not None:
                 lr_vol, hr_vol, reg_info = extract_aligned_slab_from_h5(
                     lo_h5,
                     hi_h5,
-                    pair=pair,
+                    pair=canon_pair,
                     lr_slab_depth=lr_size,
                     lr_crop_yx=lr_size,
                     certified_regions_path=certified_regions_path,
+                    clean_artifacts=clean_artifacts,
+                    split_block_id=split_block_id,
+                    splits_path=splits_path,
+                    stage0c_path=stage0c_path,
+                    allow_uncertified_t2=allow_uncertified_t2,
                 )
                 source_kind = "local_i13_hdf5_slab"
-            elif lo_prev.is_file() and hi_prev.is_file():
+            elif (
+                canon_pair != "t2_diad_3x"
+                and lo_prev is not None
+                and hi_prev is not None
+                and lo_prev.is_file()
+                and hi_prev.is_file()
+            ):
                 lr_vol, hr_vol, reg_info = _read_7dof_preview_h5_pair(
                     lo_prev,
                     hi_prev,
-                    pair=pair,
+                    pair=canon_pair,
                     lr_size=lr_size,
                     certified_regions_path=certified_regions_path,
+                    clean_artifacts=clean_artifacts,
                 )
                 source_kind = "local_i13_preview_h5_registered"
 
-        # 2. Try Zenodo 8-bit preview HDF5 record API if online and tier == 'preview'
-        if lr_vol is None and tier == "preview" and not prefer_offline:
+        # 2. Try Zenodo 8-bit preview HDF5 record API if online and tier == 'preview' (Task T1 only)
+        if (
+            lr_vol is None
+            and tier == "preview"
+            and not prefer_offline
+            and canon_pair != "t2_diad_3x"
+        ):
             api_url = f"https://zenodo.org/api/records/{ZN13X_SUBVOLUMES_ZENODO_RECORD}"
             try:
                 req = urllib.request.Request(api_url, headers={"User-Agent": "OpenLSR-X/0.2.1"})
@@ -1135,9 +1657,10 @@ def prepare_zn13x_benchmark(
                         lr_vol, hr_vol, reg_info = _read_7dof_preview_h5_pair(
                             tmp_lo,
                             tmp_hi,
-                            pair=pair,
+                            pair=canon_pair,
                             lr_size=lr_size,
                             certified_regions_path=certified_regions_path,
+                            clean_artifacts=clean_artifacts,
                         )
                         source_kind = "zenodo_14245751_preview"
                     finally:
@@ -1154,7 +1677,7 @@ def prepare_zn13x_benchmark(
             if not allow_offline_fallback:
                 raise RuntimeError(f"No local HDF5 or online Zenodo files available for {name}.")
             lr_vol, hr_vol = synthesize_zn13x_phantom_pair(
-                pair=pair,
+                pair=canon_pair,
                 lr_shape=(lr_size, lr_size, lr_size),
                 seed=seed,
             )
@@ -1177,9 +1700,11 @@ def prepare_zn13x_benchmark(
         }
         manifest: dict[str, object] = {
             "name": name,
-            "pair": pair,
+            "pair": canon_pair,
             "scale_factor": scale,
             "requested_lr_size": int(lr_size),
+            "split_block_id": split_block_id,
+            "clean_artifacts": bool(clean_artifacts),
             "low_resolution_um": lo_spec.voxel_size_um,
             "high_resolution_um": hi_spec.voxel_size_um,
             "calibrated_low_resolution_um": lo_spec.calibrated_voxel_size_um if is_exp else None,
