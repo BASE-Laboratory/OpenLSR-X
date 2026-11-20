@@ -42,16 +42,17 @@ Quantitative X-ray computed tomography (XCT) of functional porous materials at s
 
 ---
 
-## Running the Full Isambard-AI Experimental Campaign
+## Running the Full Greenwich A100 & STFC SCARF Experimental Campaign
 
-1. **Stage Real Diamond I13-2 `Zn-13X` 32-Bit Savu HDF5s (`--raw-h5-dir`; note Zenodo `14245751` 8-bit previews are provisional):**
+1. **Stage Real Diamond I13-2 `Zn-13X` 32-Bit Savu HDF5s (`--raw-h5-dir`, cleaned via conservative polar de-ringing + 7-term cupping detrend; Zenodo `14245751` 8-bit previews are provisional):**
    ```bash
-   openlsrx download-zn13x --dest data/benchmarks --lr-size 48 --raw-h5-dir /path/to/savu_recon_h5
+   openlsrx download-zn13x --pair t1_all --dest data/benchmarks --lr-size 48 --raw-h5-dir /path/to/savu_recon_h5
    openlsrx download-benchmarks --dest data/benchmarks --size 128
    ```
-2. **Launch Multi-Seed Array Campaign on Isambard-AI (`GH200`):**
+2. **Launch Multi-Seed Campaigns on University of Greenwich `A100` (primary) & STFC `SCARF` (overflow / 53 GB Savu resampling):**
    ```bash
-   sbatch scripts/hpc/isambard_ai_array.slurm
+   sbatch scripts/hpc/greenwich_a100_campaign.slurm
+   sbatch scripts/hpc/scarf_campaign.slurm
    ```
    Or train the flagship configuration directly via CLI:
    ```bash

@@ -1032,3 +1032,218 @@ def test_zn13x_7dof_similarity_resampling_chained_8x_and_certified_regions_cli(
     assert manifest_new["registration"]["registration_schema"] == "multimodal_benchmark_7dof_v2"
     assert manifest_new["registration"]["hr_resampled"] is False
     assert manifest_new["registration"]["fitted_scale_factor"] == pytest.approx(0.9864)
+
+
+def test_mmb_v2_artifact_cleanup_5rung_t1_rational_sr_splits_and_stage0c_t2_gate(
+    tmp_path: Path,
+) -> None:
+    """Verify conservative XCT cleanup, 5-rung T1 rational SR, benchmark_splits_v1, and Stage 0C T2 gate."""
+    import yaml
+
+    from openlsrx.data import (
+        ZN13X_T1_PAIRS,
+        compute_ruby_beam_hardening_clean_z_mask,
+        detrend_local_tomo_cupping_3d,
+        rational_scale_pq,
+        remove_rings_polar_conservative,
+        resolve_zn13x_pair_7dof,
+        resolve_zn13x_split_block,
+        segment_pores_fringe_guarded,
+        verify_stage0c_cross_beamline_gate,
+    )
+    from openlsrx.inference import super_resolve_volume_orthogonal
+    from openlsrx.models import SR3DResNet, SwinIRGenerator, super_resolve_volume_3d
+
+    # 1) Conservative synchrotron XCT cleanup: polar de-ringing + 7-term cupping + ruby shadow + fringe guard
+    _, hr_zn = synthesize_zn13x_phantom_pair(pair="2x", lr_shape=(64, 64, 64), seed=11)
+    clean_vol = hr_zn[:12].copy()  # (12, 128, 128) 3D tri-phase Zn-13X volume
+    rng = np.random.default_rng(99)
+    ny, nx = clean_vol.shape[1:]
+    yy, xx = np.indices((ny, nx), dtype=np.float32)
+    cy, cx = 64.0, 64.0
+    rr = np.hypot(yy - cy, xx - cx)
+    det_lut = rng.normal(0.0, 0.055, size=120).astype(np.float32)
+    det_lut[:8] = 0.0
+    rings = det_lut[np.clip(np.rint(rr).astype(int), 0, 119)]
+    ringed_vol = clean_vol + rings[None, :, :]
+
+    deringed_vol, rep = remove_rings_polar_conservative(ringed_vol, center_yx=(cy, cx))
+    assert deringed_vol.shape == ringed_vol.shape
+    assert rep.ring_variance_reduction_pct > 45.0
+    assert 0.94 <= rep.edge_sharpness_retention_ratio <= 1.04
+    assert float(np.mean((deringed_vol - clean_vol) ** 2)) < 0.85 * float(
+        np.mean((ringed_vol - clean_vol) ** 2)
+    )
+
+    yn = (yy - cy) / (0.5 * ny)
+    xn = (xx - cx) / (0.5 * nx)
+    cupping = (0.18 * (yn * yn + xn * xn) ** 2 + 0.08 * (yn * yn + xn * xn)).astype(np.float32)
+    cupped = clean_vol + cupping[None, :, :]
+    detrended = detrend_local_tomo_cupping_3d(cupped)
+    assert float(np.std(detrended - clean_vol)) < 0.35 * float(np.std(cupped - clean_vol))
+
+    # 169067 ruby sphere z-mask excludes z < 300 in 500-slice Zenodo 14245751 preview
+    z_mask_169067 = compute_ruby_beam_hardening_clean_z_mask(
+        num_z_slices=500,
+        sphere_center_z_vox=132.0,
+        sphere_radius_vox=155.0,
+        safety_margin_vox=12,
+    )
+    assert not bool(np.any(z_mask_169067[:300]))
+    assert bool(np.all(z_mask_169067[300:]))
+
+    # Fringe-guarded pore binarization reduces high-k Fresnel overshoot flips without mutating pred_vol
+    fringe_noise = (0.12 * (((yy.astype(int) + xx.astype(int)) % 2) * 2 - 1)).astype(np.float32)
+    fringed_pred = np.clip(clean_vol + fringe_noise[None, :, :], 0.0, 1.0)
+    fringed_copy = fringed_pred.copy()
+    mask_guarded, _ = segment_pores_fringe_guarded(fringed_pred, tie_homogeneity_alpha_vox2=0.6)
+    petro_raw = evaluate_petrophysical_metrics(fringed_pred, clean_vol, fringe_guard_alpha=0.0)
+    petro_guarded = evaluate_petrophysical_metrics(fringed_pred, clean_vol, fringe_guard_alpha=0.6)
+    assert np.array_equal(fringed_pred, fringed_copy)
+    assert mask_guarded.shape == fringed_pred.shape
+    assert petro_guarded["pore_dice"] >= petro_raw["pore_dice"]
+
+    # 2) Full 5-rung Task T1 transforms + rational 1.6x (8/5) and 2.5x (5/2) end-to-end SR
+    assert ZN13X_T1_PAIRS == ("1.6x", "2x", "2.5x", "5x", "8x")
+    for p_name in ZN13X_T1_PAIRS:
+        tx_p, c_p, m_p = resolve_zn13x_pair_7dof(p_name, tier_section="full_savu_32bit")
+        assert 0.95 < tx_p.scale < 1.05 and c_p is not None
+        assert m_p["registration_schema"] == "multimodal_benchmark_7dof_v2"
+
+    lr_1p6, hr_1p6 = synthesize_zn13x_phantom_pair(pair="1.6x", lr_shape=(20, 20, 20), seed=5)
+    assert lr_1p6.shape == (20, 20, 20) and hr_1p6.shape == (32, 32, 32)
+    lr_2p5, hr_2p5 = synthesize_zn13x_phantom_pair(pair="2.5x", lr_shape=(16, 16, 16), seed=6)
+    assert lr_2p5.shape == (16, 16, 16) and hr_2p5.shape == (40, 40, 40)
+
+    p_1p6_lr = tmp_path / "r1p6_lr.tif"
+    p_1p6_hr = tmp_path / "r1p6_hr.tif"
+    tifffile.imwrite(p_1p6_lr, lr_1p6)
+    tifffile.imwrite(p_1p6_hr, hr_1p6)
+    dm_1p6 = PairedVolumeDataModule(
+        low_path=str(p_1p6_lr),
+        high_path=str(p_1p6_hr),
+        scale_factor=1.6,
+        context_slices=3,
+        train_frac=0.5,
+        val_frac=0.25,
+        guard_slices_lr=0,
+        patch_size_lr=10,
+        batch_size=2,
+    )
+    dm_1p6.setup("fit")
+    batch_lr, batch_hr = next(iter(dm_1p6.train_dataloader()))
+    assert tuple(batch_lr.shape) == (2, 3, 10, 10)
+    assert tuple(batch_hr.shape) in {(2, 16, 16), (2, 1, 16, 16)}
+
+    swin_1p6 = SwinIRGenerator(
+        in_channels=3,
+        out_channels=16,
+        num_blocks=1,
+        window_size=4,
+        num_heads=2,
+        super_res_factor=1.6,
+    ).eval()
+    ortho_1p6 = super_resolve_volume_orthogonal(
+        swin_1p6, lr_1p6[:10, :10, :10], scale_factor=1.6, context_slices=3
+    )
+    assert ortho_1p6["fused"].shape == (16, 16, 16)
+
+    sr3d_2p5 = SR3DResNet(super_res_factor=2.5, out_channels=8, num_blocks=1).eval()
+    pred_3d_2p5 = super_resolve_volume_3d(
+        sr3d_2p5.gen, lr_2p5[:8, :8, :8], scale_factor=2.5, patch_size_lr=8, overlap_lr=2
+    )
+    assert pred_3d_2p5.shape == (20, 20, 20)
+
+    # 3) benchmark_splits_v1.json block resolution across integer & rational scales
+    for pair_k, blk_id, exp_lr in [
+        ("2x", "test_00", 128),
+        ("2.5x", "test_00", 102),
+        ("5x", "test_00", 51),
+        ("8x", "test_00", 32),
+        ("t2_diad_3x", "test_00", 85),
+    ]:
+        roi_zyx, blk_meta = resolve_zn13x_split_block(pair_k, blk_id)
+        num_p, den_q = rational_scale_pq(
+            {"2x": 2.0, "2.5x": 2.5, "5x": 5.0, "8x": 8.0, "t2_diad_3x": 3.0}[pair_k]
+        )
+        for a0, a1 in roi_zyx:
+            assert ((a1 - a0) * den_q) // num_p == exp_lr
+        assert blk_meta["split"] == "test"
+
+    # 4) Stage 0C cross-beamline gate for Task T2 (I13-2 169067 -> DIAD k11-43334)
+    with pytest.raises(ValueError, match="Stage 0C"):
+        prepare_zn13x_benchmark(
+            pair="t2_diad_3x", dest_dir=tmp_path / "t2_uncert", prefer_offline=True
+        )
+
+    bad_stage0c = tmp_path / "stage0c_bad.yaml"
+    bad_stage0c.write_text(
+        yaml.safe_dump(
+            {
+                "max_octant_drift_um": 2.4,
+                "stage0c_certified": False,
+                "global_pellet_transform": {
+                    "matrix_3x3": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    "translation_xyz_um": [0.0, 0.0, 0.0],
+                    "center_xyz_um": [0.0, 0.0, 0.0],
+                    "scale": 1.0,
+                    "versor_xyzw": [0.0, 0.0, 0.0, 1.0],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="rejected"):
+        verify_stage0c_cross_beamline_gate(bad_stage0c)
+
+    good_stage0c = tmp_path / "stage0c_good.yaml"
+    good_stage0c.write_text(
+        yaml.safe_dump(
+            {
+                "max_octant_drift_um": 0.65,
+                "pellet_vs_fiducial_slip_um": 0.42,
+                "stage0c_certified": True,
+                "provenance": {"diad_astra_flip_x_detected": True},
+                "global_pellet_transform": {
+                    "matrix_3x3": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                    "translation_xyz_um": [0.0, 0.0, 0.0],
+                    "center_xyz_um": [0.0, 0.0, 0.0],
+                    "scale": 1.0,
+                    "versor_xyzw": [0.0, 0.0, 0.0, 1.0],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    h5_t2_dir = tmp_path / "t2_h5"
+    h5_t2_dir.mkdir()
+    # Asymmetric marker along X in I13-2 (left side x=1..4) and mirrored X in raw Astra DIAD (right side)
+    i13_arr = np.zeros((12, 12, 12), dtype=np.float32)
+    i13_arr[3:9, 3:9, 1:4] = 8.0e-4
+    diad_unflipped = np.zeros((36, 36, 36), dtype=np.float32)
+    diad_unflipped[9:27, 9:27, 3:12] = 0.04
+    diad_raw_astra = diad_unflipped[:, :, ::-1].copy()
+    with h5py.File(h5_t2_dir / "169067_recon.h5", "w") as fl:
+        fl.create_dataset("4-TomopyRecon-tomo/data", data=i13_arr)
+    with h5py.File(h5_t2_dir / "43334_recon.h5", "w") as fh:
+        fh.create_dataset("4-AstraReconGpu-tomo/data", data=diad_raw_astra)
+
+    lr_t2, hr_t2, man_t2 = prepare_zn13x_benchmark(
+        pair="t2_diad_3x",
+        dest_dir=tmp_path / "t2_cert",
+        lr_size=12,
+        raw_h5_dir=h5_t2_dir,
+        stage0c_path=good_stage0c,
+        clean_artifacts=False,
+        allow_offline_fallback=False,
+    )
+    reg_t2 = man_t2["registration"]
+    assert isinstance(reg_t2, dict)
+    assert reg_t2["stage0c_certified"] is True
+    assert reg_t2["diad_astra_flip_x_applied"] is True
+    hr_t2_vol = tifffile.imread(hr_t2)
+    lr_t2_vol = tifffile.imread(lr_t2)
+    assert hr_t2_vol.shape == (36, 36, 36) and lr_t2_vol.shape == (12, 12, 12)
+    # After Astra flip_x correction, both LR and HR have high attenuation on the LEFT (low x)!
+    assert float(hr_t2_vol[:, :, :15].mean()) > float(hr_t2_vol[:, :, 21:].mean())
+    assert float(lr_t2_vol[:, :, :5].mean()) > float(lr_t2_vol[:, :, 7:].mean())

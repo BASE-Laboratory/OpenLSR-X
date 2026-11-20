@@ -18,6 +18,7 @@ from pytorch_lightning.cli import LightningCLI
 from .data import (
     AVAILABLE_DUALSCAN_DATASETS,
     AVAILABLE_PUBLIC_DATASETS,
+    ZN13X_T1_PAIRS,
     NormMode,
     PairedVolumeDataModule,  # noqa: F401 - registered for LightningCLI subclass discovery
     SyntheticPoreSpyDataModule,  # noqa: F401 - registered for LightningCLI subclass discovery
@@ -26,8 +27,11 @@ from .data import (
     fetch_or_generate_rock_sample,
     load_volume_any,
     normalize_volume,
+    normalize_zn13x_pair_name,
     prepare_bentheimer_dualscan_benchmark,
     prepare_zn13x_benchmark,
+    zn13x_pair_file_slug,
+    zn13x_pair_scale_factor,
 )
 from .inference import super_resolve_volume_orthogonal
 from .inference.orthogonal import AxisName, FusionMode
@@ -41,7 +45,14 @@ from .metrics import (
 )
 from .models import SRGAN, SR3DResNet, super_resolve_volume_3d
 
-ZN13X_BENCHMARK_KEYS = ("zn13x_2x", "zn13x_8x")
+ZN13X_BENCHMARK_KEYS = (
+    "zn13x_1p6x",
+    "zn13x_2x",
+    "zn13x_2p5x",
+    "zn13x_5x",
+    "zn13x_8x",
+    "zn13x_t2_diad_3x",
+)
 
 
 def _run_evaluate(argv: Sequence[str]) -> int:
@@ -66,6 +77,15 @@ def _run_evaluate(argv: Sequence[str]) -> int:
         type=float,
         default=None,
         help="Threshold value when --threshold=fixed.",
+    )
+    parser.add_argument(
+        "--fringe-guard-alpha",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional Paganin-like tie-homogeneity damping alpha (vox^2) for Ram-Lak Fresnel "
+            "fringes strictly inside binary pore thresholding (default: 0.0)."
+        ),
     )
     parser.add_argument(
         "--pore-is-high",
@@ -121,6 +141,7 @@ def _run_evaluate(argv: Sequence[str]) -> int:
         pore_is_low=pore_is_low,
         voxel_size=ns.voxel_size,
         stack_axis=ns.stack_axis,
+        fringe_guard_alpha=ns.fringe_guard_alpha,
     )
     combined: dict[str, Any] = {
         "image_metrics": img_metrics,
@@ -140,6 +161,7 @@ def _run_evaluate(argv: Sequence[str]) -> int:
             fixed_threshold=ns.fixed_threshold,
             pore_is_low=pore_is_low,
             voxel_size=ns.voxel_size,
+            fringe_guard_alpha=ns.fringe_guard_alpha,
         )
     if ns.export_openimpala_dir and pred_vol.ndim == 3:
         tif_p, inp_p = export_for_openimpala(
@@ -257,6 +279,34 @@ def _run_download_benchmarks(argv: Sequence[str]) -> int:
         ),
     )
     parser.add_argument(
+        "--no-clean-artifacts",
+        action="store_true",
+        help="Disable conservative polar de-ringing and local-tomo cupping detrend on real HDF5 scans.",
+    )
+    parser.add_argument(
+        "--block-id",
+        type=str,
+        default=None,
+        help="Optional split block ID from benchmark_splits_v1.json (e.g., train_z0_00, test_00).",
+    )
+    parser.add_argument(
+        "--splits-json",
+        type=str,
+        default=None,
+        help="Optional override path to benchmark_splits_v1.json.",
+    )
+    parser.add_argument(
+        "--stage0c-yaml",
+        type=str,
+        default=None,
+        help="Stage 0C cross-beamline registration YAML/JSON required for Task T2 (zn13x_t2_diad_3x).",
+    )
+    parser.add_argument(
+        "--allow-uncertified-t2",
+        action="store_true",
+        help="Bypass Stage 0C <= 1.0 um TRE gate for exploratory Task T2 runs.",
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="Synthesize deterministic calibrated digital-rock/synchrotron phantoms offline without network fetches.",
@@ -273,18 +323,25 @@ def _run_download_benchmarks(argv: Sequence[str]) -> int:
     shape = (rock_side, rock_side, rock_side)
     for name in ns.datasets:
         if name in ZN13X_BENCHMARK_KEYS:
-            pair: Literal["2x", "8x"] = "2x" if name == "zn13x_2x" else "8x"
-            scale = 2 if pair == "2x" else 8
+            canon_pair = normalize_zn13x_pair_name(name)
+            scale = float(zn13x_pair_scale_factor(canon_pair))
             if ns.size is None:
                 lr_size = 48
             else:
-                lr_size = max(16, ns.size // scale) if ns.size >= 64 else max(16, ns.size)
+                lr_size = (
+                    max(16, int(round(ns.size / scale))) if ns.size >= 64 else max(16, ns.size)
+                )
             lr_tif, hr_tif, manifest = prepare_zn13x_benchmark(
-                pair=pair,
+                pair=canon_pair,
                 dest_dir=ns.dest,
                 lr_size=lr_size,
                 raw_h5_dir=ns.raw_h5_dir,
                 certified_regions_path=ns.certified_regions,
+                clean_artifacts=(not ns.no_clean_artifacts),
+                split_block_id=ns.block_id,
+                splits_path=ns.splits_json,
+                stage0c_path=ns.stage0c_yaml,
+                allow_uncertified_t2=bool(ns.allow_uncertified_t2),
                 allow_offline_fallback=(not ns.no_offline_fallback),
                 prefer_offline=bool(ns.offline),
                 seed=ns.seed,
@@ -340,13 +397,25 @@ def _run_download_benchmarks(argv: Sequence[str]) -> int:
 def _run_download_zn13x(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="openlsrx download-zn13x",
-        description="Prepare Diamond Light Source I13-2 multi-magnification Zn-13X paired synchrotron volumes.",
+        description="Prepare Diamond Light Source I13-2 Task T1 (1.6x/2x/2.5x/5x/8x) & K11 DIAD Task T2 Zn-13X paired volumes.",
     )
     parser.add_argument(
         "--pair",
-        choices=["2x", "8x", "all"],
+        choices=[
+            "1.6x",
+            "1p6x",
+            "2x",
+            "2.5x",
+            "2p5x",
+            "5x",
+            "8x",
+            "t2",
+            "t2_diad_3x",
+            "t1_all",
+            "all",
+        ],
         default="all",
-        help="Magnification pair(s) to prepare: 2x, 8x, or all (default: all).",
+        help="Magnification pair(s) to prepare: 1.6x, 2x, 2.5x, 5x, 8x, t2_diad_3x, t1_all (all 5 T1 rungs), or all (2x & 8x).",
     )
     parser.add_argument(
         "--dest",
@@ -372,6 +441,34 @@ def _run_download_zn13x(argv: Sequence[str]) -> int:
         ),
     )
     parser.add_argument(
+        "--no-clean-artifacts",
+        action="store_true",
+        help="Disable conservative polar de-ringing and 7-term local-tomo cupping detrend.",
+    )
+    parser.add_argument(
+        "--block-id",
+        type=str,
+        default=None,
+        help="Optional split block ID from benchmark_splits_v1.json (e.g., train_z0_00, test_00).",
+    )
+    parser.add_argument(
+        "--splits-json",
+        type=str,
+        default=None,
+        help="Optional override path to benchmark_splits_v1.json.",
+    )
+    parser.add_argument(
+        "--stage0c-yaml",
+        type=str,
+        default=None,
+        help="Stage 0C cross-beamline registration YAML/JSON required for Task T2 (t2_diad_3x).",
+    )
+    parser.add_argument(
+        "--allow-uncertified-t2",
+        action="store_true",
+        help="Bypass Stage 0C <= 1.0 um TRE gate for exploratory Task T2 runs.",
+    )
+    parser.add_argument(
         "--offline",
         action="store_true",
         help="Synthesize deterministic calibrated Zn-13X phantoms offline without network fetches.",
@@ -385,9 +482,13 @@ def _run_download_zn13x(argv: Sequence[str]) -> int:
     parser.add_argument("--seed", type=int, default=42)
     ns = parser.parse_args(list(argv))
 
-    pairs: list[Literal["2x", "8x"]] = (
-        ["2x", "8x"] if ns.pair == "all" else [cast(Literal["2x", "8x"], ns.pair)]
-    )
+    if ns.pair == "all":
+        pairs = ["2x", "8x"]
+    elif ns.pair == "t1_all":
+        pairs = list(ZN13X_T1_PAIRS)
+    else:
+        pairs = [normalize_zn13x_pair_name(ns.pair)]
+
     allow_fb = bool(ns.synthetic_fallback) or (not ns.no_offline_fallback)
     for pair in pairs:
         lr_tif, hr_tif, manifest = prepare_zn13x_benchmark(
@@ -396,6 +497,11 @@ def _run_download_zn13x(argv: Sequence[str]) -> int:
             lr_size=ns.lr_size,
             raw_h5_dir=ns.raw_h5_dir,
             certified_regions_path=ns.certified_regions,
+            clean_artifacts=(not ns.no_clean_artifacts),
+            split_block_id=ns.block_id,
+            splits_path=ns.splits_json,
+            stage0c_path=ns.stage0c_yaml,
+            allow_uncertified_t2=bool(ns.allow_uncertified_t2),
             allow_offline_fallback=allow_fb,
             prefer_offline=bool(ns.offline),
             seed=ns.seed,
@@ -403,8 +509,9 @@ def _run_download_zn13x(argv: Sequence[str]) -> int:
         prov_tag = (
             ", provisional_8bit_preview=True" if manifest.get("provisional_8bit_preview") else ""
         )
+        slug = zn13x_pair_file_slug(pair)
         print(
-            f"[zn13x_{pair}] ready at {lr_tif} & {hr_tif} "
+            f"[zn13x_{slug}] ready at {lr_tif} & {hr_tif} "
             f"(source={manifest['source_kind']}{prov_tag}, hr_sha256={str(manifest['hr_sha256'])[:12]}...)"
         )
     return 0
@@ -571,7 +678,7 @@ def _run_predict_volume(argv: Sequence[str]) -> int:
         pred_3d = super_resolve_volume_3d(
             generator_3d=model_obj.gen,
             low_volume=lr_norm,
-            scale_factor=int(round(float(model_obj.super_res_factor))),
+            scale_factor=float(model_obj.super_res_factor),
             device=dev,
         )
         fused = np.ascontiguousarray(pred_3d, dtype=np.float32)

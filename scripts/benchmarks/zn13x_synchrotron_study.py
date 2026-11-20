@@ -13,7 +13,7 @@ import csv
 import json
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import numpy as np
 import pytorch_lightning as pl
@@ -24,8 +24,12 @@ from torch import nn
 from openlsrx.baselines import upsample_3d
 from openlsrx.data import (
     PairedVolumeDataModule,
+    normalize_zn13x_pair_name,
     prepare_zn13x_benchmark,
+    rational_scale_pq,
     synthesize_zn13x_phantom_pair,
+    zn13x_pair_file_slug,
+    zn13x_pair_scale_factor,
 )
 from openlsrx.inference import fuse_orthogonal_volumes, super_resolve_volume_orthogonal
 from openlsrx.inference.orthogonal import AxisName
@@ -49,6 +53,11 @@ from openlsrx.models import (
 
 def _count_params(module: nn.Module) -> int:
     return sum(p.numel() for p in module.parameters() if p.requires_grad)
+
+
+def _is_power_of_two_scale(scale: float | int) -> bool:
+    s_int = int(round(float(scale)))
+    return abs(float(scale) - float(s_int)) < 1e-6 and s_int >= 1 and (s_int & (s_int - 1)) == 0
 
 
 def _fit_with_best_checkpoint(
@@ -107,7 +116,10 @@ def _evaluate_method(
     source_kind: str = "unknown",
     is_experimental_xct: bool = False,
     provisional_8bit_preview: bool = False,
+    clean_artifacts: bool = True,
+    split_block_id: str | None = None,
     fitted_scale_factor: float | None = None,
+    fringe_guard_alpha: float = 0.0,
     precomputed_true: dict[str, Any] | None = None,
     stack_axis: int = 0,
     gen_params: int = 0,
@@ -121,6 +133,8 @@ def _evaluate_method(
         "source_kind": source_kind,
         "is_experimental_xct": int(bool(is_experimental_xct)),
         "provisional_8bit_preview": int(bool(provisional_8bit_preview)),
+        "clean_artifacts": int(bool(clean_artifacts)),
+        "split_block_id": split_block_id,
         "fitted_scale_factor": fitted_scale_factor,
         "seed": seed,
         "method": method,
@@ -137,6 +151,7 @@ def _evaluate_method(
             pore_is_low=True,
             voxel_size=voxel_size_um,
             stack_axis=stack_axis,
+            fringe_guard_alpha=fringe_guard_alpha,
         )
     )
     row.update(evaluate_triphase_zn13x_metrics(pred_vol, hr_test))
@@ -148,6 +163,7 @@ def _evaluate_method(
             voxel_size=voxel_size_um,
             drainage_steps=10,
             precomputed_true=precomputed_true,
+            fringe_guard_alpha=fringe_guard_alpha,
         )
     )
     if uncertainty_std is not None:
@@ -180,6 +196,12 @@ def run_zn13x_study(
     seeds: list[int] | None = None,
     raw_h5_dir: Path | None = None,
     certified_regions_path: Path | None = None,
+    clean_artifacts: bool = True,
+    split_block_id: str | None = None,
+    splits_path: Path | None = None,
+    stage0c_path: Path | None = None,
+    allow_uncertified_t2: bool = False,
+    fringe_guard_alpha: float = 0.0,
     fast: bool = False,
     allow_synthetic_fallback: bool | None = None,
 ) -> Path:
@@ -216,25 +238,39 @@ def run_zn13x_study(
     runs_root = output_dir / "runs"
 
     for pair in pair_list:
-        pair_lit: Literal["2x", "8x"] = "2x" if pair == "2x" else "8x"
-        scale = 2 if pair_lit == "2x" else 8
+        pair_lit = normalize_zn13x_pair_name(pair)
+        scale = zn13x_pair_scale_factor(pair_lit)
+        _, den_q = rational_scale_pq(float(scale))
+        is_pow2_scale = _is_power_of_two_scale(scale)
         if fast:
-            cur_lr_size = max(12, lr_size // 2) if pair_lit == "8x" else lr_size
+            raw_lr_sz = max(12, lr_size // 2) if float(scale) >= 5.0 else lr_size
         elif volume_size is not None:
-            cur_lr_size = max(12, int(volume_size) // scale)
+            raw_lr_sz = max(12, int(round(int(volume_size) / float(scale))))
         else:
-            cur_lr_size = lr_size
+            raw_lr_sz = lr_size
+        cur_lr_size = max(den_q * 4, (raw_lr_sz // den_q) * den_q) if den_q > 1 else raw_lr_sz
+        patch_lr = (
+            max(den_q, (min(16, cur_lr_size) // den_q) * den_q)
+            if den_q > 1
+            else min(16, cur_lr_size)
+        )
+
         lr_tif, hr_tif, manifest = prepare_zn13x_benchmark(
             pair=pair_lit,
             dest_dir=data_dir,
             lr_size=cur_lr_size,
             raw_h5_dir=raw_h5_dir,
             certified_regions_path=certified_regions_path,
+            clean_artifacts=clean_artifacts,
+            split_block_id=split_block_id,
+            splits_path=splits_path,
+            stage0c_path=stage0c_path,
+            allow_uncertified_t2=allow_uncertified_t2,
             allow_offline_fallback=fallback,
             prefer_offline=fast,
             seed=42,
         )
-        dataset_name = f"zn13x_{pair_lit}"
+        dataset_name = f"zn13x_{zn13x_pair_file_slug(pair_lit)}"
         voxel_um = float(manifest["high_resolution_um"])  # type: ignore[arg-type]
         src_kind = str(manifest.get("source_kind", "unknown"))
         is_exp = bool(manifest.get("is_experimental_xct", False))
@@ -245,11 +281,20 @@ def run_zn13x_study(
             if isinstance(reg_dict, dict) and "fitted_scale_factor" in reg_dict
             else None
         )
+        eval_common: dict[str, Any] = {
+            "source_kind": src_kind,
+            "is_experimental_xct": is_exp,
+            "provisional_8bit_preview": prov_8bit,
+            "clean_artifacts": clean_artifacts,
+            "split_block_id": split_block_id,
+            "fitted_scale_factor": fitted_scale,
+            "fringe_guard_alpha": fringe_guard_alpha,
+        }
 
         for seed in seed_list:
             print(
                 f"[zn13x_study] Running {dataset_name} ({scale}x, source={manifest['source_kind']}, "
-                f"provisional_8bit={prov_8bit}) seed={seed} ..."
+                f"provisional_8bit={prov_8bit}, clean={clean_artifacts}) seed={seed} ..."
             )
             dm = PairedVolumeDataModule(
                 low_path=str(lr_tif),
@@ -259,9 +304,9 @@ def run_zn13x_study(
                 train_frac=0.65,
                 val_frac=0.20,
                 guard_slices_lr=1,
-                patch_size_lr=min(16, cur_lr_size),
-                batch_size=4 if scale == 2 else 2,
-                eval_batch_size=4 if scale == 2 else 2,
+                patch_size_lr=patch_lr,
+                batch_size=4 if float(scale) <= 2.5 else 2,
+                eval_batch_size=4 if float(scale) <= 2.5 else 2,
                 seed=seed,
             )
             dm.setup("fit")
@@ -283,6 +328,7 @@ def run_zn13x_study(
                 pore_is_low=True,
                 voxel_size=voxel_um,
                 drainage_steps=10,
+                fringe_guard_alpha=fringe_guard_alpha,
             )
 
             # 1) 3D Tricubic baseline (cell-centered grid_mode=True)
@@ -298,66 +344,61 @@ def run_zn13x_study(
                     pred_tricubic,
                     hr_test,
                     voxel_um,
-                    source_kind=src_kind,
-                    is_experimental_xct=is_exp,
-                    provisional_8bit_preview=prov_8bit,
-                    fitted_scale_factor=fitted_scale,
+                    **eval_common,
                     precomputed_true=ref_transport,
                     infer_sec=infer_tricubic,
                 )
             )
 
-            # 2) SRResNet (2D L1 + 3-Axis Fourier, generator-only baseline)
-            pl.seed_everything(seed, workers=True)
-            srresnet = SRGAN(
-                learning_rate=base_lr,
-                adaptive_size=4 if fast else 8,
-                super_res_factor=scale,
-                num_blocks=srgan_blocks,
-                out_channels=out_channels,
-                pixel_loss_type="l1",
-                use_adversarial_loss=False,
-                use_vgg_loss=False,
-                output_dir=str(runs_root / f"{dataset_name}_s{seed}_srresnet"),
-                save_val_images=False,
-            )
-            train_srres = _fit_with_best_checkpoint(
-                srresnet,
-                runs_root,
-                f"{dataset_name}_s{seed}_srresnet",
-                epochs=epochs,
-                fast=fast,
-                datamodule=dm,
-            )
-            t0 = time.perf_counter()
-            srres_vols = super_resolve_volume_orthogonal(
-                srresnet.gen,
-                lr_test,
-                scale_factor=scale,
-                fusion="fourier",
-                return_uncertainty=True,
-            )
-            infer_srres = time.perf_counter() - t0
-            rows.append(
-                _evaluate_method(
-                    dataset_name,
-                    pair_lit,
-                    seed,
-                    "SRResNet-3Axis-Fourier",
-                    srres_vols["fused"],
-                    hr_test,
-                    voxel_um,
-                    source_kind=src_kind,
-                    is_experimental_xct=is_exp,
-                    provisional_8bit_preview=prov_8bit,
-                    fitted_scale_factor=fitted_scale,
-                    precomputed_true=ref_transport,
-                    gen_params=_count_params(srresnet.gen),
-                    train_sec=train_srres,
-                    infer_sec=infer_srres,
-                    uncertainty_std=srres_vols["uncertainty_std"],
+            # 2) SRResNet (2D L1 + 3-Axis Fourier; power-of-2 PixelShuffle backbone)
+            if is_pow2_scale:
+                pl.seed_everything(seed, workers=True)
+                srresnet = SRGAN(
+                    learning_rate=base_lr,
+                    adaptive_size=4 if fast else 8,
+                    super_res_factor=scale,
+                    num_blocks=srgan_blocks,
+                    out_channels=out_channels,
+                    pixel_loss_type="l1",
+                    use_adversarial_loss=False,
+                    use_vgg_loss=False,
+                    output_dir=str(runs_root / f"{dataset_name}_s{seed}_srresnet"),
+                    save_val_images=False,
                 )
-            )
+                train_srres = _fit_with_best_checkpoint(
+                    srresnet,
+                    runs_root,
+                    f"{dataset_name}_s{seed}_srresnet",
+                    epochs=epochs,
+                    fast=fast,
+                    datamodule=dm,
+                )
+                t0 = time.perf_counter()
+                srres_vols = super_resolve_volume_orthogonal(
+                    srresnet.gen,
+                    lr_test,
+                    scale_factor=scale,
+                    fusion="fourier",
+                    return_uncertainty=True,
+                )
+                infer_srres = time.perf_counter() - t0
+                rows.append(
+                    _evaluate_method(
+                        dataset_name,
+                        pair_lit,
+                        seed,
+                        "SRResNet-3Axis-Fourier",
+                        srres_vols["fused"],
+                        hr_test,
+                        voxel_um,
+                        **eval_common,
+                        precomputed_true=ref_transport,
+                        gen_params=_count_params(srresnet.gen),
+                        train_sec=train_srres,
+                        infer_sec=infer_srres,
+                        uncertainty_std=srres_vols["uncertainty_std"],
+                    )
+                )
 
             # 3) Native 3D CNN baseline (SR3DResNet with full O_h 3D augmentation)
             pl.seed_everything(seed, workers=True)
@@ -376,7 +417,7 @@ def run_zn13x_study(
                 patch_size_lr=min(12, int(min(lr_train.shape))),
                 train_samples=c3d_samples,
                 val_samples=max(2, c3d_samples // 4),
-                batch_size=2 if scale == 2 else 1,
+                batch_size=2 if float(scale) <= 2.5 else 1,
                 augment=True,
                 seed=seed,
             )
@@ -394,8 +435,8 @@ def run_zn13x_study(
                 sr3d.gen,
                 lr_test,
                 scale_factor=scale,
-                patch_size_lr=min(16, cur_lr_size),
-                overlap_lr=4,
+                patch_size_lr=patch_lr,
+                overlap_lr=max(den_q, 4),
             )
             infer_3d = time.perf_counter() - t0
             rows.append(
@@ -407,10 +448,7 @@ def run_zn13x_study(
                     pred_3d,
                     hr_test,
                     voxel_um,
-                    source_kind=src_kind,
-                    is_experimental_xct=is_exp,
-                    provisional_8bit_preview=prov_8bit,
-                    fitted_scale_factor=fitted_scale,
+                    **eval_common,
                     precomputed_true=ref_transport,
                     gen_params=_count_params(sr3d.gen),
                     train_sec=train_3d,
@@ -418,79 +456,74 @@ def run_zn13x_study(
                 )
             )
 
-            # 4 & 5) Classical OpenLSR-X SRGAN (Single-Axis yz vs 3-Axis Fourier)
-            pl.seed_everything(seed, workers=True)
-            srgan = SRGAN(
-                learning_rate=base_lr,
-                adaptive_size=4 if fast else 8,
-                super_res_factor=scale,
-                num_blocks=srgan_blocks,
-                out_channels=out_channels,
-                disc_features=disc_features,
-                pretrain_epochs=max(1, epochs // 3),
-                use_adversarial_loss=True,
-                use_vgg_loss=False,
-                output_dir=str(runs_root / f"{dataset_name}_s{seed}_srgan"),
-                save_val_images=False,
-            )
-            train_srgan = _fit_with_best_checkpoint(
-                srgan,
-                runs_root,
-                f"{dataset_name}_s{seed}_srgan",
-                epochs=epochs,
-                fast=fast,
-                datamodule=dm,
-            )
-            t0 = time.perf_counter()
-            srgan_vols = super_resolve_volume_orthogonal(
-                srgan.gen,
-                lr_test,
-                scale_factor=scale,
-                fusion="fourier",
-                return_uncertainty=True,
-            )
-            infer_srgan = time.perf_counter() - t0
-            rows.append(
-                _evaluate_method(
-                    dataset_name,
-                    pair_lit,
-                    seed,
-                    "OpenLSR-X-SingleAxis(yz)",
-                    srgan_vols["yz"],
-                    hr_test,
-                    voxel_um,
-                    source_kind=src_kind,
-                    is_experimental_xct=is_exp,
-                    provisional_8bit_preview=prov_8bit,
-                    fitted_scale_factor=fitted_scale,
-                    precomputed_true=ref_transport,
-                    stack_axis=0,
-                    gen_params=_count_params(srgan.gen),
-                    train_sec=train_srgan,
-                    infer_sec=infer_srgan / 3.0,
+            # 4 & 5) Classical OpenLSR-X SRGAN (Single-Axis yz vs 3-Axis Fourier; power-of-2 PixelShuffle)
+            if is_pow2_scale:
+                pl.seed_everything(seed, workers=True)
+                srgan = SRGAN(
+                    learning_rate=base_lr,
+                    adaptive_size=4 if fast else 8,
+                    super_res_factor=scale,
+                    num_blocks=srgan_blocks,
+                    out_channels=out_channels,
+                    disc_features=disc_features,
+                    pretrain_epochs=max(1, epochs // 3),
+                    use_adversarial_loss=True,
+                    use_vgg_loss=False,
+                    output_dir=str(runs_root / f"{dataset_name}_s{seed}_srgan"),
+                    save_val_images=False,
                 )
-            )
-            rows.append(
-                _evaluate_method(
-                    dataset_name,
-                    pair_lit,
-                    seed,
-                    "OpenLSR-X-3Axis-Fourier",
-                    srgan_vols["fused"],
-                    hr_test,
-                    voxel_um,
-                    source_kind=src_kind,
-                    is_experimental_xct=is_exp,
-                    provisional_8bit_preview=prov_8bit,
-                    fitted_scale_factor=fitted_scale,
-                    precomputed_true=ref_transport,
-                    stack_axis=0,
-                    gen_params=_count_params(srgan.gen),
-                    train_sec=train_srgan,
-                    infer_sec=infer_srgan,
-                    uncertainty_std=srgan_vols["uncertainty_std"],
+                train_srgan = _fit_with_best_checkpoint(
+                    srgan,
+                    runs_root,
+                    f"{dataset_name}_s{seed}_srgan",
+                    epochs=epochs,
+                    fast=fast,
+                    datamodule=dm,
                 )
-            )
+                t0 = time.perf_counter()
+                srgan_vols = super_resolve_volume_orthogonal(
+                    srgan.gen,
+                    lr_test,
+                    scale_factor=scale,
+                    fusion="fourier",
+                    return_uncertainty=True,
+                )
+                infer_srgan = time.perf_counter() - t0
+                rows.append(
+                    _evaluate_method(
+                        dataset_name,
+                        pair_lit,
+                        seed,
+                        "OpenLSR-X-SingleAxis(yz)",
+                        srgan_vols["yz"],
+                        hr_test,
+                        voxel_um,
+                        **eval_common,
+                        precomputed_true=ref_transport,
+                        stack_axis=0,
+                        gen_params=_count_params(srgan.gen),
+                        train_sec=train_srgan,
+                        infer_sec=infer_srgan / 3.0,
+                    )
+                )
+                rows.append(
+                    _evaluate_method(
+                        dataset_name,
+                        pair_lit,
+                        seed,
+                        "OpenLSR-X-3Axis-Fourier",
+                        srgan_vols["fused"],
+                        hr_test,
+                        voxel_um,
+                        **eval_common,
+                        precomputed_true=ref_transport,
+                        stack_axis=0,
+                        gen_params=_count_params(srgan.gen),
+                        train_sec=train_srgan,
+                        infer_sec=infer_srgan,
+                        uncertainty_std=srgan_vols["uncertainty_std"],
+                    )
+                )
 
             # 6) Normalization-free RRDB-RaGAN + 3-Axis Fourier Fusion
             pl.seed_everything(seed, workers=True)
@@ -538,10 +571,7 @@ def run_zn13x_study(
                     rrdb_vols["fused"],
                     hr_test,
                     voxel_um,
-                    source_kind=src_kind,
-                    is_experimental_xct=is_exp,
-                    provisional_8bit_preview=prov_8bit,
-                    fitted_scale_factor=fitted_scale,
+                    **eval_common,
                     precomputed_true=ref_transport,
                     stack_axis=0,
                     gen_params=_count_params(rrdb_ragan.gen),
@@ -562,9 +592,9 @@ def run_zn13x_study(
                 train_frac=0.65,
                 val_frac=0.20,
                 guard_slices_lr=1,
-                patch_size_lr=min(16, cur_lr_size),
-                batch_size=4 if scale == 2 else 2,
-                eval_batch_size=4 if scale == 2 else 2,
+                patch_size_lr=patch_lr,
+                batch_size=4 if float(scale) <= 2.5 else 2,
+                eval_batch_size=4 if float(scale) <= 2.5 else 2,
                 seed=seed,
             )
 
@@ -613,10 +643,7 @@ def run_zn13x_study(
                     swin_l1_vols["fused"],
                     hr_test,
                     voxel_um,
-                    source_kind=src_kind,
-                    is_experimental_xct=is_exp,
-                    provisional_8bit_preview=prov_8bit,
-                    fitted_scale_factor=fitted_scale,
+                    **eval_common,
                     precomputed_true=ref_transport,
                     stack_axis=0,
                     gen_params=_count_params(swin_l1.gen),
@@ -687,10 +714,7 @@ def run_zn13x_study(
                     swin_phys_fourier,
                     hr_test,
                     voxel_um,
-                    source_kind=src_kind,
-                    is_experimental_xct=is_exp,
-                    provisional_8bit_preview=prov_8bit,
-                    fitted_scale_factor=fitted_scale,
+                    **eval_common,
                     precomputed_true=ref_transport,
                     stack_axis=0,
                     gen_params=_count_params(swin_phys.gen),
@@ -708,10 +732,7 @@ def run_zn13x_study(
                     swin_vols["fused"],
                     hr_test,
                     voxel_um,
-                    source_kind=src_kind,
-                    is_experimental_xct=is_exp,
-                    provisional_8bit_preview=prov_8bit,
-                    fitted_scale_factor=fitted_scale,
+                    **eval_common,
                     precomputed_true=ref_transport,
                     stack_axis=0,
                     gen_params=_count_params(swin_phys.gen),
@@ -749,15 +770,17 @@ def run_zn13x_study(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Diamond I13-2 Zn-13X Synchrotron SR Study.")
+    parser = argparse.ArgumentParser(
+        description="Run Diamond I13-2 Task T1 (1.6x/2x/2.5x/5x/8x) & K11 DIAD Task T2 Zn-13X Synchrotron SR Study."
+    )
     parser.add_argument("--output-dir", default="results/zn13x_study", help="Output directory.")
     parser.add_argument("--data-dir", default="data/benchmarks", help="Benchmark cache directory.")
     parser.add_argument(
         "--pairs",
         nargs="+",
-        choices=["2x", "8x"],
+        choices=["1.6x", "1p6x", "2x", "2.5x", "2p5x", "5x", "8x", "t2", "t2_diad_3x"],
         default=None,
-        help="I13-2 magnification pairs to evaluate.",
+        help="Magnification pairs to evaluate across Task T1 and Stage 0C-gated Task T2.",
     )
     parser.add_argument(
         "--lr-size",
@@ -773,12 +796,48 @@ def main() -> None:
     )
     parser.add_argument("--epochs", type=int, default=120, help="Training epochs.")
     parser.add_argument("--seeds", type=int, nargs="+", default=None, help="Random seeds.")
-    parser.add_argument("--raw-h5-dir", type=str, default=None, help="Optional raw I13-2 HDF5 dir.")
+    parser.add_argument(
+        "--raw-h5-dir", type=str, default=None, help="Optional raw I13-2 / DIAD HDF5 dir."
+    )
     parser.add_argument(
         "--certified-regions",
         type=str,
         default=None,
         help="Optional MultimodalBenchmark certified_regions.yaml or SimilarityTransform3D JSON/YAML path.",
+    )
+    parser.add_argument(
+        "--no-clean-artifacts",
+        action="store_true",
+        help="Disable conservative polar de-ringing and local-tomo cupping detrend.",
+    )
+    parser.add_argument(
+        "--block-id",
+        type=str,
+        default=None,
+        help="Optional split block ID from benchmark_splits_v1.json (e.g. test_00).",
+    )
+    parser.add_argument(
+        "--splits-json",
+        type=str,
+        default=None,
+        help="Optional override path to benchmark_splits_v1.json.",
+    )
+    parser.add_argument(
+        "--stage0c-yaml",
+        type=str,
+        default=None,
+        help="Stage 0C cross-beamline YAML/JSON required for Task T2 (t2_diad_3x).",
+    )
+    parser.add_argument(
+        "--allow-uncertified-t2",
+        action="store_true",
+        help="Bypass Stage 0C <= 1.0 um TRE gate for exploratory Task T2 runs.",
+    )
+    parser.add_argument(
+        "--fringe-guard-alpha",
+        type=float,
+        default=0.0,
+        help="Optional Paganin-like tie-homogeneity damping alpha (vox^2) inside binary pore thresholding.",
     )
     parser.add_argument("--fast", action="store_true", help="Rapid CPU smoke benchmark.")
     parser.add_argument(
@@ -798,6 +857,12 @@ def main() -> None:
         seeds=ns.seeds,
         raw_h5_dir=Path(ns.raw_h5_dir) if ns.raw_h5_dir else None,
         certified_regions_path=Path(ns.certified_regions) if ns.certified_regions else None,
+        clean_artifacts=(not ns.no_clean_artifacts),
+        split_block_id=ns.block_id,
+        splits_path=Path(ns.splits_json) if ns.splits_json else None,
+        stage0c_path=Path(ns.stage0c_yaml) if ns.stage0c_yaml else None,
+        allow_uncertified_t2=bool(ns.allow_uncertified_t2),
+        fringe_guard_alpha=ns.fringe_guard_alpha,
         fast=ns.fast,
         allow_synthetic_fallback=(True if ns.allow_synthetic_fallback else None),
     )

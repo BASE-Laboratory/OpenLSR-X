@@ -86,7 +86,7 @@ package-dir = { "" = "src" }
 where = ["src"]
 
 [tool.setuptools.package-data]
-openlsrx = ["data/*.yaml"]
+openlsrx = ["data/*.yaml", "data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

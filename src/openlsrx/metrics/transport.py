@@ -323,6 +323,7 @@ def precompute_reference_transport(
     pore_is_low: bool = True,
     voxel_size: float = 1.0,
     drainage_steps: int = 16,
+    fringe_guard_alpha: float = 0.0,
 ) -> dict[str, Any]:
     """Precompute HR ground-truth threshold, 3D Laplace tortuosity, and drainage curve once per seed."""
     true_mask, thr = segment_pore_space(
@@ -330,6 +331,7 @@ def precompute_reference_transport(
         method=threshold_method,
         fixed_value=fixed_threshold,
         pore_is_low=pore_is_low,
+        fringe_guard_alpha=fringe_guard_alpha,
     )
     true_t = compute_directional_tortuosity(true_mask)
     true_curve = compute_drainage_curve(
@@ -339,6 +341,7 @@ def precompute_reference_transport(
     )
     return {
         "threshold": float(thr),
+        "fringe_guard_alpha": float(fringe_guard_alpha),
         "true_mask": true_mask,
         "true_tortuosity": true_t,
         "true_drainage_curve": true_curve,
@@ -358,10 +361,13 @@ def evaluate_transport_metrics(
     voxel_size: float = 1.0,
     drainage_steps: int = 16,
     precomputed_true: dict[str, Any] | None = None,
+    fringe_guard_alpha: float = 0.0,
 ) -> dict[str, float | None]:
     """Evaluate 3D diffusive transport and capillary drainage fidelity between SR and HR XCT volumes."""
+    eff_alpha = float(fringe_guard_alpha)
     if precomputed_true is not None:
         thr = float(precomputed_true["threshold"])
+        eff_alpha = float(precomputed_true.get("fringe_guard_alpha", eff_alpha))
         true_mask = np.asarray(precomputed_true["true_mask"], dtype=bool)
         true_t = dict(precomputed_true["true_tortuosity"])
         true_curve = precomputed_true.get("true_drainage_curve")
@@ -371,6 +377,7 @@ def evaluate_transport_metrics(
             method=threshold_method,
             fixed_value=fixed_threshold,
             pore_is_low=pore_is_low,
+            fringe_guard_alpha=eff_alpha,
         )
         true_t = compute_directional_tortuosity(true_mask)
         true_curve = None
@@ -380,6 +387,7 @@ def evaluate_transport_metrics(
         method="fixed",
         fixed_value=thr,
         pore_is_low=pore_is_low,
+        fringe_guard_alpha=eff_alpha,
     )
     pred_t = compute_directional_tortuosity(pred_mask)
     if float(pred_t["solver_converged"]) < 1.0 or float(true_t["solver_converged"]) < 1.0:

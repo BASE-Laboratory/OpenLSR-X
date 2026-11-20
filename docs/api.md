@@ -82,6 +82,10 @@
 
 ::: openlsrx.data.zn13x.resolve_zn13x_pair_7dof
 
+::: openlsrx.data.zn13x.resolve_zn13x_split_block
+
+::: openlsrx.data.zn13x.verify_stage0c_cross_beamline_gate
+
 ::: openlsrx.data.zn13x.resample_lr_to_hr_grid_7dof
 
 ::: openlsrx.data.zn13x.register_multires_pair_3d
@@ -89,6 +93,20 @@
 ::: openlsrx.data.zn13x.apply_hr_grid_shift_pair_3d
 
 ::: openlsrx.data.zn13x.extract_aligned_slab_from_h5
+
+::: openlsrx.data.zn13x.extract_zn13x_split_blocks
+
+::: openlsrx.data.artifact_cleanup.remove_rings_polar_conservative
+
+::: openlsrx.data.artifact_cleanup.detrend_local_tomo_cupping_3d
+
+::: openlsrx.data.artifact_cleanup.compute_ruby_beam_hardening_clean_z_mask
+
+::: openlsrx.data.artifact_cleanup.segment_pores_fringe_guarded
+
+::: openlsrx.data.artifact_cleanup.clean_synchrotron_xct_slab
+
+::: openlsrx.data.transforms.rational_scale_pq
 
 ::: openlsrx.data.transforms.split_volume_spatially
 

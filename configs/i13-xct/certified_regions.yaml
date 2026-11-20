@@ -1,15 +1,20 @@
-# Canonical 7-DOF Multi-Resolution I13-2 Zn-13X Registration & Certified Regions
-# Generated directly via BASE-Laboratory/MultimodalBenchmark (registration.i13_ladder)
+# Canonical 7-DOF Multi-Resolution I13-2 & Cross-Beamline DIAD Zn-13X Registration & Cleanup Spec
+# Generated directly via BASE-Laboratory/MultimodalBenchmark (feat/benchmark-v2: registration.i13_ladder & preprocessing.artifact_cleanup)
 # Companion to Green et al., Scientific Data 12, 329 (2025) - https://doi.org/10.1038/s41597-025-04605-9
 
-schema_version: 2.0.0
+schema_version: 2.1.0
 source_repository: https://github.com/BASE-Laboratory/MultimodalBenchmark
-source_module: registration.i13_ladder
+source_branch: feat/benchmark-v2
+source_modules:
+  registration: registration.i13_ladder
+  artifact_cleanup: preprocessing.artifact_cleanup
+  splits: splits.generate_splits
 reference_paper_doi: 10.1038/s41597-025-04605-9
 provisional_status_note: 8-bit sub-volumes from Zenodo 14245751 use independent contrast windows and are intended
-  for registration preview and provisional super-resolution checks; quantitative T1 pore-scale transport benchmarking
-  requires the 32-bit float Savu reconstructions (Zenodo 12206815, 13327651, 13327682, 13327692) aligned with Stage
-  0B 7-DOF transforms.
+  for registration preview and provisional super-resolution checks; quantitative T1/T2 pore-scale transport benchmarking
+  requires the 32-bit float Savu/Astra reconstructions (Zenodo 12206815, 13327651, 13327682, 13327692, 13349402) aligned
+  with Stage 0B/0C 7-DOF transforms and conservative artifact cleanup.
+
 calibrated_resolutions_500um_ruby_sphere:
   '169068':
     nominal_voxel_um: 2.6
@@ -31,6 +36,35 @@ calibrated_resolutions_500um_ruby_sphere:
     calibrated_voxel_um: 0.32109
     voxel_scale_error_pct: -1.204
     turret: '[5] 10x 25um GGG:Eu S025 (chained)'
+    local_tomography_truncated: true
+  'k11-43334':
+    beamline: DLS K11 (DIAD)
+    nominal_voxel_um: 0.54
+    calibrated_voxel_um: 0.54
+    zenodo_record: '13349402'
+    hdf5_dataset: 4-AstraReconGpu-tomo/data
+    diad_astra_flip_x: true
+
+artifact_cleanup_defaults:
+  enable_polar_dering: true
+  enable_cupping_detrend_on_169065: true
+  exclude_ruby_sphere_shadow_z: true
+  preview_14245751_ring_centers_yx:
+    '169068': [507.0, 496.0]
+    '169067': [504.0, 502.0]
+    '169066': [553.5, 454.0]
+    '169065': [713.0, -150.5]
+  preview_14245751_ruby_sphere_z:
+    '169068':
+      sphere_center_z_vox: 112.0
+      sphere_radius_vox: 96.5
+      safety_margin_vox: 12
+    '169067':
+      sphere_center_z_vox: 134.0
+      sphere_radius_vox: 154.0
+      safety_margin_vox: 12
+      clean_z_min_vox: 300
+
 zenodo_14245751_preview_8bit:
   volume_shape_zyx:
   - 500
@@ -162,6 +196,21 @@ zenodo_14245751_preview_8bit:
         - -0.00028606313850097553
         - 0.9999999508759633
   pairs:
+    1.6x:
+      lr_scan_id: '169068'
+      hr_scan_id: '169067'
+      nominal_scale_factor: 1.6
+      transform_chain_hr_to_lr:
+      - 169068_from_169067
+      # z >= 300 avoids the 500 um ruby sphere pink-beam hardening shadow in 169067 preview
+      certified_hr_center_zyx_vox:
+      - 396
+      - 500
+      - 500
+      max_certified_hr_shape_zyx:
+      - 192
+      - 768
+      - 768
     2x:
       lr_scan_id: '169067'
       hr_scan_id: '169066'
@@ -176,6 +225,38 @@ zenodo_14245751_preview_8bit:
       - 480
       - 768
       - 768
+    2.5x:
+      lr_scan_id: '169066'
+      hr_scan_id: '169065'
+      nominal_scale_factor: 2.5
+      transform_chain_hr_to_lr:
+      - 169066_from_169065
+      certified_hr_center_zyx_vox:
+      - 250
+      - 500
+      - 500
+      max_certified_hr_shape_zyx:
+      - 480
+      - 600
+      - 600
+      local_tomography_valid_radius_fraction: 0.82
+    5x:
+      lr_scan_id: '169067'
+      hr_scan_id: '169065'
+      nominal_scale_factor: 5
+      transform_composition: chained_adjacent_7dof_only
+      transform_chain_hr_to_lr:
+      - 169066_from_169065
+      - 169067_from_169066
+      certified_hr_center_zyx_vox:
+      - 250
+      - 500
+      - 500
+      max_certified_hr_shape_zyx:
+      - 480
+      - 600
+      - 600
+      local_tomography_valid_radius_fraction: 0.82
     8x:
       lr_scan_id: '169068'
       hr_scan_id: '169065'
@@ -204,6 +285,7 @@ zenodo_14245751_preview_8bit:
         pearson_r_3dof_edge: 0.05977
         pearson_r_7dof_chained: 0.12113
         pearson_r_7dof_chained_edge: 0.11888
+
 full_savu_32bit:
   volume_shape_zyx:
   - 2110
@@ -267,12 +349,27 @@ full_savu_32bit:
         scale: 1.0030392189071111
         versor_xyzw: *id006
   pairs:
+    1.6x:
+      lr_scan_id: '169068'
+      hr_scan_id: '169067'
+      nominal_scale_factor: 1.6
+      transform_chain_hr_to_lr:
+      - 169068_from_169067
+      certified_hr_center_zyx_vox:
+      - 1200
+      - 1330
+      - 1178
+      max_certified_hr_shape_zyx:
+      - 640
+      - 640
+      - 640
     2x:
       lr_scan_id: '169067'
       hr_scan_id: '169066'
       nominal_scale_factor: 2
       transform_chain_hr_to_lr:
       - 169067_from_169066
+      splits_key: t1_0p8125um_hr_blocks
       certified_hr_center_zyx_vox:
       - 804
       - 1403
@@ -281,15 +378,13 @@ full_savu_32bit:
       - 1280
       - 1280
       - 1280
-    8x:
-      lr_scan_id: '169068'
+    2.5x:
+      lr_scan_id: '169066'
       hr_scan_id: '169065'
-      nominal_scale_factor: 8
-      transform_composition: chained_adjacent_7dof_only
+      nominal_scale_factor: 2.5
       transform_chain_hr_to_lr:
       - 169066_from_169065
-      - 169067_from_169066
-      - 169068_from_169067
+      splits_key: t1_0p325um_hr_blocks
       certified_hr_center_zyx_vox:
       - 509
       - 1250
@@ -299,3 +394,57 @@ full_savu_32bit:
       - 1920
       - 1920
       local_tomography_valid_radius_fraction: 0.78
+    5x:
+      lr_scan_id: '169067'
+      hr_scan_id: '169065'
+      nominal_scale_factor: 5
+      transform_composition: chained_adjacent_7dof_only
+      transform_chain_hr_to_lr:
+      - 169066_from_169065
+      - 169067_from_169066
+      splits_key: t1_0p325um_hr_blocks
+      certified_hr_center_zyx_vox:
+      - 509
+      - 1250
+      - 1250
+      max_certified_hr_shape_zyx:
+      - 960
+      - 1920
+      - 1920
+      local_tomography_valid_radius_fraction: 0.78
+    8x:
+      lr_scan_id: '169068'
+      hr_scan_id: '169065'
+      nominal_scale_factor: 8
+      transform_composition: chained_adjacent_7dof_only
+      transform_chain_hr_to_lr:
+      - 169066_from_169065
+      - 169067_from_169066
+      - 169068_from_169067
+      splits_key: t1_0p325um_hr_blocks
+      certified_hr_center_zyx_vox:
+      - 509
+      - 1250
+      - 1250
+      max_certified_hr_shape_zyx:
+      - 960
+      - 1920
+      - 1920
+      local_tomography_valid_radius_fraction: 0.78
+
+cross_beamline_t2:
+  task_id: t2
+  name: Cross-Beamline Synchrotron XCT Super-Resolution (DLS I13-2 -> DLS K11 DIAD)
+  lr_scan_id: '169067'
+  lr_voxel_um: 1.625
+  hr_scan_id: 'k11-43334'
+  hr_voxel_um: 0.54
+  nominal_voxel_scale_factor: 3
+  physical_scale_ratio: 3.009259
+  hr_h5_dataset_key: 4-AstraReconGpu-tomo/data
+  diad_astra_flip_x: true
+  splits_key: t2_t4_diad_0p54um_blocks
+  gated_on_stage0c: true
+  stage0c_max_tre_um: 1.0
+  stage0c_note: Requires --stage0c-yaml generated by MultimodalBenchmark registration/cross_beamline_audit.py with
+    certified octant drift <= 1.0 um (unless --allow-uncertified-t2 is explicitly set for exploratory diagnostics).

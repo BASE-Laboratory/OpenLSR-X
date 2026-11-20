@@ -71,13 +71,14 @@ OpenLSR-X includes four neural model families for controlled ablation:
    python scripts/benchmarks/public_rock_xct.py --output-dir results/public_rock
    python scripts/benchmarks/public_rock_xct.py --dualscan --output-dir results/public_rock_dualscan
    ```
-3. **Diamond Light Source I13-2 Multi-Resolution `Zn-13X` Synchrotron & Transport Study** ($2\times$ & $8\times$):
+3. **Diamond Light Source I13-2 Cleaned `Task T1` 5-Rung `Zn-13X` Synchrotron & Transport Study** (`1.6x`, `2x`, `2.5x`, `5x`, `8x`, plus optional Stage 0C-gated `t2_diad_3x`):
    ```bash
-   python scripts/benchmarks/zn13x_synchrotron_study.py --output-dir results/zn13x_study
+   python scripts/benchmarks/zn13x_synchrotron_study.py --pairs 1.6x 2x 2.5x 5x 8x --output-dir results/zn13x_study
    ```
-4. **Isambard-AI (`GH200`) 12-Job Multi-Seed SLURM Array & Campaign Aggregator:**
+4. **University of Greenwich `A100` & STFC `SCARF` Multi-Seed Campaigns & Aggregator:**
    ```bash
-   sbatch scripts/hpc/isambard_ai_array.slurm
+   sbatch scripts/hpc/greenwich_a100_campaign.slurm
+   sbatch scripts/hpc/scarf_campaign.slurm
    python scripts/benchmarks/aggregate_campaign.py --inputs results/campaign --output-dir results/campaign_summary
    ```
    Generates provenance-annotated multi-seed `mean ± std` `booktabs` LaTeX tables (`campaign_table.tex`), Markdown summaries (`campaign_summary.md`), and PSNR-vs-transport Pareto plots (`campaign_tradeoffs.png`).
