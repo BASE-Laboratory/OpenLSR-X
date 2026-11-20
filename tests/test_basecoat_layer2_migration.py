@@ -33,6 +33,7 @@ def test_export_volume_ome_zarr_and_load_volume_any_roundtrip(tmp_path: Path) ->
     """Verify OME-Zarr v0.4 export with mode-downsampled phase labels and out-of-core loading."""
     rng = np.random.default_rng(7)
     vol = rng.uniform(0.0, 1.0, size=(16, 20, 24)).astype(np.float32)
+    sig_ortho = rng.uniform(0.0, 0.08, size=(16, 20, 24)).astype(np.float32)
 
     store = export_volume_ome_zarr(
         vol,
@@ -41,6 +42,7 @@ def test_export_volume_ome_zarr_and_load_volume_any_roundtrip(tmp_path: Path) ->
         include_pore_labels=True,
         threshold_method="fixed",
         fixed_threshold=0.45,
+        sigma_ortho=sig_ortho,
         multiscale_levels=2,
     )
     assert store.is_dir()
@@ -49,13 +51,16 @@ def test_export_volume_ome_zarr_and_load_volume_any_roundtrip(tmp_path: Path) ->
     assert np.allclose(vset.image.data, vol)
     assert vset.image.spacing_in("um") == pytest.approx((0.8125, 0.8125, 0.8125))
     assert "phase" in vset.labels
+    assert "sigma_ortho" in vset.uncertainties
+    assert np.allclose(vset.uncertainties["sigma_ortho"].data, sig_ortho)
     expected_phase = np.where(vol < 0.45, np.uint8(1), np.uint8(0))
     assert np.array_equal(vset.labels["phase"].data, expected_phase)
 
-    # Coarse pyramid level preserves discrete label set {0, 1} via mode pooling
+    # Coarse pyramid level preserves discrete label set {0, 1} via mode pooling & mean-pools sigma_ortho
     vset_l1 = read_ome_zarr(store, level=1, as_set=True)
     assert vset_l1.image.shape == (8, 10, 12)
     assert set(np.unique(vset_l1.labels["phase"].data)).issubset({0, 1})
+    assert vset_l1.uncertainties["sigma_ortho"].shape == (8, 10, 12)
 
     # Out-of-core ROI + max_slices loading through OpenLSR-X's load_volume_any
     full_loaded = load_volume_any(store)

@@ -13,7 +13,7 @@ import numpy as np
 import pytorch_lightning as pl
 import tifffile
 import torch
-from basecoat import Volume, write_ome_zarr
+from basecoat import Volume, read_ome_zarr, write_ome_zarr
 from pytorch_lightning.cli import LightningCLI
 
 from .data import (
@@ -32,7 +32,7 @@ from .data import (
 )
 from .inference import super_resolve_volume_orthogonal
 from .inference.orthogonal import AxisName, FusionMode
-from .io import export_for_openimpala
+from .io import export_for_openimpala, export_volume_ome_zarr
 from .metrics import (
     evaluate_image_metrics,
     evaluate_petrophysical_metrics,
@@ -500,6 +500,12 @@ def _run_predict_volume(argv: Sequence[str]) -> int:
     parser.add_argument("--circular-fov-mask", action="store_true")
     parser.add_argument("--h5-dataset-key", default="4-TomopyRecon-tomo/data")
     parser.add_argument(
+        "--voxel-size-um",
+        type=float,
+        default=None,
+        help="Output HR isotropic voxel size in micrometres (auto-derived from calibrated .ome.zarr LR input when omitted).",
+    )
+    parser.add_argument(
         "--device",
         default=None,
         help="Torch device override (e.g., 'cpu' or 'cuda:0'; auto-detected by default).",
@@ -536,6 +542,18 @@ def _run_predict_volume(argv: Sequence[str]) -> int:
     model_obj.eval().to(dev)
 
     raw_lr = load_volume_any(ns.input, h5_dataset_key=ns.h5_dataset_key)
+    in_path_obj = Path(ns.input)
+    out_voxel_um: float | tuple[float, ...] | None = ns.voxel_size_um
+    if (
+        out_voxel_um is None
+        and in_path_obj.is_dir()
+        and in_path_obj.name.lower().endswith((".zarr", ".ome.zarr"))
+    ):
+        lr_bc = read_ome_zarr(in_path_obj, level=0)
+        if lr_bc.is_calibrated:
+            sf = float(model_obj.super_res_factor)
+            out_voxel_um = tuple(s / sf for s in lr_bc.spacing_in("um"))
+
     saved_rad = (
         None if ns.recompute_input_norm else getattr(model_obj, "_saved_radiometric_state", None)
     )
@@ -567,10 +585,17 @@ def _run_predict_volume(argv: Sequence[str]) -> int:
             mask=fov,
         )
 
-    def _save_volume_output(arr: np.ndarray, dest_path: Path) -> None:
+    out_is_zarr = out_path.name.lower().endswith((".zarr", ".ome.zarr"))
+
+    def _save_aux_output(arr: np.ndarray, dest_path: Path) -> None:
         dest_path.parent.mkdir(parents=True, exist_ok=True)
         if dest_path.name.lower().endswith((".zarr", ".ome.zarr")):
-            write_ome_zarr(Volume.uncalibrated(arr), dest_path, overwrite=True)
+            vol_u = (
+                Volume.from_array(arr, voxel_size_um=out_voxel_um)
+                if out_voxel_um is not None
+                else Volume.uncalibrated(arr)
+            )
+            write_ome_zarr(vol_u, dest_path, overwrite=True)
         else:
             tifffile.imwrite(dest_path, arr, bigtiff=True, photometric="minisblack")
 
@@ -582,11 +607,21 @@ def _run_predict_volume(argv: Sequence[str]) -> int:
             device=dev,
         )
         fused = np.ascontiguousarray(pred_3d, dtype=np.float32)
-        _save_volume_output(fused, out_path)
+        if out_is_zarr:
+            export_volume_ome_zarr(
+                fused,
+                out_path,
+                voxel_size_um=out_voxel_um,
+                include_pore_labels=True,
+                overwrite=True,
+            )
+        else:
+            _save_aux_output(fused, out_path)
         if unc_path is not None:
-            _save_volume_output(np.zeros_like(fused, dtype=np.float32), unc_path)
+            _save_aux_output(np.zeros_like(fused, dtype=np.float32), unc_path)
     else:
         axes = [cast(AxisName, ax) for ax in ns.axes]
+        want_unc = unc_path is not None or out_is_zarr
         ortho = super_resolve_volume_orthogonal(
             generator=model_obj.gen,
             low_volume=lr_norm,
@@ -596,14 +631,27 @@ def _run_predict_volume(argv: Sequence[str]) -> int:
             batch_size=ns.batch_size,
             device=dev,
             context_slices=model_obj.context_slices,
-            return_uncertainty=(unc_path is not None),
+            return_uncertainty=want_unc,
         )
         fused = np.ascontiguousarray(ortho["fused"], dtype=np.float32)
-        _save_volume_output(fused, out_path)
-        if unc_path is not None and "uncertainty_std" in ortho:
-            _save_volume_output(
-                np.ascontiguousarray(ortho["uncertainty_std"], dtype=np.float32), unc_path
+        sig_ortho = (
+            np.ascontiguousarray(ortho["uncertainty_std"], dtype=np.float32)
+            if "uncertainty_std" in ortho
+            else None
+        )
+        if out_is_zarr:
+            export_volume_ome_zarr(
+                fused,
+                out_path,
+                voxel_size_um=out_voxel_um,
+                include_pore_labels=True,
+                sigma_ortho=sig_ortho,
+                overwrite=True,
             )
+        else:
+            _save_aux_output(fused, out_path)
+        if unc_path is not None and sig_ortho is not None:
+            _save_aux_output(sig_ortho, unc_path)
     print(f"[predict-volume] fused shape={fused.shape} saved to {out_path}")
     return 0
 

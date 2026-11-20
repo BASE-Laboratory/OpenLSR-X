@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 import warnings
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -21,20 +22,24 @@ def export_volume_ome_zarr(
     volume: np.ndarray,
     store_path: str | Path,
     *,
-    voxel_size_um: float | tuple[float, float, float] | None = None,
+    voxel_size_um: float | Sequence[float] | None = None,
+    origin_um: Sequence[float] | None = None,
+    space: str | None = None,
     include_pore_labels: bool = True,
     threshold_method: ThresholdMethod = "otsu",
     fixed_threshold: float | None = None,
     pore_is_low: bool = True,
     pore_label: int = 1,
     solid_label: int = 0,
+    sigma_ortho: np.ndarray | None = None,
+    extra_uncertainties: Mapping[str, np.ndarray] | None = None,
     multiscale_levels: int = 2,
     overwrite: bool = True,
 ) -> Path:
-    """Export a 3D XCT volume (and optional mode-downsampled pore labels) as an OME-Zarr v0.4 store.
+    """Export a 3D XCT volume (with optional mode-downsampled pore labels and ``sigma_ortho`` uncertainty) as OME-Zarr v0.4.
 
     Follows the BASE Lab ``ECOSYSTEM.md`` data contract via ``basecoat`` so Layer 3 solvers
-    and Layer 4 evaluators consume calibrated volumes and labels without tool-specific glue.
+    and Layer 4 evaluators consume calibrated volumes, labels, and uncertainties without tool-specific glue.
     """
     arr = np.asarray(volume, dtype=np.float32)
     if arr.ndim != 3:
@@ -42,26 +47,61 @@ def export_volume_ome_zarr(
             f"export_volume_ome_zarr expects a 3D volume (D, H, W), got shape {arr.shape}."
         )
 
-    img_vol = Volume.from_array(arr, voxel_size_um=voxel_size_um)
-    if not include_pore_labels:
+    img_vol = Volume.from_array(
+        arr,
+        voxel_size_um=voxel_size_um,
+        origin_um=origin_um,
+        space=space,
+    )
+
+    labels_dict: dict[str, Volume] = {}
+    if include_pore_labels:
+        pore_mask, thresh_val = segment_pore_space(
+            arr,
+            method=threshold_method,
+            fixed_value=fixed_threshold,
+            pore_is_low=pore_is_low,
+        )
+        labeled = np.where(pore_mask, np.uint8(pore_label), np.uint8(solid_label))
+        labels_dict["phase"] = Volume(
+            labeled,
+            axes=img_vol.axes,
+            space=img_vol.space,
+            label_names={int(solid_label): "solid", int(pore_label): "pore"},
+            provenance={
+                "threshold_method": threshold_method,
+                "threshold_value": float(thresh_val),
+            },
+        )
+
+    unc_dict: dict[str, Volume] = {}
+    if sigma_ortho is not None:
+        sig_arr = np.asarray(sigma_ortho, dtype=np.float32)
+        if sig_arr.shape != arr.shape:
+            raise ValueError(
+                f"sigma_ortho shape {sig_arr.shape} must match volume shape {arr.shape}."
+            )
+        unc_dict["sigma_ortho"] = Volume(
+            sig_arr,
+            axes=img_vol.axes,
+            space=img_vol.space,
+            provenance={"uncertainty_kind": "orthogonal_inter_view_std"},
+        )
+    if extra_uncertainties is not None:
+        for ukey, uarr in extra_uncertainties.items():
+            u_f32 = np.asarray(uarr, dtype=np.float32)
+            if u_f32.shape != arr.shape:
+                raise ValueError(
+                    f"Uncertainty '{ukey}' shape {u_f32.shape} must match volume shape {arr.shape}."
+                )
+            unc_dict[ukey] = Volume(u_f32, axes=img_vol.axes, space=img_vol.space)
+
+    if not labels_dict and not unc_dict:
         return write_ome_zarr(
             img_vol, store_path, multiscale_levels=multiscale_levels, overwrite=overwrite
         )
 
-    pore_mask, thresh_val = segment_pore_space(
-        arr,
-        method=threshold_method,
-        fixed_value=fixed_threshold,
-        pore_is_low=pore_is_low,
-    )
-    labeled = np.where(pore_mask, np.uint8(pore_label), np.uint8(solid_label))
-    lbl_vol = Volume(
-        labeled,
-        axes=img_vol.axes,
-        label_names={int(solid_label): "solid", int(pore_label): "pore"},
-        provenance={"threshold_method": threshold_method, "threshold_value": float(thresh_val)},
-    )
-    vset = VolumeSet(img_vol, labels={"phase": lbl_vol})
+    vset = VolumeSet(img_vol, labels=labels_dict, uncertainties=unc_dict)
     return write_ome_zarr(
         vset, store_path, multiscale_levels=multiscale_levels, overwrite=overwrite
     )
