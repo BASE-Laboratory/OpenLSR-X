@@ -120,6 +120,8 @@
 
 ::: openlsrx.metrics.transport.compute_drainage_rmse
 
+::: openlsrx.io.openimpala.export_volume_ome_zarr
+
 ::: openlsrx.io.openimpala.export_for_openimpala
 
 ::: openlsrx.baselines.interpolation.upsample_2d

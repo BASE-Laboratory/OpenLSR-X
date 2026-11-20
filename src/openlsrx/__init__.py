@@ -28,7 +28,7 @@ from .inference import (
     super_resolve_volume_orthogonal,
     super_resolve_volume_single_axis,
 )
-from .io import export_for_openimpala
+from .io import export_for_openimpala, export_volume_ome_zarr
 from .losses import (
     AttenuationConservationLoss,
     FocalFrequencyLoss,
@@ -121,6 +121,7 @@ __all__ = [
     "evaluate_transport_metrics",
     "evaluate_triphase_zn13x_metrics",
     "export_for_openimpala",
+    "export_volume_ome_zarr",
     "extract_aligned_slab_from_h5",
     "fuse_orthogonal_volumes",
     "generate_porespy_volume",

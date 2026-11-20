@@ -13,6 +13,7 @@ import numpy as np
 import pytorch_lightning as pl
 import tifffile
 import torch
+from basecoat import Volume, write_ome_zarr
 from pytorch_lightning.cli import LightningCLI
 
 from .data import (
@@ -566,7 +567,13 @@ def _run_predict_volume(argv: Sequence[str]) -> int:
             mask=fov,
         )
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    def _save_volume_output(arr: np.ndarray, dest_path: Path) -> None:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        if dest_path.name.lower().endswith((".zarr", ".ome.zarr")):
+            write_ome_zarr(Volume.uncalibrated(arr), dest_path, overwrite=True)
+        else:
+            tifffile.imwrite(dest_path, arr, bigtiff=True, photometric="minisblack")
+
     if isinstance(model_obj, SR3DResNet):
         pred_3d = super_resolve_volume_3d(
             generator_3d=model_obj.gen,
@@ -575,15 +582,9 @@ def _run_predict_volume(argv: Sequence[str]) -> int:
             device=dev,
         )
         fused = np.ascontiguousarray(pred_3d, dtype=np.float32)
-        tifffile.imwrite(out_path, fused, bigtiff=True, photometric="minisblack")
+        _save_volume_output(fused, out_path)
         if unc_path is not None:
-            unc_path.parent.mkdir(parents=True, exist_ok=True)
-            tifffile.imwrite(
-                unc_path,
-                np.zeros_like(fused, dtype=np.float32),
-                bigtiff=True,
-                photometric="minisblack",
-            )
+            _save_volume_output(np.zeros_like(fused, dtype=np.float32), unc_path)
     else:
         axes = [cast(AxisName, ax) for ax in ns.axes]
         ortho = super_resolve_volume_orthogonal(
@@ -598,14 +599,10 @@ def _run_predict_volume(argv: Sequence[str]) -> int:
             return_uncertainty=(unc_path is not None),
         )
         fused = np.ascontiguousarray(ortho["fused"], dtype=np.float32)
-        tifffile.imwrite(out_path, fused, bigtiff=True, photometric="minisblack")
+        _save_volume_output(fused, out_path)
         if unc_path is not None and "uncertainty_std" in ortho:
-            unc_path.parent.mkdir(parents=True, exist_ok=True)
-            tifffile.imwrite(
-                unc_path,
-                np.ascontiguousarray(ortho["uncertainty_std"], dtype=np.float32),
-                bigtiff=True,
-                photometric="minisblack",
+            _save_volume_output(
+                np.ascontiguousarray(ortho["uncertainty_std"], dtype=np.float32), unc_path
             )
     print(f"[predict-volume] fused shape={fused.shape} saved to {out_path}")
     return 0
