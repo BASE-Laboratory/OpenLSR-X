@@ -1074,6 +1074,11 @@ def test_mmb_v2_artifact_cleanup_5rung_t1_rational_sr_splits_and_stage0c_t2_gate
     assert float(np.mean((deringed_vol - clean_vol) ** 2)) < 0.85 * float(
         np.mean((ringed_vol - clean_vol) ** 2)
     )
+    tiny_lr = clean_vol[:4, :32, :32].copy()
+    tiny_out, rep_tiny = remove_rings_polar_conservative(tiny_lr)
+    assert np.array_equal(tiny_out, tiny_lr) and rep_tiny.ring_rms_removed == 0.0
+    clean_out, rep_clean = remove_rings_polar_conservative(clean_vol, center_yx=(cy, cx))
+    assert rep_clean.ring_anova_r2_after <= rep_clean.ring_anova_r2_before + 1e-6
 
     yn = (yy - cy) / (0.5 * ny)
     xn = (xx - cx) / (0.5 * nx)

@@ -380,6 +380,26 @@ def remove_rings_polar_conservative(
     is_2d = arr.ndim == 2
     vol = arr[None, :, :] if is_2d else arr
 
+    if min(vol.shape[1], vol.shape[2]) < 64 or float(np.ptp(vol)) < 1e-12:
+        rc_noop = (
+            (round(float(center_yx[0]), 2), round(float(center_yx[1]), 2))
+            if center_yx is not None
+            else (round(0.5 * (vol.shape[1] - 1), 2), round(0.5 * (vol.shape[2] - 1), 2))
+        )
+        rep_noop = ArtifactCleanupReport(
+            ring_center_yx=rc_noop,
+            ring_rms_removed=0.0,
+            ring_anova_r2_before=0.0,
+            ring_anova_r2_after=0.0,
+            ring_variance_reduction_pct=0.0,
+            edge_sharpness_retention_ratio=1.0,
+            background_std_before=0.0,
+            background_std_after=0.0,
+            delegated_to_multimodal_benchmark=False,
+        )
+        out_noop = vol.copy()
+        return (out_noop[0] if is_2d else out_noop), rep_noop
+
     if center_yx is None:
         cy, cx, _ = detect_ring_center_yx(
             vol[: min(12, vol.shape[0])],
@@ -387,6 +407,25 @@ def remove_rings_polar_conservative(
             radial_sigma_px=radial_sigma_px,
         )
         center_yx = (cy, cx)
+
+    mid_b = np.mean(vol[: min(10, vol.shape[0])], axis=0)
+    r2_b = compute_ring_anova_r2(
+        mid_b, center_yx, exclude_mask_yx=exclude_mask_yx, radial_sigma_px=radial_sigma_px
+    )
+    if r2_b < 1e-4:
+        rep_clean = ArtifactCleanupReport(
+            ring_center_yx=(round(float(center_yx[0]), 2), round(float(center_yx[1]), 2)),
+            ring_rms_removed=0.0,
+            ring_anova_r2_before=round(r2_b, 6),
+            ring_anova_r2_after=round(r2_b, 6),
+            ring_variance_reduction_pct=0.0,
+            edge_sharpness_retention_ratio=1.0,
+            background_std_before=0.0,
+            background_std_after=0.0,
+            delegated_to_multimodal_benchmark=False,
+        )
+        out_clean = vol.copy()
+        return (out_clean[0] if is_2d else out_clean), rep_clean
 
     cleaned = np.empty_like(vol, dtype=np.float32)
     ring_sq_sum = 0.0
@@ -421,15 +460,27 @@ def remove_rings_polar_conservative(
             bg_stds_before.append(float(np.std(hp_b[low_g])))
             bg_stds_after.append(float(np.std(hp_a[low_g])))
 
-    mid_b = np.mean(vol[: min(10, vol.shape[0])], axis=0)
     mid_a = np.mean(cleaned[: min(10, cleaned.shape[0])], axis=0)
-    r2_b = compute_ring_anova_r2(
-        mid_b, center_yx, exclude_mask_yx=exclude_mask_yx, radial_sigma_px=radial_sigma_px
-    )
     r2_a = compute_ring_anova_r2(
         mid_a, center_yx, exclude_mask_yx=exclude_mask_yx, radial_sigma_px=radial_sigma_px
     )
-    red_pct = (1.0 - r2_a / max(r2_b, 1e-8)) * 100.0 if r2_b > 1e-6 else 0.0
+    if r2_a >= r2_b:
+        bg_b = round(float(np.mean(bg_stds_before)) if bg_stds_before else 0.0, 4)
+        rep_keep = ArtifactCleanupReport(
+            ring_center_yx=(round(float(center_yx[0]), 2), round(float(center_yx[1]), 2)),
+            ring_rms_removed=0.0,
+            ring_anova_r2_before=round(r2_b, 6),
+            ring_anova_r2_after=round(r2_b, 6),
+            ring_variance_reduction_pct=0.0,
+            edge_sharpness_retention_ratio=1.0,
+            background_std_before=bg_b,
+            background_std_after=bg_b,
+            delegated_to_multimodal_benchmark=False,
+        )
+        out_keep = vol.copy()
+        return (out_keep[0] if is_2d else out_keep), rep_keep
+
+    red_pct = (1.0 - r2_a / max(r2_b, 1e-8)) * 100.0
 
     report = ArtifactCleanupReport(
         ring_center_yx=(round(float(center_yx[0]), 2), round(float(center_yx[1]), 2)),
