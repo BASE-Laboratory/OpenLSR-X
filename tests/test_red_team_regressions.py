@@ -1042,7 +1042,9 @@ def test_mmb_v2_artifact_cleanup_5rung_t1_rational_sr_splits_and_stage0c_t2_gate
 
     from openlsrx.data import (
         ZN13X_T1_PAIRS,
+        clean_synchrotron_xct_slab,
         compute_ruby_beam_hardening_clean_z_mask,
+        detect_ring_center_yx,
         detrend_local_tomo_cupping_3d,
         rational_scale_pq,
         remove_rings_polar_conservative,
@@ -1062,22 +1064,36 @@ def test_mmb_v2_artifact_cleanup_5rung_t1_rational_sr_splits_and_stage0c_t2_gate
     yy, xx = np.indices((ny, nx), dtype=np.float32)
     cy, cx = 64.0, 64.0
     rr = np.hypot(yy - cy, xx - cx)
-    det_lut = rng.normal(0.0, 0.055, size=120).astype(np.float32)
+    det_lut = gaussian_filter(rng.normal(0.0, 0.085, size=120), sigma=0.7).astype(np.float32)
     det_lut[:8] = 0.0
     rings = det_lut[np.clip(np.rint(rr).astype(int), 0, 119)]
-    ringed_vol = clean_vol + rings[None, :, :]
+    ringed_48 = hr_zn[:48] + rings[None, :, :]
+    cy_det, cx_det, r2_det = detect_ring_center_yx(ringed_48)
+    assert np.hypot(cy_det - cy, cx_det - cx) <= 2.5 and r2_det > 0.05
 
-    deringed_vol, rep = remove_rings_polar_conservative(ringed_vol, center_yx=(cy, cx))
+    ringed_vol = clean_vol + rings[None, :, :]
+    deringed_vol, rep = remove_rings_polar_conservative(ringed_vol, center_yx=(cy_det, cx_det))
     assert deringed_vol.shape == ringed_vol.shape
     assert rep.ring_variance_reduction_pct > 45.0
     assert 0.94 <= rep.edge_sharpness_retention_ratio <= 1.04
     assert float(np.mean((deringed_vol - clean_vol) ** 2)) < 0.85 * float(
         np.mean((ringed_vol - clean_vol) ** 2)
     )
+    _, rep_auto_2d = remove_rings_polar_conservative(ringed_48.mean(axis=0), center_yx=None)
+    assert (
+        rep_auto_2d.ring_center_yx == (64.0, 64.0)
+        and rep_auto_2d.ring_variance_reduction_pct > 20.0
+    )
+    rr_off = np.hypot(yy - (-18.0), xx - 64.0)
+    arc_lut = rng.normal(0.0, 0.055, size=180).astype(np.float32)
+    arc_vol = clean_vol[:4] + arc_lut[np.clip(np.rint(rr_off).astype(int), 0, 179)][None, :, :]
+    arc_out, rep_arc = remove_rings_polar_conservative(arc_vol, center_yx=(-18.0, 64.0))
+    assert arc_out.shape == arc_vol.shape and rep_arc.ring_variance_reduction_pct > 20.0
+
     tiny_lr = clean_vol[:4, :32, :32].copy()
     tiny_out, rep_tiny = remove_rings_polar_conservative(tiny_lr)
     assert np.array_equal(tiny_out, tiny_lr) and rep_tiny.ring_rms_removed == 0.0
-    clean_out, rep_clean = remove_rings_polar_conservative(clean_vol, center_yx=(cy, cx))
+    _, rep_clean = remove_rings_polar_conservative(clean_vol[:4], center_yx=(cy, cx))
     assert rep_clean.ring_anova_r2_after <= rep_clean.ring_anova_r2_before + 1e-6
 
     yn = (yy - cy) / (0.5 * ny)
@@ -1086,6 +1102,13 @@ def test_mmb_v2_artifact_cleanup_5rung_t1_rational_sr_splits_and_stage0c_t2_gate
     cupped = clean_vol + cupping[None, :, :]
     detrended = detrend_local_tomo_cupping_3d(cupped)
     assert float(np.std(detrended - clean_vol)) < 0.35 * float(np.std(cupped - clean_vol))
+    slab_cl, slab_meta = clean_synchrotron_xct_slab(
+        ringed_vol[:4] + cupping[None, :, :],
+        dering=True,
+        detrend_cupping=True,
+        ring_center_yx=(cy, cx),
+    )
+    assert slab_cl.shape == (4, 128, 128) and slab_meta["cupping_detrend_applied"] is True
 
     # 169067 ruby sphere z-mask excludes z < 300 in 500-slice Zenodo 14245751 preview
     z_mask_169067 = compute_ruby_beam_hardening_clean_z_mask(

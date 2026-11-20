@@ -146,9 +146,10 @@ def detect_ring_center_yx(
     gy = gaussian_filter(zmean, sigma=1.5, order=[1, 0])
     gx = gaussian_filter(zmean, sigma=1.5, order=[0, 1])
     gmag = np.hypot(gy, gx)
+    dil_iters = min(max(2, int(round(1.5 * radial_sigma_px))), max(2, min(ny, nx) // 32))
     strong_edge = binary_dilation(
         gmag > np.percentile(gmag, 85.0),
-        iterations=max(4, int(round(2.2 * radial_sigma_px))),
+        iterations=dil_iters,
     )
     excl = (
         strong_edge
@@ -156,6 +157,10 @@ def detect_ring_center_yx(
         else (strong_edge | np.asarray(exclude_mask_yx, dtype=bool))
     )
     valid_px = ~excl
+    if int(np.count_nonzero(valid_px)) < int(0.35 * ny * nx):
+        valid_px = gmag <= np.percentile(gmag, 70.0)
+        if exclude_mask_yx is not None:
+            valid_px = valid_px & (~np.asarray(exclude_mask_yx, dtype=bool))
     if int(np.count_nonzero(valid_px)) < 256:
         valid_px = np.ones(zmean.shape, dtype=bool)
 
@@ -164,12 +169,13 @@ def detect_ring_center_yx(
     hp[~valid_px] = 0.0
 
     yy, xx = np.indices((ny, nx), dtype=np.float32)
-    grid_step_coarse = max(4, min(32, min(ny, nx) // 16))
-    img_step_coarse = max(1, min(4, min(ny, nx) // 64))
+    grid_step_coarse = max(2, min(16, min(ny, nx) // 32))
+    img_step_coarse = max(1, min(4, min(ny, nx) // 128))
 
     def _score(cy: float, cx: float, step: int) -> float:
         m = valid_px[::step, ::step].ravel()
-        if int(np.count_nonzero(m)) < 128:
+        n_m = int(np.count_nonzero(m))
+        if n_m < 128:
             return -1.0
         ys = yy[::step, ::step].ravel()[m] - np.float32(cy)
         xs = xx[::step, ::step].ravel()[m] - np.float32(cx)
@@ -181,7 +187,7 @@ def detect_ring_center_yx(
         max_r = int(rr.max()) + 1
         cnt = np.bincount(rr, minlength=max_r).astype(np.float64)
         ok = cnt >= max(12, 24 // step)
-        if int(np.count_nonzero(ok)) < 12:
+        if int(np.count_nonzero(ok)) < 12 or float(np.sum(cnt[ok])) < 0.45 * n_m:
             return -1.0
         sums = np.bincount(rr, weights=vals, minlength=max_r)
         return float(np.sum((sums[ok] ** 2) / cnt[ok] - vvar) / denom)
@@ -193,11 +199,14 @@ def detect_ring_center_yx(
             if sc > best[0]:
                 best = (sc, float(cy_i), float(cx_i))
 
+    if best[0] <= 0.0:
+        return 0.5 * (ny - 1), 0.5 * (nx - 1), 0.0
+
     _, bcy, bcx = best
     bloc = best
     for sg, si, hw in [
-        (max(2.0, grid_step_coarse / 4.0), max(1, img_step_coarse // 2), float(grid_step_coarse)),
-        (1.0, 1, max(4.0, grid_step_coarse / 2.0)),
+        (max(1.0, grid_step_coarse / 2.0), max(1, img_step_coarse // 2), float(grid_step_coarse)),
+        (1.0, 1, max(3.0, grid_step_coarse / 2.0)),
         (0.5, 1, 2.0),
     ]:
         bloc = (-2.0, bcy, bcx)
@@ -208,6 +217,8 @@ def detect_ring_center_yx(
                     bloc = (sc, float(cy_f), float(cx_f))
         _, bcy, bcx = bloc
 
+    if bloc[0] <= 0.0:
+        return 0.5 * (ny - 1), 0.5 * (nx - 1), 0.0
     return float(bcy), float(bcx), max(0.0, float(bloc[0]))
 
 
@@ -380,52 +391,45 @@ def remove_rings_polar_conservative(
     is_2d = arr.ndim == 2
     vol = arr[None, :, :] if is_2d else arr
 
-    if min(vol.shape[1], vol.shape[2]) < 64 or float(np.ptp(vol)) < 1e-12:
-        rc_noop = (
-            (round(float(center_yx[0]), 2), round(float(center_yx[1]), 2))
-            if center_yx is not None
-            else (round(0.5 * (vol.shape[1] - 1), 2), round(0.5 * (vol.shape[2] - 1), 2))
-        )
-        rep_noop = ArtifactCleanupReport(
-            ring_center_yx=rc_noop,
+    def _noop_result(
+        rc_yx: tuple[float, float], r2_val: float = 0.0, bg_val: float = 0.0
+    ) -> tuple[np.ndarray, ArtifactCleanupReport]:
+        out_cp = vol.copy()
+        return (out_cp[0] if is_2d else out_cp), ArtifactCleanupReport(
+            ring_center_yx=(round(float(rc_yx[0]), 2), round(float(rc_yx[1]), 2)),
             ring_rms_removed=0.0,
-            ring_anova_r2_before=0.0,
-            ring_anova_r2_after=0.0,
+            ring_anova_r2_before=round(float(r2_val), 6),
+            ring_anova_r2_after=round(float(r2_val), 6),
             ring_variance_reduction_pct=0.0,
             edge_sharpness_retention_ratio=1.0,
-            background_std_before=0.0,
-            background_std_after=0.0,
+            background_std_before=round(float(bg_val), 4),
+            background_std_after=round(float(bg_val), 4),
             delegated_to_multimodal_benchmark=False,
         )
-        out_noop = vol.copy()
-        return (out_noop[0] if is_2d else out_noop), rep_noop
 
+    if min(vol.shape[1], vol.shape[2]) < 64 or float(np.ptp(vol)) < 1e-12:
+        rc_default = (
+            center_yx
+            if center_yx is not None
+            else (0.5 * (vol.shape[1] - 1), 0.5 * (vol.shape[2] - 1))
+        )
+        return _noop_result(rc_default)
+
+    z_stride = max(1, vol.shape[0] // 32)
     if center_yx is None:
         cy, cx, _ = detect_ring_center_yx(
-            vol[: min(12, vol.shape[0])],
+            vol[::z_stride],
             exclude_mask_yx=exclude_mask_yx,
             radial_sigma_px=radial_sigma_px,
         )
         center_yx = (cy, cx)
 
-    mid_b = np.mean(vol[: min(10, vol.shape[0])], axis=0)
+    mid_b = np.mean(vol[::z_stride], axis=0)
     r2_b = compute_ring_anova_r2(
         mid_b, center_yx, exclude_mask_yx=exclude_mask_yx, radial_sigma_px=radial_sigma_px
     )
     if r2_b < 1e-4:
-        rep_clean = ArtifactCleanupReport(
-            ring_center_yx=(round(float(center_yx[0]), 2), round(float(center_yx[1]), 2)),
-            ring_rms_removed=0.0,
-            ring_anova_r2_before=round(r2_b, 6),
-            ring_anova_r2_after=round(r2_b, 6),
-            ring_variance_reduction_pct=0.0,
-            edge_sharpness_retention_ratio=1.0,
-            background_std_before=0.0,
-            background_std_after=0.0,
-            delegated_to_multimodal_benchmark=False,
-        )
-        out_clean = vol.copy()
-        return (out_clean[0] if is_2d else out_clean), rep_clean
+        return _noop_result(center_yx, r2_val=r2_b)
 
     cleaned = np.empty_like(vol, dtype=np.float32)
     ring_sq_sum = 0.0
@@ -460,25 +464,16 @@ def remove_rings_polar_conservative(
             bg_stds_before.append(float(np.std(hp_b[low_g])))
             bg_stds_after.append(float(np.std(hp_a[low_g])))
 
-    mid_a = np.mean(cleaned[: min(10, cleaned.shape[0])], axis=0)
+    mid_a = np.mean(cleaned[::z_stride], axis=0)
     r2_a = compute_ring_anova_r2(
         mid_a, center_yx, exclude_mask_yx=exclude_mask_yx, radial_sigma_px=radial_sigma_px
     )
     if r2_a >= r2_b:
-        bg_b = round(float(np.mean(bg_stds_before)) if bg_stds_before else 0.0, 4)
-        rep_keep = ArtifactCleanupReport(
-            ring_center_yx=(round(float(center_yx[0]), 2), round(float(center_yx[1]), 2)),
-            ring_rms_removed=0.0,
-            ring_anova_r2_before=round(r2_b, 6),
-            ring_anova_r2_after=round(r2_b, 6),
-            ring_variance_reduction_pct=0.0,
-            edge_sharpness_retention_ratio=1.0,
-            background_std_before=bg_b,
-            background_std_after=bg_b,
-            delegated_to_multimodal_benchmark=False,
+        return _noop_result(
+            center_yx,
+            r2_val=r2_b,
+            bg_val=float(np.mean(bg_stds_before)) if bg_stds_before else 0.0,
         )
-        out_keep = vol.copy()
-        return (out_keep[0] if is_2d else out_keep), rep_keep
 
     red_pct = (1.0 - r2_a / max(r2_b, 1e-8)) * 100.0
 
