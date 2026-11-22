@@ -182,3 +182,129 @@ def test_similarity_spec_basecoat_roundtrip_and_chaining() -> None:
     bc_mapped_xyz = bc.to_affine().transform_points(pts_xyz[:, ::-1])[:, ::-1]
     assert np.allclose(comp.transform_points_xyz_um(pts_xyz), bc_mapped_xyz, atol=1e-12)
     assert meta["registration_schema"] == "multimodal_benchmark_7dof_v2"
+
+
+@pytest.mark.parametrize(
+    ("scale", "lr_shape", "expected_hr_shape"),
+    [
+        (1.6, (10, 10, 10), (16, 16, 16)),
+        (2.5, (8, 8, 8), (20, 20, 20)),
+    ],
+)
+def test_sr3dresnet_and_transforms_rational_scales(
+    scale: float,
+    lr_shape: tuple[int, int, int],
+    expected_hr_shape: tuple[int, int, int],
+) -> None:
+    """Verify SR3DResNet, sliding-window 3D inference, and spatial split snapping on rational scales."""
+    from openlsrx.data.transforms import (
+        PairedSliceDataset,
+        rational_scale_pq,
+        split_volume_spatially,
+    )
+    from openlsrx.models import SR3DResNet, build_3d_subcube_dataloaders, super_resolve_volume_3d
+
+    p, q = rational_scale_pq(scale)
+    assert np.isclose(p / q, scale)
+
+    rng = np.random.default_rng(7)
+    lr = rng.uniform(0.0, 1.0, size=lr_shape).astype(np.float32)
+    hr = rng.uniform(0.0, 1.0, size=expected_hr_shape).astype(np.float32)
+
+    train_dl, val_dl = build_3d_subcube_dataloaders(
+        lr,
+        hr,
+        lr,
+        hr,
+        scale_factor=scale,
+        patch_size_lr=min(lr_shape),
+        train_samples=2,
+        val_samples=1,
+        batch_size=1,
+    )
+    lr_b, hr_b = next(iter(train_dl))
+    model = SR3DResNet(super_res_factor=scale, out_channels=8, num_blocks=1)
+    pred_b = model(lr_b)
+    assert pred_b.shape == hr_b.shape
+    assert len(val_dl) == 1
+
+    sr_vol = super_resolve_volume_3d(
+        model.gen,
+        lr,
+        scale_factor=scale,
+        patch_size_lr=max(q, min(lr_shape) - q),
+        overlap_lr=q,
+        device="cpu",
+    )
+    assert sr_vol.shape == expected_hr_shape
+
+    lr_big = rng.uniform(0.0, 1.0, size=(q * 6, q * 4, q * 4)).astype(np.float32)
+    hr_big = rng.uniform(0.0, 1.0, size=(p * 6, p * 4, p * 4)).astype(np.float32)
+    splits = split_volume_spatially(
+        hr_big,
+        scale_factor=scale,
+        lr_volume=lr_big,
+        guard_slices_lr=1,
+    )
+    train_lr, _ = splits["train"]
+    assert train_lr is not None
+    assert train_lr.shape[0] % q == 0
+    ds_slice = PairedSliceDataset(
+        rng.uniform(0.0, 1.0, size=(2, q * 4, q * 4)).astype(np.float32),
+        rng.uniform(0.0, 1.0, size=(2, p * 4, p * 4)).astype(np.float32),
+        scale_factor=scale,
+        patch_size_lr=q * 2 + 1,
+    )
+    sl_lr, sl_hr = ds_slice[0]
+    assert sl_lr.shape[-1] % q == 0
+    assert int(round(sl_lr.shape[-1] * scale)) == sl_hr.shape[-1]
+
+
+def test_fringe_guarded_pore_segmentation_and_metrics() -> None:
+    """Verify Paganin-like tie-homogeneity damping suppresses high-k Fresnel fringes cleanly."""
+    from openlsrx.metrics.petrophysics import evaluate_petrophysical_metrics, segment_pore_space
+    from openlsrx.metrics.transport import (
+        evaluate_transport_metrics,
+        precompute_reference_transport,
+    )
+
+    zz, yy, xx = np.meshgrid(
+        np.arange(16, dtype=np.float32),
+        np.arange(16, dtype=np.float32),
+        np.arange(16, dtype=np.float32),
+        indexing="ij",
+    )
+    clean = np.where((xx >= 5.0) & (xx <= 10.0), 0.32, 0.68).astype(np.float32)
+    checker = (((zz + yy + xx).astype(int) % 2) * 2 - 1).astype(np.float32) * 0.25
+    fringed = clean + checker
+
+    mask_unfiltered, _ = segment_pore_space(fringed, method="otsu", fringe_guard_alpha=0.0)
+    mask_guarded, thr = segment_pore_space(fringed, method="otsu", fringe_guard_alpha=0.6)
+    mask_true, _ = segment_pore_space(clean, method="otsu", fringe_guard_alpha=0.0)
+    assert not np.array_equal(mask_unfiltered, mask_true)
+    assert np.array_equal(mask_guarded, mask_true)
+    assert 0.35 < thr < 0.65
+
+    petro_unguarded = evaluate_petrophysical_metrics(fringed, clean, fringe_guard_alpha=0.0)
+    petro = evaluate_petrophysical_metrics(fringed, clean, fringe_guard_alpha=0.6)
+    assert petro["pore_dice"] > petro_unguarded["pore_dice"] + 0.20
+    assert petro["pore_dice_auto_otsu"] > 0.99
+
+    ref_t0 = precompute_reference_transport(clean, drainage_steps=4, fringe_guard_alpha=0.0)
+    trans_unguarded = evaluate_transport_metrics(
+        fringed,
+        clean,
+        drainage_steps=4,
+        precomputed_true=ref_t0,
+        fringe_guard_alpha=0.0,
+    )
+    ref_t = precompute_reference_transport(clean, drainage_steps=4, fringe_guard_alpha=0.6)
+    trans = evaluate_transport_metrics(
+        fringed,
+        clean,
+        drainage_steps=4,
+        precomputed_true=ref_t,
+        fringe_guard_alpha=0.6,
+    )
+    assert trans["d_eff_rel_error"] is not None and trans_unguarded["d_eff_rel_error"] is not None
+    assert float(trans["d_eff_rel_error"]) < float(trans_unguarded["d_eff_rel_error"])

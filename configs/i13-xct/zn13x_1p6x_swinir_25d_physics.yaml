@@ -1,0 +1,58 @@
+# Diamond Light Source I13-2 Physics-Consistent SwinIR-2.5D Configuration (2.600 -> 1.625 um, 1.6x)
+# Task T1 Rung 1 (169068 -> 169067) with conservative polar de-ringing, 500 um ruby sphere z-shadow
+# exclusion (z >= 300 in Zenodo 14245751 preview), and exact 8/5 rational crop snapping.
+seed_everything: 42
+
+trainer:
+  accelerator: auto
+  devices: 1
+  precision: 16-mixed
+  max_epochs: 300
+  check_val_every_n_epoch: 10
+  log_every_n_steps: 20
+
+model:
+  backbone: swinir
+  context_slices: 3
+  out_channels: 48
+  num_blocks: 4
+  swin_window_size: 8
+  swin_num_heads: 4
+  output_activation: clamp
+  pixel_loss_type: l1
+  learning_rate: 2.0e-4
+  adaptive_size: 8
+  accumulate_n_batches: 1
+  super_res_factor: 1.6
+  use_adversarial_loss: false
+  use_vgg_loss: false
+  conservation_loss_weight: 0.25
+  conservation_psf_sigma: 0.5
+  topology_loss_weight: 0.05
+  gradient_loss_weight: 0.10
+  ffl_loss_weight: 0.05
+  sample_id: Zn13X_1p6x_SwinIR_25D_Physics
+
+data:
+  class_path: openlsrx.data.PairedVolumeDataModule
+  init_args:
+    low_path: data/benchmarks/zn13x_1p6x_lr.tif
+    high_path: data/benchmarks/zn13x_1p6x_hr.tif
+    scale_factor: 1.6
+    context_slices: 3
+    norm_mode: percentile
+    cross_scan_calibration: quantile
+    calibration_psf_sigma: 0.5
+    train_frac: 0.70
+    val_frac: 0.15
+    guard_slices_lr: 1
+    train_axes: ["yz", "xz", "xy"]
+    test_axis: perpendicular
+    predict_axis: xy
+    patch_size_lr: 20
+    augment: true
+    batch_size: 4
+    eval_batch_size: 4
+    num_workers: 2
+    pin_memory: true
+    seed: 42

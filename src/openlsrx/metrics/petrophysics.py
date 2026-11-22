@@ -35,16 +35,38 @@ def compute_threshold(
     )
 
 
+def _apply_tie_homogeneity_filter(arr: np.ndarray, alpha_vox2: float) -> np.ndarray:
+    if alpha_vox2 <= 0.0:
+        return arr
+    freqs = [np.fft.fftfreq(s) * (2.0 * np.pi) for s in arr.shape[:-1]] + [
+        np.fft.rfftfreq(arr.shape[-1]) * (2.0 * np.pi)
+    ]
+    grids = np.meshgrid(*freqs, indexing="ij")
+    k2 = sum(g.astype(np.float32) ** 2 for g in grids)
+    filt = 1.0 / (1.0 + np.float32(alpha_vox2) * k2)
+    axes_all = tuple(range(arr.ndim))
+    return np.fft.irfftn(
+        np.fft.rfftn(arr, axes=axes_all) * filt, s=arr.shape, axes=axes_all
+    ).astype(np.float32)
+
+
 def segment_pore_space(
     volume: np.ndarray,
     method: ThresholdMethod = "otsu",
     fixed_value: float | None = None,
     pore_is_low: bool = True,
+    fringe_guard_alpha: float = 0.0,
 ) -> tuple[np.ndarray, float]:
-    """Segment a greyscale XCT volume into a boolean pore mask and return ``(mask, threshold)``."""
+    """Segment a greyscale XCT volume into a boolean pore mask and return ``(mask, threshold)``.
+
+    When ``fringe_guard_alpha > 0``, applies conservative Paganin-like tie-homogeneity damping
+    strictly inside pore binarization to suppress 1-2 px Ram-Lak Fresnel fringes without
+    altering continuous XCT intensities.
+    """
     arr = np.asarray(volume, dtype=np.float32)
-    thr = compute_threshold(arr, method=method, fixed_value=fixed_value)
-    mask = (arr < thr) if pore_is_low else (arr > thr)
+    work = _apply_tie_homogeneity_filter(arr, float(fringe_guard_alpha))
+    thr = compute_threshold(work, method=method, fixed_value=fixed_value)
+    mask = (work < thr) if pore_is_low else (work > thr)
     return mask, thr
 
 
@@ -213,6 +235,7 @@ def evaluate_petrophysical_metrics(
     pore_is_low: bool = True,
     voxel_size: float = 1.0,
     stack_axis: int = 0,
+    fringe_guard_alpha: float = 0.0,
 ) -> dict[str, float]:
     """Compute a comprehensive dictionary of porous-media XCT metrics.
 
@@ -241,18 +264,21 @@ def evaluate_petrophysical_metrics(
         method=threshold_method,
         fixed_value=fixed_threshold,
         pore_is_low=pore_is_low,
+        fringe_guard_alpha=fringe_guard_alpha,
     )
     pred_mask_locked, _ = segment_pore_space(
         pred_arr,
         method="fixed",
         fixed_value=hr_thr,
         pore_is_low=pore_is_low,
+        fringe_guard_alpha=fringe_guard_alpha,
     )
     pred_mask_auto, sr_thr = segment_pore_space(
         pred_arr,
         method=threshold_method,
         fixed_value=fixed_threshold,
         pore_is_low=pore_is_low,
+        fringe_guard_alpha=fringe_guard_alpha,
     )
 
     phi_true = compute_porosity(true_mask)
