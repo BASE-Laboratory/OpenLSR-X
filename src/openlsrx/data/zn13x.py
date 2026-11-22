@@ -17,6 +17,7 @@ import os
 import shutil
 import urllib.parse
 import urllib.request
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -144,7 +145,7 @@ def _download_https_file(url: str, dest: Path, timeout_s: float = 45.0) -> None:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme.lower() != "https":
         raise ValueError(f"Refusing non-HTTPS Zenodo download URL: {url!r}")
-    req = urllib.request.Request(url, headers={"User-Agent": "OpenLSR-X/0.2.1"})
+    req = urllib.request.Request(url, headers={"User-Agent": "OpenLSR-X/0.2.2"})
     with urllib.request.urlopen(req, timeout=timeout_s) as resp, dest.open("wb") as out_f:  # noqa: S310
         shutil.copyfileobj(resp, out_f)
 
@@ -590,11 +591,18 @@ def load_zn13x_certified_regions(
     certified_regions_path: str | Path | None = None,
 ) -> tuple[dict[str, Any], str, str]:
     """Load ``certified_regions.yaml`` or a ``MultimodalBenchmark`` ``SimilarityTransform3D`` JSON/YAML file."""
-    path = (
-        Path(certified_regions_path)
-        if certified_regions_path is not None
-        else DEFAULT_CERTIFIED_REGIONS_PATH
-    )
+    if certified_regions_path is None:
+        warnings.warn(
+            "Relying on the bundled 'zn13x_certified_regions.yaml' inside openlsrx is deprecated "
+            "under ECOSYSTEM.md and scheduled for removal in v0.3.0; pass an explicit "
+            "certified_regions_path (e.g. MultimodalBenchmark 'configs/i13_certified_regions.yaml' "
+            "via --certified-regions).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        path = DEFAULT_CERTIFIED_REGIONS_PATH
+    else:
+        path = Path(certified_regions_path)
     if not path.is_file():
         raise FileNotFoundError(f"Certified Zn-13X registration file not found: {path}")
     raw_bytes = path.read_bytes()
@@ -1132,7 +1140,7 @@ def prepare_zn13x_benchmark(
         if lr_vol is None and tier == "preview" and not prefer_offline:
             api_url = f"https://zenodo.org/api/records/{ZN13X_SUBVOLUMES_ZENODO_RECORD}"
             try:
-                req = urllib.request.Request(api_url, headers={"User-Agent": "OpenLSR-X/0.2.1"})
+                req = urllib.request.Request(api_url, headers={"User-Agent": "OpenLSR-X/0.2.2"})
                 with urllib.request.urlopen(req, timeout=timeout_s) as resp:  # noqa: S310
                     record_meta = json.loads(resp.read().decode("utf-8"))
                 files = {
