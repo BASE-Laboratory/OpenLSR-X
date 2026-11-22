@@ -8,6 +8,8 @@
 
 **OpenLSR-X** is a reproducible Python framework and benchmark suite for **physics- and topology-guided 2D/2.5D-to-3D Super-Resolution of X-Ray Computed Tomography (XCT)** porous-media scans using shifted-window Transformers (`SwinIR`), Residual-in-Residual Dense Blocks (`RRDB` / `RaGAN`), SRGAN, and **confidence-weighted 3-axis Fourier fusion**. Originally developed during the PhD research of **Calum Green** (Imperial College London & Diamond Light Source) and maintained by **BASE Laboratory**, OpenLSR-X bridges deep-learning super-resolution with quantitative **synchrotron beamline metrology, reactive multi-phase segmentation, and uncertainty-propagated 3D diffusive transport**.
 
+**Maintainer:** James Le Houx ([BASE Laboratory](https://github.com/BASE-Laboratory))
+
 ---
 
 ## Highlights

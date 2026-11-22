@@ -2,14 +2,15 @@
 # Generated directly via BASE-Laboratory/MultimodalBenchmark (registration.i13_ladder)
 # Companion to Green et al., Scientific Data 12, 329 (2025) - https://doi.org/10.1038/s41597-025-04605-9
 
-schema_version: 2.0.0
+schema_version: 2.1.0
 source_repository: https://github.com/BASE-Laboratory/MultimodalBenchmark
 source_module: registration.i13_ladder
 reference_paper_doi: 10.1038/s41597-025-04605-9
-provisional_status_note: 8-bit sub-volumes from Zenodo 14245751 use independent contrast windows and are intended
-  for registration preview and provisional super-resolution checks; quantitative T1 pore-scale transport benchmarking
-  requires the 32-bit float Savu reconstructions (Zenodo 12206815, 13327651, 13327682, 13327692) aligned with Stage
-  0B 7-DOF transforms.
+provisional_status_note: 8-bit sub-volumes from Zenodo 14245751 use independent contrast
+  windows and are intended for registration preview and provisional super-resolution
+  checks; quantitative T1 pore-scale transport benchmarking requires the 32-bit float
+  Savu reconstructions (Zenodo 12206815, 13327651, 13327682, 13327692) aligned with
+  Stage 0B 7-DOF transforms.
 calibrated_resolutions_500um_ruby_sphere:
   '169068':
     nominal_voxel_um: 2.6
@@ -43,7 +44,7 @@ zenodo_14245751_preview_8bit:
       nominal_lr_voxel_um: 2.6
       nominal_hr_voxel_um: 1.625
       nominal_scale_factor: 1.6
-      true_magnification_ratio: 1.602316
+      true_magnification_ratio: 1.6039
       coarse_ncc_peak: 0.97005
       coarse_center_in_lr_zyx_vox:
       - 160
@@ -53,15 +54,15 @@ zenodo_14245751_preview_8bit:
       tre_median_um: 16.871
       similarity_transform_hr_to_lr:
         matrix_3x3: &id001
-        - - 0.9985537647714985
-          - -0.001288829952549161
-          - 0.0006302413505609253
-        - - 0.0012885002574532477
-          - 0.9985538273876373
-          - 0.000522496628495416
-        - - -0.0006309151235211016
-          - -0.0005216828477708357
-          - 0.9985544598164152
+        - - 0.997569798018101
+          - -0.0006284689919347447
+          - 8.949218630618684e-05
+        - - 0.0006284277564931784
+          - 0.9975696964893568
+          - 0.0004589386531082978
+        - - -8.978129037993388e-05
+          - -0.0004588821838167546
+          - 0.9975698904169378
         translation_xyz_um:
         - 491.69947747211955
         - 492.29136000558407
@@ -70,19 +71,19 @@ zenodo_14245751_preview_8bit:
         - 811.6875
         - 811.6875
         - 405.4375
-        scale: 0.998554795404909
+        scale: 0.99757
         versor_xyzw: &id002
-        - -0.000261422754710848
-        - 0.00031574552753599214
-        - 0.000645265281125402
-        - 0.9999997077977684
+        - -0.00023001416132780274
+        - 4.492754656391034e-05
+        - 0.00031498963614060845
+        - 0.9999999229282622
     169067_from_169066:
       lr_scan_id: '169067'
       hr_scan_id: '169066'
       nominal_lr_voxel_um: 1.625
       nominal_hr_voxel_um: 0.8125
       nominal_scale_factor: 2.0
-      true_magnification_ratio: 2.027576
+      true_magnification_ratio: 2.0258
       coarse_ncc_peak: 0.90513
       coarse_center_in_lr_zyx_vox:
       - 164
@@ -98,15 +99,15 @@ zenodo_14245751_preview_8bit:
         pearson_r_7dof_edge: 0.53838
       similarity_transform_hr_to_lr:
         matrix_3x3: &id003
-        - - 0.9863989572949734
-          - 0.0006267574171053501
-          - -0.000934725611399459
-        - - -0.0006257196646070804
-          - 0.9863987930420235
-          - 0.0010950112236000995
-        - - 0.0009354206165285567
-          - -0.0010944175704865188
-          - 0.986398548624181
+        - - 0.987269359232596
+          - 0.0006219796687501651
+          - -0.0009372095555897956
+        - - -0.0006209293234936208
+          - 0.9872691848607186
+          - 0.0011063323313926282
+        - - 0.0009379057706684302
+          - -0.0011057421688261365
+          - 0.9872689352790461
         translation_xyz_um:
         - 449.4248575103291
         - 370.44522636009503
@@ -115,19 +116,19 @@ zenodo_14245751_preview_8bit:
         - 405.84375
         - 405.84375
         - 202.71875
-        scale: 0.986399599295052
+        scale: 0.98727
         versor_xyzw: &id004
-        - -0.0005549042925867123
-        - -0.0004739830646445076
-        - -0.00031743663501906526
-        - 0.9999996833275815
+        - -0.0005601495047411143
+        - -0.00047482348412413036
+        - -0.00031473390989986166
+        - 0.9999996808588277
     169066_from_169065:
       lr_scan_id: '169066'
       hr_scan_id: '169065'
       nominal_lr_voxel_um: 0.8125
       nominal_hr_voxel_um: 0.325
       nominal_scale_factor: 2.5
-      true_magnification_ratio: 2.492425
+      true_magnification_ratio: 2.4934
       coarse_ncc_peak: 0.39089
       coarse_center_in_lr_zyx_vox:
       - 100
@@ -138,15 +139,15 @@ zenodo_14245751_preview_8bit:
       local_tomography_valid_radius_fraction: 0.82
       similarity_transform_hr_to_lr:
         matrix_3x3: &id005
-        - - 1.003039025286486
-          - 0.0005738549513379801
-          - -0.00024312264044096954
-        - - -0.000573875180281421
-          - 1.0030390512727492
-          - -8.339621241792677e-05
-        - - 0.00024307488748752097
-          - 8.353529561552976e-05
-          - 1.003039185975424
+        - - 1.0026498082322237
+          - 0.0005715104672238734
+          - -0.00024068167943473636
+        - - -0.0005715297034698729
+          - 1.0026498339110326
+          - -8.00748220626404e-05
+        - - 0.00024063599691985922
+          - 8.021199991444053e-05
+          - 1.0026499679152003
         translation_xyz_um:
         - 449.52938280537774
         - 205.21163715014322
@@ -155,12 +156,12 @@ zenodo_14245751_preview_8bit:
         - 162.3375
         - 162.3375
         - 81.0875
-        scale: 1.0030392189071111
+        scale: 1.00265
         versor_xyzw: &id006
-        - 4.160642801576873e-05
-        - -0.00012118109208686445
-        - -0.00028606313850097553
-        - 0.9999999508759633
+        - 3.996579807740578e-05
+        - -0.0001200113947422606
+        - -0.00028500479386160476
+        - 0.9999999513861326
   pairs:
     2x:
       lr_scan_id: '169067'
@@ -213,7 +214,8 @@ full_savu_32bit:
   - 1
   - 2
   - 0
-  note: Override with SCARF/Hamilton full-cube SimilarityTransform3D JSON/YAML via --certified-regions when available.
+  note: Override with SCARF/Hamilton full-cube SimilarityTransform3D JSON/YAML via
+    --certified-regions when available.
   adjacent_rungs:
     169068_from_169067:
       lr_scan_id: '169068'
@@ -230,7 +232,7 @@ full_savu_32bit:
         - 1914.25
         - 2161.25
         - 1452.75
-        scale: 0.998554795404909
+        scale: 0.99757
         versor_xyzw: *id002
     169067_from_169066:
       lr_scan_id: '169067'
@@ -247,7 +249,7 @@ full_savu_32bit:
         - 898.625
         - 1139.9375
         - 653.25
-        scale: 0.986399599295052
+        scale: 0.98727
         versor_xyzw: *id004
     169066_from_169065:
       lr_scan_id: '169066'
@@ -264,7 +266,7 @@ full_savu_32bit:
         - 406.25
         - 406.25
         - 165.425
-        scale: 1.0030392189071111
+        scale: 1.00265
         versor_xyzw: *id006
   pairs:
     2x:

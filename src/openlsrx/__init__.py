@@ -73,7 +73,7 @@ from .models import (
     super_resolve_volume_3d,
 )
 
-__version__ = "0.2.1"
+__version__ = "0.2.2"
 
 __all__ = [
     "ArbitraryScaleUpsample",

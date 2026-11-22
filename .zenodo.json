@@ -3,7 +3,7 @@
   "description": "Open-source PyTorch and PyTorch Lightning framework for 2D/2.5D-to-3D super-resolution (SwinIR, RRDB/RaGAN, SRGAN, SR3DResNet, and cell-centered 3-Axis Orthogonal Fourier Fusion) and quantitative petrophysical and diffusive transport validation of porous-media and synchrotron X-ray computed tomography (XCT) volumes.",
   "upload_type": "software",
   "license": "BSD-3-Clause",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "creators": [
     {
       "name": "Green, Calum",

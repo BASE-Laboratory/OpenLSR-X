@@ -904,7 +904,7 @@ def test_zn13x_7dof_similarity_resampling_chained_8x_and_certified_regions_cli(
         "169067_from_169066",
         "169068_from_169067",
     ]
-    assert tx_8x_prev.scale == pytest.approx(0.987968, abs=1e-5)
+    assert tx_8x_prev.scale == pytest.approx(0.987481, abs=1e-5)
 
     rungs_raw = cert_doc["zenodo_14245751_preview_8bit"]["adjacent_rungs"]
     seq_specs = [
